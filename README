@@ -8,7 +8,7 @@ plv8 is shared library that provides a PostgreSQL procedual language powered by 
 * REQUIREMENT
 plv8 requires:
 PG: version 8.4.x (maybe older are allowed)
-V8: version 1.2
+V8: version 2.3.8
 g++ and all tools that PG and V8 requires to be built.
 
 
@@ -29,7 +29,7 @@ CREATE FUNCTION plv8_call_validator(Oid) RETURNS void AS '$libdir/plv8' LANGUAGE
 CREATE LANGUAGE plv8 HANDLER plv8_call_handler VALIDATOR plv8_call_validator;
 
 -- create js function
-CREATE OR REPLACE FUNCTION plv8_test(keys text[], vals text[]) RETURNS text AS $$
+CREATE FUNCTION plv8_test(keys text[], vals text[]) RETURNS text AS $$
 var o = {};
 for(var i=0; i<keys.length; i++){
  o[keys[i]] = vals[i];
@@ -42,8 +42,7 @@ SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
 
 * CAVEATS
 - This is WIP version.
-- Tested on only CentOS 5 (x86), PostgreSQL 8.4 (8.5devel) and v8 1.2.
+- Tested on only CentOS 5 (x86), PostgreSQL 8.4 (9.0devel) and v8 2.3.8.
 - There's no interface to call SPI.
-- You must specify argument names in function declarations.
 - 1-dim array can be put as arguments. Multi dimension array is not supported.
 - And many, many bugs...

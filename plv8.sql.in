@@ -1,0 +1,10 @@
+-- adjust this setting to control where the objects get created.
+SET search_path = public;
+
+BEGIN;
+
+CREATE FUNCTION plv8_call_handler() RETURNS language_handler AS 'MODULE_PATHNAME' LANGUAGE C;
+CREATE FUNCTION plv8_call_validator(oid) RETURNS void AS 'MODULE_PATHNAME' LANGUAGE C;
+CREATE LANGUAGE plv8 HANDLER plv8_call_handler VALIDATOR plv8_call_validator;
+
+COMMIT;

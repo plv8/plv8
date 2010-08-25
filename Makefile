@@ -24,7 +24,23 @@ include $(top_builddir)/src/Makefile.global
 include $(top_srcdir)/contrib/contrib-global.mk
 endif
 
+ifndef MAJORVERSION
+MAJORVERSION := $(basename $(VERSION))
+endif
+
+ifeq ($(basename $(MAJORVERSION)), 9)
+REGRESS += inline
+endif
+
 # remove dependency to libxml2 and libxslt
 LIBS := $(filter-out -lxml2, $(LIBS))
 LIBS := $(filter-out -lxslt, $(LIBS))
 
+plv8.sql.in: plv8.sql.pl
+	perl plv8.sql.pl $(MAJORVERSION) > plv8.sql.in
+
+.PHONY: subclean
+clean: subclean
+
+subclean:
+	rm -f plv8.sql.in

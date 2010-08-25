@@ -6,6 +6,12 @@
 #include <sstream>
 
 extern "C" {
+#define delete		delete_
+#define namespace	namespace_
+#define	typeid		typeid_
+#define	typename	typename_
+#define	using		using_
+
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/trigger.h"
@@ -16,6 +22,12 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 
+#undef delete
+#undef namespace
+#undef typeid
+#undef typename
+#undef using
+
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(plv8_call_handler);
@@ -23,6 +35,11 @@ PG_FUNCTION_INFO_V1(plv8_call_validator);
 
 Datum	plv8_call_handler(PG_FUNCTION_ARGS) throw();
 Datum	plv8_call_validator(PG_FUNCTION_ARGS) throw();
+
+#if PG_VERSION_NUM >= 90000
+PG_FUNCTION_INFO_V1(plv8_inline_handler);
+Datum	plv8_inline_handler(PG_FUNCTION_ARGS) throw();
+#endif
 } // extern "C"
 
 using namespace v8;
@@ -57,12 +74,11 @@ static void plv8_fill_type(plv8_type *type, Oid typid) throw();
  * They could raise errors with C++ throw statements, or never throw exceptions.
  */
 static plv8_proc *Compile(Oid fn_oid, bool validate, bool is_trigger);
-static Persistent<Function> CreateFunction(const char *proname, int proarglen,
+static Handle<Function> CreateFunction(const char *proname, int proarglen,
 					const char *proargs[], const char *prosrc, bool is_trigger);
-static Datum CallFunction(PG_FUNCTION_ARGS, plv8_proc *proc,
-					Handle<Context> global_context);
-static Datum CallTrigger(PG_FUNCTION_ARGS, plv8_proc *proc,
-					Handle<Context> global_context);
+static Datum CallFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
+				int nargs, plv8_type argtypes[], plv8_type *rettype);
+static Datum CallTrigger(PG_FUNCTION_ARGS, Handle<Function> fn);
 static Handle<v8::Value> Print(const Arguments& args) throw();
 static Handle<v8::Value> PrintInternal(const Arguments& args);
 static Handle<v8::Value> ExecuteSql(const Arguments& args) throw();
@@ -73,23 +89,23 @@ static Handle<Context> GetGlobalContext() throw();
 Datum
 plv8_call_handler(PG_FUNCTION_ARGS) throw()
 {
-	Oid			    fn_oid = fcinfo->flinfo->fn_oid;
-	Handle<Context>	global_context = GetGlobalContext();
-	bool			is_trigger = CALLED_AS_TRIGGER(fcinfo);
+	Oid		fn_oid = fcinfo->flinfo->fn_oid;
+	bool	is_trigger = CALLED_AS_TRIGGER(fcinfo);
 
 	try
 	{
+		HandleScope	handle_scope;
+
 		if (!fcinfo->flinfo->fn_extra)
 			fcinfo->flinfo->fn_extra = Compile(fn_oid, false, is_trigger);
 
-		HandleScope			handle_scope;
-		Context::Scope		context_scope(global_context);
-		plv8_proc		   *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
+		plv8_proc   *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
 
 		if (is_trigger)
-			return CallTrigger(fcinfo, proc, global_context);
+			return CallTrigger(fcinfo, proc->function);
 		else
-			return CallFunction(fcinfo, proc, global_context);
+			return CallFunction(fcinfo, proc->function,
+						proc->nargs, proc->argtypes, &proc->rettype);
 	}
 	catch (js_error& e)	{ e.rethrow(); }
 	catch (pg_error& e)	{ e.rethrow(); }
@@ -97,25 +113,53 @@ plv8_call_handler(PG_FUNCTION_ARGS) throw()
 	return (Datum) 0;	// keep compiler quiet
 }
 
-static Datum
-CallFunction(PG_FUNCTION_ARGS, plv8_proc *proc, Handle<Context> global_context)
+#if PG_VERSION_NUM >= 90000
+Datum
+plv8_inline_handler(PG_FUNCTION_ARGS) throw()
 {
+	InlineCodeBlock *codeblock = (InlineCodeBlock *) DatumGetPointer(PG_GETARG_DATUM(0));
+
+	Assert(IsA(codeblock, InlineCodeBlock));
+
+	try
+	{
+		HandleScope			handle_scope;
+
+		Handle<Function>	fn = CreateFunction(NULL, 0, NULL,
+										codeblock->source_text, false);
+		return CallFunction(fcinfo, fn, 0, NULL, NULL);
+	}
+	catch (js_error& e)	{ e.rethrow(); }
+	catch (pg_error& e)	{ e.rethrow(); }
+
+	return (Datum) 0;	// keep compiler quiet
+}
+#endif
+
+static Datum
+CallFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
+	int nargs, plv8_type argtypes[], plv8_type *rettype)
+{
+	Handle<Context>		global_context = GetGlobalContext();
+	Context::Scope		context_scope(global_context);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS];
-	plv8_type		   *rettype = &proc->rettype;
 
-	TryCatch try_catch;
+	TryCatch			try_catch;
 
-	for (int i = 0; i < proc->nargs; i++)
-		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &proc->argtypes[i]);
+	for (int i = 0; i < nargs; i++)
+		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
 	Handle<v8::Value> result =
-		proc->function->Call(global_context->Global(), proc->nargs, args);
+		fn->Call(global_context->Global(), nargs, args);
 	if (result.IsEmpty())
 		throw js_error(try_catch);
-	return ToDatum(result, &fcinfo->isnull, rettype);
+	if (rettype)
+		return ToDatum(result, &fcinfo->isnull, rettype);
+	else
+		PG_RETURN_VOID();
 }
 
 static Datum
-CallTrigger(PG_FUNCTION_ARGS, plv8_proc *proc, Handle<Context> global_context)
+CallTrigger(PG_FUNCTION_ARGS, Handle<Function> fn)
 {
 	// trigger arguments are:
 	//	0: NEW
@@ -134,7 +178,9 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_proc *proc, Handle<Context> global_context)
 	Handle<v8::Value>	args[10];
 	Datum				result = (Datum) 0;
 
-	TryCatch try_catch;
+	Handle<Context>		global_context = GetGlobalContext();
+	Context::Scope		context_scope(global_context);
+	TryCatch			try_catch;
 
 	if (TRIGGER_FIRED_FOR_ROW(event))
 	{
@@ -195,8 +241,10 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_proc *proc, Handle<Context> global_context)
 		args[5] = String::New("DELETE");
 	else if (TRIGGER_FIRED_BY_UPDATE(event))
 		args[5] = String::New("UPDATE");
+#ifdef TRIGGER_FIRED_BY_TRUNCATE
 	else if (TRIGGER_FIRED_BY_TRUNCATE(event))
 		args[5] = String::New("TRUNCATE");
+#endif
 	else
 		args[5] = String::New("?");
 
@@ -216,7 +264,7 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_proc *proc, Handle<Context> global_context)
 	args[9] = tgargs;
 
 	Handle<v8::Value> newtup =
-		proc->function->Call(global_context->Global(), lengthof(args), args);
+		fn->Call(global_context->Global(), lengthof(args), args);
 	if (newtup.IsEmpty())
 		throw js_error(try_catch);
 
@@ -408,17 +456,17 @@ Compile(Oid fn_oid, bool validate, bool is_trigger)
 	PG_END_TRY();
 
 	if (proc->function.IsEmpty())
-		proc->function = CreateFunction(
+		proc->function = Persistent<Function>::New(CreateFunction(
 						proc->proname,
 						proc->nargs,
 						(const char **) argnames,
 						proc->prosrc,
-						is_trigger);
+						is_trigger));
 
 	return proc;
 }
 
-static Persistent<Function>
+static Handle<Function>
 CreateFunction(
 	const char *proname,
 	int proarglen,
@@ -462,7 +510,11 @@ CreateFunction(
 	}
 	appendStringInfo(&src, "){\n%s\n};\n_", prosrc);
 
-	Handle<v8::Value> name = ToString(proname);
+	Handle<v8::Value> name;
+	if (proname)
+		name = ToString(proname);
+	else
+		name = Undefined();
 	Handle<String> source = ToString(src.data, src.len);
 	pfree(src.data);
 
@@ -481,7 +533,7 @@ CreateFunction(
 	if (fn.IsEmpty())
 		throw js_error(try_catch);
 
-	return Persistent<Function>::New(fn);
+	return fn;
 }
 
 static void

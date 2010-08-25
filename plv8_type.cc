@@ -4,6 +4,12 @@
 #include "plv8.h"
 
 extern "C" {
+#define delete		delete_
+#define namespace	namespace_
+#define	typeid		typeid_
+#define	typename	typename_
+#define	using		using_
+
 #include "catalog/pg_type.h"
 #include "utils/array.h"
 #include "utils/date.h"
@@ -11,6 +17,12 @@ extern "C" {
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
+
+#undef delete
+#undef namespace
+#undef typeid
+#undef typename
+#undef using
 } // extern "C"
 
 //#define CHECK_INTEGER_OVERFLOW

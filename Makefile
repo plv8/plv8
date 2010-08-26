@@ -1,6 +1,6 @@
 V8DIR = ../v8
 
-SRCS = plv8.cc plv8_type.cc
+SRCS = plv8.cc plv8_type.cc plv8_func.cc
 OBJS = $(SRCS:.cc=.o)
 DATA_built = plv8.sql
 DATA = uninstall_plv8.sql

@@ -3,7 +3,6 @@
  */
 #include "plv8.h"
 #include <new>
-#include <sstream>
 
 extern "C" {
 #define delete		delete_
@@ -15,7 +14,6 @@ extern "C" {
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/trigger.h"
-#include "executor/spi.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
@@ -84,26 +82,8 @@ static Datum CallFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 static Datum CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 		int nargs, plv8_type argtypes[], plv8_type *rettype);
 static Datum CallTrigger(PG_FUNCTION_ARGS, Handle<Function> fn);
-static Handle<v8::Value> Print(const Arguments& args) throw();
-static Handle<v8::Value> PrintInternal(const Arguments& args);
-static Handle<v8::Value> ExecuteSql(const Arguments& args) throw();
-static Handle<v8::Value> ExecuteSqlInternal(const Arguments& args);
-static Handle<v8::Value> ExecuteSqlWithArgs(const Arguments& args);
-static Handle<v8::Value> Yield(const Arguments& args) throw();
-static Handle<v8::Value> YieldInternal(const Arguments& args);
 static Handle<Context> GetGlobalContext() throw();
 
-
-struct YieldState
-{
-	Converter			conv;
-	Tuplestorestate	   *tupstore;
-
-	YieldState(TupleDesc tupdesc, Tuplestorestate *store) :
-		conv(tupdesc), tupstore(store)
-	{
-	}
-};
 
 Datum
 plv8_call_handler(PG_FUNCTION_ARGS) throw()
@@ -237,9 +217,9 @@ CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 
 	tupstore = CreateTupleStore(fcinfo, &tupdesc);
 
-	YieldState			state(tupdesc, tupstore);
 	Handle<Context>		global_context = GetGlobalContext();
 	Context::Scope		context_scope(global_context);
+	Converter			conv(tupdesc);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS + 1];
 
 	TryCatch			try_catch;
@@ -249,7 +229,7 @@ CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 
 	// Add "yield" function as a hidden argument.
 	// TODO: yield should be passed as a global variable.
-	args[nargs] = FunctionTemplate::New(Yield, External::Wrap(&state))->GetFunction();
+	args[nargs] = CreateYieldFunction(&conv, tupstore);
 
 	Handle<v8::Value> result =
 		fn->Call(global_context->Global(), nargs + 1, args);
@@ -258,20 +238,20 @@ CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 
 	if (result->IsUndefined())
 	{
-		// no additinal return values
+		// no additinal values
 	}
 	else if (result->IsArray())
 	{
 		Handle<Array> array = Handle<Array>::Cast(result);
-		// return an array of recoreds.
+		// return an array of records.
 		int	length = array->Length();
 		for (int i = 0; i < length; i++)
-			state.conv.ToDatum(array->Get(i), tupstore);
+			conv.ToDatum(array->Get(i), tupstore);
 	}
 	else if (result->IsObject())
 	{
 		// return a record
-		state.conv.ToDatum(result, tupstore);
+		conv.ToDatum(result, tupstore);
 	}
 	else
 	{
@@ -312,8 +292,6 @@ CallTrigger(PG_FUNCTION_ARGS, Handle<Function> fn)
 	{
 		TupleDesc		tupdesc = RelationGetDescr(rel);
 		Converter		conv(tupdesc);
-
-		// TODO: cache Converter into fn_extra.
 
 		if (TRIGGER_FIRED_BY_INSERT(event))
 		{
@@ -694,256 +672,6 @@ plv8_fill_type(plv8_type *type, Oid typid) throw()
 	}
 }
 
-/*
- * v8 is not exception-safe! We cannot throw C++ exceptions over v8 functions.
- * So, we catch C++ exceptions and convert them to JavaScript ones.
- */
-static Handle<v8::Value>
-SafeCall(InvocationCallback fn, const Arguments& args) throw()
-{
-	HandleScope		handle_scope;
-	MemoryContext	ctx = CurrentMemoryContext;
-
-	try
-	{
-		return fn(args);
-	}
-	catch (js_error& e)
-	{
-		return ThrowException(String::New("internal exception"));
-	}
-	catch (pg_error& e)
-	{
-		MemoryContextSwitchTo(ctx);
-		ErrorData *edata = CopyErrorData();
-		Handle<String> message = ToString(edata->message);
-		// XXX: add other fields? (detail, hint, context, internalquery...)
-		FlushErrorState();
-		FreeErrorData(edata);
-
-		return ThrowException(message);
-	}
-}
-
-static Handle<v8::Value>
-Print(const Arguments& args) throw()
-{
-	return SafeCall(PrintInternal, args);
-}
-
-static Handle<v8::Value>
-PrintInternal(const Arguments& args)
-{
-	if (args.Length() < 2)
-		return ThrowException(String::New("usage: print(elevel, ...)"));
-
-	int	elevel = args[0]->Int32Value();
-	switch (elevel)
-	{
-	case DEBUG5:
-	case DEBUG4:
-	case DEBUG3:
-	case DEBUG2:
-	case DEBUG1:
-	case LOG:
-	case INFO:
-	case NOTICE:
-	case WARNING:
-		break;
-	default:
-		return ThrowException(String::New("invalid error level for print()"));
-	}
-
-	if (args.Length() == 2)
-	{
-		// fast path for single argument
-		elog(elevel, "%s", CString(args[1]).str(""));
-	}
-	else
-	{
-		std::ostringstream	stream;
-
-		for (int i = 1; i < args.Length(); i++)
-		{
-			if (i > 1)
-				stream << ' ';
-			stream << CString(args[i]);
-		}
-		elog(elevel, "%s", stream.str().c_str());
-	}
-
-	return Undefined();
-}
-
-static Handle<v8::Value>
-ExecuteSql(const Arguments& args) throw()
-{
-	if (args.Length() != 1 && (args.Length() != 2 || !args[1]->IsArray()))
-		return ThrowException(String::New("usage: executeSql(sql [, args])"));
-
-	Handle<v8::Value>	result;
-
-	SPI_connect();
-	if (args.Length() == 1)
-		result = SafeCall(ExecuteSqlInternal, args);
-	else
-		result = SafeCall(ExecuteSqlWithArgs, args);
-	SPI_finish();
-	return result;
-}
-
-static Handle<v8::Value>
-SPIResultToValue(int status)
-{
-	Handle<v8::Value>	result;
-
-	if (status < 0)
-		return ThrowException(String::New("SPI failed"));
-
-	switch (status)
-	{
-	case SPI_OK_SELECT:
-	case SPI_OK_INSERT_RETURNING:
-	case SPI_OK_DELETE_RETURNING:
-	case SPI_OK_UPDATE_RETURNING:
-	{
-		int				nrows = SPI_processed;
-		Converter		conv(SPI_tuptable->tupdesc);
-		Handle<Array>	rows = Array::New(nrows);
-
-		for (uint32 r = 0; r < nrows; r++)
-			rows->Set(r, conv.ToValue(SPI_tuptable->vals[r]));
-
-		result = rows;
-		break;
-	}
-	default:
-		result = Int32::New(SPI_processed);
-		break;
-	}
-
-	return result;
-}
-
-/*
- * executeSql(string sql) returns array<json> for query, or integer for command.
- */
-static Handle<v8::Value>
-ExecuteSqlInternal(const Arguments& args)
-{
-	SPI_connect();
-
-	int			status;
-	CString		sql(args[0]);
-
-	PG_TRY();
-	{
-		status = SPI_exec(sql, 0);
-	}
-	PG_CATCH();
-	{
-		throw pg_error();
-	}
-	PG_END_TRY();
-
-	return SPIResultToValue(status);
-}
-
-static Handle<v8::Value>
-ExecuteSqlWithArgs(const Arguments& args)
-{
-	int				status;
-	CString			sql(args[0]);
-	Handle<Array>	array = Handle<Array>::Cast(args[1]);
-
-	int		nargs = array->Length();
-	Datum  *values = (Datum *) palloc(sizeof(Datum) * nargs);
-	char   *nulls = (char *) palloc(sizeof(char) * nargs);
-	Oid	   *argtypes = (Oid *) palloc(sizeof(Oid) * nargs);
-
-	memset(nulls, ' ', sizeof(char) * nargs);
-	for (int i = 0; i < nargs; i++)
-	{
-		Handle<v8::Value>	value = array->Get(i);
-
-		if (value->IsNull() || value->IsUndefined())
-		{
-			nulls[i] = 'n';
-			argtypes[i] = TEXTOID;
-		}
-		else if (value->IsBoolean())
-		{
-			values[i] = BoolGetDatum(value->ToBoolean()->Value());
-			argtypes[i] = BOOLOID;
-		}
-		else if (value->IsInt32())
-		{
-			values[i] = Int32GetDatum(value->ToInt32()->Value());
-			argtypes[i] = INT4OID;
-		}
-		else if (value->IsUint32())
-		{
-			values[i] = Int64GetDatum(value->ToUint32()->Value());
-			argtypes[i] = INT8OID;
-		}
-		else if (value->IsNumber())
-		{
-			values[i] = Float8GetDatum(value->ToNumber()->Value());
-			argtypes[i] = FLOAT8OID;
-		}
-		else if (value->IsDate())
-		{
-			// TODO: Date
-			return ThrowException(String::New("Date is not supported as arguments for executeSql()"));
-		}
-		else if (value->IsObject())
-		{
-			// TODO: Object
-			return ThrowException(String::New("Object is not supported as arguments for executeSql()"));
-		}
-		else if (value->IsArray())
-		{
-			// TODO: Array
-			return ThrowException(String::New("Array is not supported as arguments for executeSql()"));
-		}
-		else
-		{
-			CString str(value);
-			values[i] = CStringGetTextDatum(str);
-			argtypes[i] = TEXTOID;
-		}
-	}
-
-	PG_TRY();
-	{
-		status = SPI_execute_with_args(sql, nargs,
-					argtypes, values, nulls, false, 0);
-	}
-	PG_CATCH();
-	{
-		throw pg_error();
-	}
-	PG_END_TRY();
-
-	return SPIResultToValue(status);
-}
-
-static Handle<v8::Value>
-Yield(const Arguments& args) throw()
-{
-	return SafeCall(YieldInternal, args);
-}
-
-static Handle<v8::Value>
-YieldInternal(const Arguments& args)
-{
-	YieldState* state =
-		static_cast<YieldState *>(External::Unwrap(args.Data()));
-
-	state->conv.ToDatum(args[0], state->tupstore);
-	return Undefined();
-}
-
 static Handle<Context>
 GetGlobalContext() throw()
 {
@@ -986,7 +714,7 @@ Converter::Converter(TupleDesc tupdesc) :
 {
 	for (int c = 0; c < tupdesc->natts; c++)
 	{
-		m_colnames[c] = ToString(SPI_fname(m_tupdesc, c + 1));
+		m_colnames[c] = ToString(NameStr(tupdesc->attrs[c]->attname));
 		PG_TRY();
 		{
 			plv8_fill_type(&m_coltypes[c], m_tupdesc->attrs[c]->atttypid);
@@ -1011,7 +739,7 @@ Converter::ToValue(HeapTuple tuple)
 		Datum		datum;
 		bool		isnull;
 
-		datum = SPI_getbinval(tuple, m_tupdesc, c + 1, &isnull);
+		datum = heap_getattr(tuple, c + 1, m_tupdesc, &isnull);
 		obj->Set(m_colnames[c], ::ToValue(datum, isnull, &m_coltypes[c]));
 	}
 

@@ -103,11 +103,18 @@ private:
 	Converter& operator = (const Converter&);
 };
 
+// plv8_type.cc
 extern Datum ToDatum(v8::Handle<v8::Value> value, bool *isnull, plv8_type *type);
 extern v8::Handle<v8::Value> ToValue(Datum datum, bool isnull, plv8_type *type);
 extern v8::Handle<v8::String> ToString(Datum value, plv8_type *type);
 extern v8::Handle<v8::String> ToString(const char *str, int len = -1, int encoding = GetDatabaseEncoding());
 extern char *ToCString(const v8::String::Utf8Value &value);
 extern char *ToCStringCopy(const v8::String::Utf8Value &value);
+
+// plv8_func.cc
+extern v8::Handle<v8::Value> Print(const v8::Arguments& args) throw();
+extern v8::Handle<v8::Value> ExecuteSql(const v8::Arguments& args) throw();
+extern v8::Handle<v8::Value> Yield(const v8::Arguments& args) throw();
+extern v8::Handle<v8::Function> CreateYieldFunction(Converter *conv, Tuplestorestate *tupstore);
 
 #endif	// _PLV8_

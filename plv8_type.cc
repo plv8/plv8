@@ -182,13 +182,33 @@ ToArrayDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 static Datum
 ToRecordDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 {
+	Datum		result;
+	TupleDesc	tupdesc;
+
 	if (value->IsUndefined() || value->IsNull())
 	{
 		*isnull = true;
 		return (Datum) 0;
 	}
 
-	throw js_error("JSON to record is not implemented yet");
+	PG_TRY();
+	{
+		tupdesc = lookup_rowtype_tupdesc(type->typid, -1);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	Converter	conv(tupdesc);
+
+	result = conv.ToDatum(value);
+
+	ReleaseTupleDesc(tupdesc);
+
+	*isnull = false;
+	return result;
 }
 
 Handle<v8::Value>

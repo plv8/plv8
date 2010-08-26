@@ -92,6 +92,7 @@ private:
 public:
 	Converter(TupleDesc tupdesc);
 	v8::Handle<v8::Object> ToValue(HeapTuple tuple);
+	Datum ToDatum(v8::Handle<v8::Value> value);
 
 private:
 	Converter(const Converter&);

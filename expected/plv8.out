@@ -176,7 +176,11 @@ $$
 $$
 LANGUAGE plv8;
 SELECT scalar_to_record(1, 'a');
-ERROR:  JSON to record is not implemented yet
+ scalar_to_record 
+------------------
+ (1,a)
+(1 row)
+
 CREATE FUNCTION record_to_text(x rec) RETURNS text AS
 $$
 	return JSON.stringify(x);

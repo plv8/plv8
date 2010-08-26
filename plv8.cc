@@ -752,7 +752,8 @@ Converter::Converter(TupleDesc tupdesc) :
 
 // TODO: use prototype instead of per tuple fields to reduce
 // memory consumption.
-Handle<Object> Converter::ToValue(HeapTuple tuple)
+Handle<Object>
+Converter::ToValue(HeapTuple tuple)
 {
 	Handle<Object>	obj = Object::New();
 
@@ -766,6 +767,36 @@ Handle<Object> Converter::ToValue(HeapTuple tuple)
 	}
 
 	return obj;
+}
+
+Datum
+Converter::ToDatum(Handle<v8::Value> value)
+{
+	TryCatch		try_catch;
+
+	Handle<Object>	obj = Handle<Object>::Cast(value);
+	if (obj.IsEmpty())
+		throw js_error(try_catch);
+
+	/*
+	 * Use vector<char> instead of vector<bool> because <bool> version is
+	 * s specialized and different from bool[].
+	 */
+	std::vector<Datum>	values(m_tupdesc->natts);
+	std::vector<char>	nulls(m_tupdesc->natts);
+
+	for (int c = 0; c < m_tupdesc->natts; c++)
+	{
+		Handle<v8::Value> attr = obj->Get(m_colnames[c]);
+		if (attr.IsEmpty() || attr->IsUndefined() || attr->IsNull())
+			nulls[c] = true;
+		else
+			values[c] = ::ToDatum(attr, (bool *) &nulls[c], &m_coltypes[c]);
+	}
+
+	HeapTuple tuple = heap_form_tuple(m_tupdesc, &values[0], (bool *) &nulls[0]);
+
+	return HeapTupleGetDatum(tuple);
 }
 
 js_error::js_error() throw()

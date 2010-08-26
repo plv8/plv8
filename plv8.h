@@ -1,3 +1,6 @@
+#ifndef _PLV8_
+#define _PLV8_
+
 #include <v8.h>
 #include <vector>
 
@@ -106,3 +109,5 @@ extern v8::Handle<v8::String> ToString(Datum value, plv8_type *type);
 extern v8::Handle<v8::String> ToString(const char *str, int len = -1, int encoding = GetDatabaseEncoding());
 extern char *ToCString(const v8::String::Utf8Value &value);
 extern char *ToCStringCopy(const v8::String::Utf8Value &value);
+
+#endif	// _PLV8_

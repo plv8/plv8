@@ -139,6 +139,16 @@ LANGUAGE plv8;
 SELECT test_sql();
 SELECT * FROM test_tbl;
 
+CREATE FUNCTION return_sql() RETURNS SETOF test_tbl AS
+$$
+	return executeSql(
+		"SELECT i, $1 || i AS s FROM generate_series(1, $2) AS t(i)",
+		[ 's', 4 ]
+	);
+$$
+LANGUAGE plv8;
+SELECT * FROM return_sql();
+
 CREATE FUNCTION test_sql_error() RETURNS void AS $$ executeSql("ERROR") $$ LANGUAGE plv8;
 SELECT test_sql_error();
 

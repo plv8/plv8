@@ -261,6 +261,23 @@ SELECT * FROM test_tbl;
  4 | s4
 (4 rows)
 
+CREATE FUNCTION return_sql() RETURNS SETOF test_tbl AS
+$$
+	return executeSql(
+		"SELECT i, $1 || i AS s FROM generate_series(1, $2) AS t(i)",
+		[ 's', 4 ]
+	);
+$$
+LANGUAGE plv8;
+SELECT * FROM return_sql();
+ i | s  
+---+----
+ 1 | s1
+ 2 | s2
+ 3 | s3
+ 4 | s4
+(4 rows)
+
 CREATE FUNCTION test_sql_error() RETURNS void AS $$ executeSql("ERROR") $$ LANGUAGE plv8;
 SELECT test_sql_error();
 ERROR:  syntax error at or near "ERROR"

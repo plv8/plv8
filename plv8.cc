@@ -88,9 +88,11 @@ static Handle<v8::Value> Print(const Arguments& args) throw();
 static Handle<v8::Value> PrintInternal(const Arguments& args);
 static Handle<v8::Value> ExecuteSql(const Arguments& args) throw();
 static Handle<v8::Value> ExecuteSqlInternal(const Arguments& args);
+static Handle<v8::Value> ExecuteSqlWithArgs(const Arguments& args);
 static Handle<v8::Value> Yield(const Arguments& args) throw();
 static Handle<v8::Value> YieldInternal(const Arguments& args);
 static Handle<Context> GetGlobalContext() throw();
+
 
 struct YieldState
 {
@@ -102,7 +104,6 @@ struct YieldState
 	{
 	}
 };
-
 
 Datum
 plv8_call_handler(PG_FUNCTION_ARGS) throw()
@@ -124,6 +125,7 @@ plv8_call_handler(PG_FUNCTION_ARGS) throw()
 		else if (proc->retset)
 			return CallSRFunction(fcinfo, proc->function,
 						proc->nargs, proc->argtypes, &proc->rettype);
+		else
 			return CallFunction(fcinfo, proc->function,
 						proc->nargs, proc->argtypes, &proc->rettype);
 	}
@@ -253,6 +255,28 @@ CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 		fn->Call(global_context->Global(), nargs + 1, args);
 	if (result.IsEmpty())
 		throw js_error(try_catch);
+
+	if (result->IsUndefined())
+	{
+		// no additinal return values
+	}
+	else if (result->IsArray())
+	{
+		Handle<Array> array = Handle<Array>::Cast(result);
+		// return an array of recoreds.
+		int	length = array->Length();
+		for (int i = 0; i < length; i++)
+			state.conv.ToDatum(array->Get(i), tupstore);
+	}
+	else if (result->IsObject())
+	{
+		// return a record
+		state.conv.ToDatum(result, tupstore);
+	}
+	else
+	{
+		throw js_error("SETOF function cannot return scalar value");
+	}
 
 	/* clean up and return the tuplestore */
 	tuplestore_donestoring(tupstore);
@@ -754,35 +778,27 @@ PrintInternal(const Arguments& args)
 static Handle<v8::Value>
 ExecuteSql(const Arguments& args) throw()
 {
-	return SafeCall(ExecuteSqlInternal, args);
-}
+	if (args.Length() != 1 && (args.Length() != 2 || !args[1]->IsArray()))
+		return ThrowException(String::New("usage: executeSql(sql [, args])"));
 
-/*
- * executeSql(string sql) returns array<json> for query, or integer for command.
- *
- * TODO: support query arguments with SPI_execute_with_args().
- */
-static Handle<v8::Value>
-ExecuteSqlInternal(const Arguments& args)
-{
-	if (args.Length() != 1)
-		return ThrowException(String::New("usage: executeSql(sql)"));
+	Handle<v8::Value>	result;
 
 	SPI_connect();
+	if (args.Length() == 1)
+		result = SafeCall(ExecuteSqlInternal, args);
+	else
+		result = SafeCall(ExecuteSqlWithArgs, args);
+	SPI_finish();
+	return result;
+}
 
-	CString				sql(args[0]);
+static Handle<v8::Value>
+SPIResultToValue(int status)
+{
 	Handle<v8::Value>	result;
-	int					status;
 
-	PG_TRY();
-	{
-		status = SPI_exec(sql, 0);
-	}
-	PG_CATCH();
-	{
-		throw pg_error();
-	}
-	PG_END_TRY();  
+	if (status < 0)
+		return ThrowException(String::New("SPI failed"));
 
 	switch (status)
 	{
@@ -806,9 +822,110 @@ ExecuteSqlInternal(const Arguments& args)
 		break;
 	}
 
-	SPI_finish();
-
 	return result;
+}
+
+/*
+ * executeSql(string sql) returns array<json> for query, or integer for command.
+ */
+static Handle<v8::Value>
+ExecuteSqlInternal(const Arguments& args)
+{
+	SPI_connect();
+
+	int			status;
+	CString		sql(args[0]);
+
+	PG_TRY();
+	{
+		status = SPI_exec(sql, 0);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return SPIResultToValue(status);
+}
+
+static Handle<v8::Value>
+ExecuteSqlWithArgs(const Arguments& args)
+{
+	int				status;
+	CString			sql(args[0]);
+	Handle<Array>	array = Handle<Array>::Cast(args[1]);
+
+	int		nargs = array->Length();
+	Datum  *values = (Datum *) palloc(sizeof(Datum) * nargs);
+	char   *nulls = (char *) palloc(sizeof(char) * nargs);
+	Oid	   *argtypes = (Oid *) palloc(sizeof(Oid) * nargs);
+
+	memset(nulls, ' ', sizeof(char) * nargs);
+	for (int i = 0; i < nargs; i++)
+	{
+		Handle<v8::Value>	value = array->Get(i);
+
+		if (value->IsNull() || value->IsUndefined())
+		{
+			nulls[i] = 'n';
+			argtypes[i] = TEXTOID;
+		}
+		else if (value->IsBoolean())
+		{
+			values[i] = BoolGetDatum(value->ToBoolean()->Value());
+			argtypes[i] = BOOLOID;
+		}
+		else if (value->IsInt32())
+		{
+			values[i] = Int32GetDatum(value->ToInt32()->Value());
+			argtypes[i] = INT4OID;
+		}
+		else if (value->IsUint32())
+		{
+			values[i] = Int64GetDatum(value->ToUint32()->Value());
+			argtypes[i] = INT8OID;
+		}
+		else if (value->IsNumber())
+		{
+			values[i] = Float8GetDatum(value->ToNumber()->Value());
+			argtypes[i] = FLOAT8OID;
+		}
+		else if (value->IsDate())
+		{
+			// TODO: Date
+			return ThrowException(String::New("Date is not supported as arguments for executeSql()"));
+		}
+		else if (value->IsObject())
+		{
+			// TODO: Object
+			return ThrowException(String::New("Object is not supported as arguments for executeSql()"));
+		}
+		else if (value->IsArray())
+		{
+			// TODO: Array
+			return ThrowException(String::New("Array is not supported as arguments for executeSql()"));
+		}
+		else
+		{
+			CString str(value);
+			values[i] = CStringGetTextDatum(str);
+			argtypes[i] = TEXTOID;
+		}
+	}
+
+	PG_TRY();
+	{
+		status = SPI_execute_with_args(sql, nargs,
+					argtypes, values, nulls, false, 0);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return SPIResultToValue(status);
 }
 
 static Handle<v8::Value>

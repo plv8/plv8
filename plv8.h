@@ -7,6 +7,7 @@ extern "C" {
 #include "access/htup.h"
 #include "fmgr.h"
 #include "mb/pg_wchar.h"
+#include "utils/tuplestore.h"
 }
 
 #ifdef _MSC_VER
@@ -92,7 +93,7 @@ private:
 public:
 	Converter(TupleDesc tupdesc);
 	v8::Handle<v8::Object> ToValue(HeapTuple tuple);
-	Datum ToDatum(v8::Handle<v8::Value> value);
+	Datum	ToDatum(v8::Handle<v8::Value> value, Tuplestorestate *tupstore = NULL);
 
 private:
 	Converter(const Converter&);

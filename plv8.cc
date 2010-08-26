@@ -17,6 +17,7 @@ extern "C" {
 #include "commands/trigger.h"
 #include "executor/spi.h"
 #include "funcapi.h"
+#include "miscadmin.h"
 #include "utils/memutils.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -56,6 +57,7 @@ typedef struct plv8_proc
 	ItemPointerData			fn_tid;
 	
 	int						nargs;
+	bool					retset;		/* true if SRF */
 	plv8_type				rettype;
 	plv8_type				argtypes[FUNC_MAX_ARGS];
 } plv8_proc;
@@ -75,15 +77,31 @@ static void plv8_fill_type(plv8_type *type, Oid typid) throw();
  */
 static plv8_proc *Compile(Oid fn_oid, bool validate, bool is_trigger);
 static Handle<Function> CreateFunction(const char *proname, int proarglen,
-					const char *proargs[], const char *prosrc, bool is_trigger);
+					const char *proargs[], const char *prosrc,
+					bool is_trigger, bool retset);
 static Datum CallFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
-				int nargs, plv8_type argtypes[], plv8_type *rettype);
+		int nargs, plv8_type argtypes[], plv8_type *rettype);
+static Datum CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
+		int nargs, plv8_type argtypes[], plv8_type *rettype);
 static Datum CallTrigger(PG_FUNCTION_ARGS, Handle<Function> fn);
 static Handle<v8::Value> Print(const Arguments& args) throw();
 static Handle<v8::Value> PrintInternal(const Arguments& args);
 static Handle<v8::Value> ExecuteSql(const Arguments& args) throw();
 static Handle<v8::Value> ExecuteSqlInternal(const Arguments& args);
+static Handle<v8::Value> Yield(const Arguments& args) throw();
+static Handle<v8::Value> YieldInternal(const Arguments& args);
 static Handle<Context> GetGlobalContext() throw();
+
+struct YieldState
+{
+	Converter			conv;
+	Tuplestorestate	   *tupstore;
+
+	YieldState(TupleDesc tupdesc, Tuplestorestate *store) :
+		conv(tupdesc), tupstore(store)
+	{
+	}
+};
 
 
 Datum
@@ -103,7 +121,9 @@ plv8_call_handler(PG_FUNCTION_ARGS) throw()
 
 		if (is_trigger)
 			return CallTrigger(fcinfo, proc->function);
-		else
+		else if (proc->retset)
+			return CallSRFunction(fcinfo, proc->function,
+						proc->nargs, proc->argtypes, &proc->rettype);
 			return CallFunction(fcinfo, proc->function,
 						proc->nargs, proc->argtypes, &proc->rettype);
 	}
@@ -126,7 +146,7 @@ plv8_inline_handler(PG_FUNCTION_ARGS) throw()
 		HandleScope			handle_scope;
 
 		Handle<Function>	fn = CreateFunction(NULL, 0, NULL,
-										codeblock->source_text, false);
+										codeblock->source_text, false, false);
 		return CallFunction(fcinfo, fn, 0, NULL, NULL);
 	}
 	catch (js_error& e)	{ e.rethrow(); }
@@ -152,10 +172,92 @@ CallFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 		fn->Call(global_context->Global(), nargs, args);
 	if (result.IsEmpty())
 		throw js_error(try_catch);
+
 	if (rettype)
 		return ToDatum(result, &fcinfo->isnull, rettype);
 	else
 		PG_RETURN_VOID();
+}
+
+static Tuplestorestate *
+CreateTupleStore(PG_FUNCTION_ARGS, TupleDesc *tupdesc)
+{
+	Tuplestorestate	   *tupstore;
+
+	PG_TRY();
+	{
+		ReturnSetInfo  *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+		MemoryContext	per_query_ctx;
+		MemoryContext	oldcontext;
+
+		/* check to see if caller supports us returning a tuplestore */
+		if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("set-valued function called in context that cannot accept a set")));
+		if (!(rsinfo->allowedModes & SFRM_Materialize))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("materialize mode required, but it is not " \
+							"allowed in this context")));
+
+		/* Build a tuple descriptor for our result type */
+		if (get_call_result_type(fcinfo, NULL, tupdesc) != TYPEFUNC_COMPOSITE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("SETOF a scalar type is not implemented yet")));
+
+		per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
+		oldcontext = MemoryContextSwitchTo(per_query_ctx);
+
+		tupstore = tuplestore_begin_heap(true, false, work_mem);
+		rsinfo->returnMode = SFRM_Materialize;
+		rsinfo->setResult = tupstore;
+		rsinfo->setDesc = *tupdesc;
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return tupstore;
+}
+
+static Datum
+CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
+	int nargs, plv8_type argtypes[], plv8_type *rettype)
+{
+	TupleDesc			tupdesc;
+	Tuplestorestate	   *tupstore;
+
+	tupstore = CreateTupleStore(fcinfo, &tupdesc);
+
+	YieldState			state(tupdesc, tupstore);
+	Handle<Context>		global_context = GetGlobalContext();
+	Context::Scope		context_scope(global_context);
+	Handle<v8::Value>	args[FUNC_MAX_ARGS + 1];
+
+	TryCatch			try_catch;
+
+	for (int i = 0; i < nargs; i++)
+		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
+
+	// Add "yield" function as a hidden argument.
+	// TODO: yield should be passed as a global variable.
+	args[nargs] = FunctionTemplate::New(Yield, External::Wrap(&state))->GetFunction();
+
+	Handle<v8::Value> result =
+		fn->Call(global_context->Global(), nargs + 1, args);
+	if (result.IsEmpty())
+		throw js_error(try_catch);
+
+	/* clean up and return the tuplestore */
+	tuplestore_donestoring(tupstore);
+
+	return (Datum) 0;
 }
 
 static Datum
@@ -387,7 +489,7 @@ plv8_get_proc_cache(Oid fn_oid, bool validate, char ***argnames) throw()
 	if (isnull)
 		elog(ERROR, "null prosrc");
 
-	//  functyptype = get_typtype(procStruct->prorettype);
+	proc->retset = procStruct->proretset;
 	rettype = procStruct->prorettype;
 
 	strlcpy(proc->proname, NameStr(procStruct->proname), NAMEDATALEN);
@@ -461,7 +563,8 @@ Compile(Oid fn_oid, bool validate, bool is_trigger)
 						proc->nargs,
 						(const char **) argnames,
 						proc->prosrc,
-						is_trigger));
+						is_trigger,
+						proc->retset));
 
 	return proc;
 }
@@ -472,7 +575,8 @@ CreateFunction(
 	int proarglen,
 	const char *proargs[],
 	const char *prosrc,
-	bool is_trigger)
+	bool is_trigger,
+	bool retset)
 {
 	HandleScope		handle_scope;
 	StringInfoData  src;
@@ -506,6 +610,14 @@ CreateFunction(
 				appendStringInfoString(&src, proargs[i]);
 			else
 				appendStringInfo(&src, "$%d", i + 1);	// unnamed argument to $N
+		}
+
+		// Add "yield" function as a hidden argument.
+		if (retset)
+		{
+			if (proarglen > 0)
+				appendStringInfoChar(&src, ',');
+			appendStringInfoString(&src, "yield");
 		}
 	}
 	appendStringInfo(&src, "){\n%s\n};\n_", prosrc);
@@ -571,6 +683,10 @@ SafeCall(InvocationCallback fn, const Arguments& args) throw()
 	try
 	{
 		return fn(args);
+	}
+	catch (js_error& e)
+	{
+		return ThrowException(String::New("internal exception"));
 	}
 	catch (pg_error& e)
 	{
@@ -695,6 +811,22 @@ ExecuteSqlInternal(const Arguments& args)
 	return result;
 }
 
+static Handle<v8::Value>
+Yield(const Arguments& args) throw()
+{
+	return SafeCall(YieldInternal, args);
+}
+
+static Handle<v8::Value>
+YieldInternal(const Arguments& args)
+{
+	YieldState* state =
+		static_cast<YieldState *>(External::Unwrap(args.Data()));
+
+	state->conv.ToDatum(args[0], state->tupstore);
+	return Undefined();
+}
+
 static Handle<Context>
 GetGlobalContext() throw()
 {
@@ -770,8 +902,9 @@ Converter::ToValue(HeapTuple tuple)
 }
 
 Datum
-Converter::ToDatum(Handle<v8::Value> value)
+Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 {
+	Datum			result;
 	TryCatch		try_catch;
 
 	Handle<Object>	obj = Handle<Object>::Cast(value);
@@ -782,8 +915,8 @@ Converter::ToDatum(Handle<v8::Value> value)
 	 * Use vector<char> instead of vector<bool> because <bool> version is
 	 * s specialized and different from bool[].
 	 */
-	std::vector<Datum>	values(m_tupdesc->natts);
-	std::vector<char>	nulls(m_tupdesc->natts);
+	Datum  *values = (Datum *) palloc(sizeof(Datum) * m_tupdesc->natts);
+	bool   *nulls = (bool *) palloc(sizeof(bool) * m_tupdesc->natts);
 
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
@@ -791,12 +924,23 @@ Converter::ToDatum(Handle<v8::Value> value)
 		if (attr.IsEmpty() || attr->IsUndefined() || attr->IsNull())
 			nulls[c] = true;
 		else
-			values[c] = ::ToDatum(attr, (bool *) &nulls[c], &m_coltypes[c]);
+			values[c] = ::ToDatum(attr, &nulls[c], &m_coltypes[c]);
 	}
 
-	HeapTuple tuple = heap_form_tuple(m_tupdesc, &values[0], (bool *) &nulls[0]);
+	if (tupstore)
+	{
+		tuplestore_putvalues(tupstore, m_tupdesc, values, nulls);
+		result = (Datum) 0;
+	}
+	else
+	{
+		result = HeapTupleGetDatum(heap_form_tuple(m_tupdesc, values, nulls));
+	}
 
-	return HeapTupleGetDatum(tuple);
+	pfree(values);
+	pfree(nulls);
+
+	return result;
 }
 
 js_error::js_error() throw()

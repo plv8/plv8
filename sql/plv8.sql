@@ -87,12 +87,31 @@ $$
 $$
 LANGUAGE plv8;
 SELECT scalar_to_record(1, 'a');
+
 CREATE FUNCTION record_to_text(x rec) RETURNS text AS
 $$
 	return JSON.stringify(x);
 $$
 LANGUAGE plv8;
 SELECT record_to_text('(1,a)'::rec);
+
+CREATE FUNCTION set_of_records() RETURNS SETOF rec AS
+$$
+	yield( { "i": 1, "t": "a" } );
+	yield( { "i": 2, "t": "b" } );
+	yield( { "i": 3, "t": "c" } );
+$$
+LANGUAGE plv8;
+SELECT * FROM set_of_records();
+
+CREATE FUNCTION set_of_integers() RETURNS SETOF integer AS
+$$
+	yield( 1 );
+	yield( 2 );
+	yield( 3 );
+$$
+LANGUAGE plv8;
+SELECT * FROM set_of_integers();
 
 -- print()
 CREATE FUNCTION test_print(arg text) RETURNS void AS

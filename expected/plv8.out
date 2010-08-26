@@ -192,6 +192,30 @@ SELECT record_to_text('(1,a)'::rec);
  {"i":1,"t":"a"}
 (1 row)
 
+CREATE FUNCTION set_of_records() RETURNS SETOF rec AS
+$$
+	yield( { "i": 1, "t": "a" } );
+	yield( { "i": 2, "t": "b" } );
+	yield( { "i": 3, "t": "c" } );
+$$
+LANGUAGE plv8;
+SELECT * FROM set_of_records();
+ i | t 
+---+---
+ 1 | a
+ 2 | b
+ 3 | c
+(3 rows)
+
+CREATE FUNCTION set_of_integers() RETURNS SETOF integer AS
+$$
+	yield( 1 );
+	yield( 2 );
+	yield( 3 );
+$$
+LANGUAGE plv8;
+SELECT * FROM set_of_integers();
+ERROR:  SETOF a scalar type is not implemented yet
 -- print()
 CREATE FUNCTION test_print(arg text) RETURNS void AS
 $$

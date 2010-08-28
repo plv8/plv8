@@ -472,6 +472,7 @@ plv8_get_proc_cache(Oid fn_oid, bool validate, char ***argnames) throw()
 				proc->prosrc = NULL;
 			}
 			proc->function.Dispose();
+			proc->function.Clear();
 		}
 		else
 		{
@@ -484,6 +485,8 @@ plv8_get_proc_cache(Oid fn_oid, bool validate, char ***argnames) throw()
 		new(&proc->function) Persistent<Function>();
 		proc->prosrc = NULL;
 	}
+
+	Assert(proc->function.IsEmpty());
 
 	procStruct = (Form_pg_proc) GETSTRUCT(procTup);
 

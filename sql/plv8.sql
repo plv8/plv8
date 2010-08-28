@@ -152,6 +152,12 @@ SELECT * FROM return_sql();
 CREATE FUNCTION test_sql_error() RETURNS void AS $$ executeSql("ERROR") $$ LANGUAGE plv8;
 SELECT test_sql_error();
 
+-- REPLACE FUNCTION
+CREATE FUNCTION replace_test() RETURNS integer AS $$ return 1; $$ LANGUAGE plv8;
+SELECT replace_test();
+CREATE OR REPLACE FUNCTION replace_test() RETURNS integer AS $$ return 2; $$ LANGUAGE plv8;
+SELECT replace_test();
+
 -- TRIGGER
 CREATE FUNCTION test_trigger() RETURNS trigger AS
 $$

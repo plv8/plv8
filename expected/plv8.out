@@ -282,6 +282,21 @@ CREATE FUNCTION test_sql_error() RETURNS void AS $$ executeSql("ERROR") $$ LANGU
 SELECT test_sql_error();
 ERROR:  syntax error at or near "ERROR"
 DETAIL:  test_sql_error() LINE 1:  executeSql("ERROR") 
+-- REPLACE FUNCTION
+CREATE FUNCTION replace_test() RETURNS integer AS $$ return 1; $$ LANGUAGE plv8;
+SELECT replace_test();
+ replace_test 
+--------------
+            1
+(1 row)
+
+CREATE OR REPLACE FUNCTION replace_test() RETURNS integer AS $$ return 2; $$ LANGUAGE plv8;
+SELECT replace_test();
+ replace_test 
+--------------
+            2
+(1 row)
+
 -- TRIGGER
 CREATE FUNCTION test_trigger() RETURNS trigger AS
 $$

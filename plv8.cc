@@ -675,6 +675,12 @@ plv8_fill_type(plv8_type *type, Oid typid) throw()
 	}
 }
 
+Handle<v8::Value>
+ThrowError(const char *message) throw()
+{
+	return ThrowException(Exception::Error(String::New(message)));
+}
+
 static Handle<Context>
 GetGlobalContext() throw()
 {

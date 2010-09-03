@@ -33,11 +33,11 @@ SELECT unnamed_args(ARRAY['A', 'B'], ARRAY['C', 'D']);
 
 CREATE FUNCTION concat_strings(VARIADIC args text[]) RETURNS text AS
 $$
-    var result = "";
-    for (var i = 0; i < args.length; i++)
-    	if (args[i] != null)
-	    	result += args[i];
-    return result;
+	var result = "";
+	for (var i = 0; i < args.length; i++)
+		if (args[i] != null)
+			result += args[i];
+	return result;
 $$
 LANGUAGE plv8 IMMUTABLE STRICT;
 SELECT concat_strings('A', 'B', NULL, 'C');
@@ -192,6 +192,19 @@ SELECT record_to_text('(1,a)'::rec);
  {"i":1,"t":"a"}
 (1 row)
 
+CREATE FUNCTION return_record(i integer, t text) RETURNS record AS
+$$
+	return { "i": i, "t": t };
+$$
+LANGUAGE plv8;
+SELECT * FROM return_record(1, 'a');
+ERROR:  a column definition list is required for functions returning "record"
+LINE 1: SELECT * FROM return_record(1, 'a');
+                      ^
+SELECT * FROM return_record(1, 'a') AS t(j integer, s text);
+ERROR:  input of anonymous composite types is not implemented
+SELECT * FROM return_record(1, 'a') AS t(x text, y text);
+ERROR:  input of anonymous composite types is not implemented
 CREATE FUNCTION set_of_records() RETURNS SETOF rec AS
 $$
 	yield( { "i": 1, "t": "a" } );
@@ -227,7 +240,7 @@ LANGUAGE plv8;
 SELECT test_print('ABC');
 NOTICE:  args = ABC
 WARNING:  warning
-ERROR:  invalid error level for print()
+ERROR:  Error: invalid error level for print()
 DETAIL:  test_print() LINE 4: 	print(20, 'ERROR is not allowed');
 -- executeSql()
 CREATE TABLE test_tbl (i integer, s text);
@@ -280,7 +293,7 @@ SELECT * FROM return_sql();
 
 CREATE FUNCTION test_sql_error() RETURNS void AS $$ executeSql("ERROR") $$ LANGUAGE plv8;
 SELECT test_sql_error();
-ERROR:  syntax error at or near "ERROR"
+ERROR:  Error: syntax error at or near "ERROR"
 DETAIL:  test_sql_error() LINE 1:  executeSql("ERROR") 
 -- REPLACE FUNCTION
 CREATE FUNCTION replace_test() RETURNS integer AS $$ return 1; $$ LANGUAGE plv8;

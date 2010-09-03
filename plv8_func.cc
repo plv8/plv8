@@ -45,7 +45,7 @@ SafeCall(InvocationCallback fn, const Arguments& args) throw()
 	}
 	catch (js_error& e)
 	{
-		return ThrowException(String::New("internal exception"));
+		return ThrowError("internal exception");
 	}
 	catch (pg_error& e)
 	{
@@ -56,7 +56,7 @@ SafeCall(InvocationCallback fn, const Arguments& args) throw()
 		FlushErrorState();
 		FreeErrorData(edata);
 
-		return ThrowException(message);
+		return ThrowException(Exception::Error(message));
 	}
 }
 
@@ -70,7 +70,7 @@ static Handle<v8::Value>
 PrintInternal(const Arguments& args)
 {
 	if (args.Length() < 2)
-		return ThrowException(String::New("usage: print(elevel, ...)"));
+		return ThrowError("usage: print(elevel, ...)");
 
 	int	elevel = args[0]->Int32Value();
 	switch (elevel)
@@ -86,7 +86,7 @@ PrintInternal(const Arguments& args)
 	case WARNING:
 		break;
 	default:
-		return ThrowException(String::New("invalid error level for print()"));
+		return ThrowError("invalid error level for print()");
 	}
 
 	if (args.Length() == 2)
@@ -114,7 +114,7 @@ Handle<v8::Value>
 ExecuteSql(const Arguments& args) throw()
 {
 	if (args.Length() != 1 && (args.Length() != 2 || !args[1]->IsArray()))
-		return ThrowException(String::New("usage: executeSql(sql [, args])"));
+		return ThrowError("usage: executeSql(sql [, args])");
 
 	Handle<v8::Value>	result;
 
@@ -133,7 +133,7 @@ SPIResultToValue(int status)
 	Handle<v8::Value>	result;
 
 	if (status < 0)
-		return ThrowException(String::New("SPI failed"));
+		return ThrowError("SPI failed");
 
 	switch (status)
 	{
@@ -229,17 +229,17 @@ ExecuteSqlWithArgs(const Arguments& args)
 		else if (value->IsDate())
 		{
 			// TODO: Date
-			return ThrowException(String::New("Date is not supported as arguments for executeSql()"));
+			return ThrowError("Date is not supported as arguments for executeSql()");
 		}
 		else if (value->IsObject())
 		{
 			// TODO: Object
-			return ThrowException(String::New("Object is not supported as arguments for executeSql()"));
+			return ThrowError("Object is not supported as arguments for executeSql()");
 		}
 		else if (value->IsArray())
 		{
 			// TODO: Array
-			return ThrowException(String::New("Array is not supported as arguments for executeSql()"));
+			return ThrowError("Array is not supported as arguments for executeSql()");
 		}
 		else
 		{

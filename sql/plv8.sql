@@ -29,11 +29,11 @@ SELECT unnamed_args(ARRAY['A', 'B'], ARRAY['C', 'D']);
 
 CREATE FUNCTION concat_strings(VARIADIC args text[]) RETURNS text AS
 $$
-    var result = "";
-    for (var i = 0; i < args.length; i++)
-    	if (args[i] != null)
-	    	result += args[i];
-    return result;
+	var result = "";
+	for (var i = 0; i < args.length; i++)
+		if (args[i] != null)
+			result += args[i];
+	return result;
 $$
 LANGUAGE plv8 IMMUTABLE STRICT;
 SELECT concat_strings('A', 'B', NULL, 'C');
@@ -94,6 +94,15 @@ $$
 $$
 LANGUAGE plv8;
 SELECT record_to_text('(1,a)'::rec);
+
+CREATE FUNCTION return_record(i integer, t text) RETURNS record AS
+$$
+	return { "i": i, "t": t };
+$$
+LANGUAGE plv8;
+SELECT * FROM return_record(1, 'a');
+SELECT * FROM return_record(1, 'a') AS t(j integer, s text);
+SELECT * FROM return_record(1, 'a') AS t(x text, y text);
 
 CREATE FUNCTION set_of_records() RETURNS SETOF rec AS
 $$

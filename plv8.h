@@ -103,6 +103,8 @@ private:
 	Converter& operator = (const Converter&);
 };
 
+extern v8::Handle<v8::Value> ThrowError(const char *message) throw();
+
 // plv8_type.cc
 extern Datum ToDatum(v8::Handle<v8::Value> value, bool *isnull, plv8_type *type);
 extern v8::Handle<v8::Value> ToValue(Datum datum, bool isnull, plv8_type *type);

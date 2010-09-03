@@ -500,12 +500,12 @@ plv8_get_proc_cache(Oid fn_oid, bool validate, char ***argnames) throw()
 	strlcpy(proc->proname, NameStr(procStruct->proname), NAMEDATALEN);
 	proc->fn_xmin = HeapTupleHeaderGetXmin(procTup->t_data);
 	proc->fn_tid = procTup->t_self;
-	proc->nargs = get_func_arg_info(procTup, &argtypes, argnames, &argmodes);
+	int nargs = get_func_arg_info(procTup, &argtypes, argnames, &argmodes);
 
 	if (validate)
 	{
 		/* Disallow pseudotypes in arguments (either IN or OUT) */
-		for (int i = 0; i < proc->nargs; i++)
+		for (int i = 0; i < nargs; i++)
 		{
 			if (get_typtype(argtypes[i]) == TYPTYPE_PSEUDO)
 				ereport(ERROR,
@@ -521,7 +521,8 @@ plv8_get_proc_cache(Oid fn_oid, bool validate, char ***argnames) throw()
 
 	ReleaseSysCache(procTup);
 
-	for (int i = 0; i < proc->nargs; i++)
+	int	inargs = 0;
+	for (int i = 0; i < nargs; i++)
 	{
 		Oid		argtype = argtypes[i];
 		char	argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
@@ -529,14 +530,19 @@ plv8_get_proc_cache(Oid fn_oid, bool validate, char ***argnames) throw()
 		switch (argmode)
 		{
 		case PROARGMODE_IN:
+		case PROARGMODE_INOUT:
 		case PROARGMODE_VARIADIC:
 			break;
 		default:
-			elog(ERROR, "OUT parameters are not supported");
+			continue;
 		}
 
-		plv8_fill_type(&proc->argtypes[i], argtype);
+		if (*argnames)
+			(*argnames)[inargs] = (*argnames)[i];
+		plv8_fill_type(&proc->argtypes[inargs], argtype);
+		inargs++;
 	}
+	proc->nargs = inargs;
 
 	plv8_fill_type(&proc->rettype, rettype);
 

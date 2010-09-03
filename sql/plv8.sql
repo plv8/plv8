@@ -122,6 +122,21 @@ $$
 LANGUAGE plv8;
 SELECT * FROM set_of_integers();
 
+-- INOUT and OUT parameters
+CREATE FUNCTION one_inout(a integer, INOUT b text) AS
+$$
+return a + b;
+$$
+LANGUAGE plv8;
+SELECT one_inout(5, 'ABC');
+
+CREATE FUNCTION one_out(OUT o text, i integer) AS
+$$
+return 'ABC' + i;
+$$
+LANGUAGE plv8;
+SELECT one_out(123);
+
 -- print()
 CREATE FUNCTION test_print(arg text) RETURNS void AS
 $$

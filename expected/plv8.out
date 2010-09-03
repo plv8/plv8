@@ -229,6 +229,29 @@ $$
 LANGUAGE plv8;
 SELECT * FROM set_of_integers();
 ERROR:  SETOF a scalar type is not implemented yet
+-- INOUT and OUT parameters
+CREATE FUNCTION one_inout(a integer, INOUT b text) AS
+$$
+return a + b;
+$$
+LANGUAGE plv8;
+SELECT one_inout(5, 'ABC');
+ one_inout 
+-----------
+ 5ABC
+(1 row)
+
+CREATE FUNCTION one_out(OUT o text, i integer) AS
+$$
+return 'ABC' + i;
+$$
+LANGUAGE plv8;
+SELECT one_out(123);
+ one_out 
+---------
+ ABC123
+(1 row)
+
 -- print()
 CREATE FUNCTION test_print(arg text) RETURNS void AS
 $$

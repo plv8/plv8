@@ -1,5 +1,5 @@
 /*
- * plv8.cc : Postgres from/to v8 data converters.
+ * plv8_type.cc : Postgres from/to v8 data converters.
  */
 #include "plv8.h"
 

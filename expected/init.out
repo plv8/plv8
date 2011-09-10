@@ -1,0 +1,5 @@
+-- INSTALL
+SET client_min_messages = warning;
+\set ECHO none
+RESET client_min_messages;
+CREATE LANGUAGE plv8;

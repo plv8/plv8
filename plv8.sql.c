@@ -1,30 +1,31 @@
-sub version {
-	return $_[1] if ($_[0] <= $ARGV[0]);
-}
-
-print << "EOF";
+#include "pg_config.h"
+#if PG_VERSION_NUM < 90100
 -- adjust this setting to control where the objects get created.
 SET search_path = public;
 
 BEGIN;
+#endif
 
 CREATE FUNCTION plv8_call_handler() RETURNS language_handler
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 
-@{[ &version(9.0, << "VERSION"
+#if PG_VERSION_NUM >= 90000
 CREATE FUNCTION plv8_inline_handler(internal) RETURNS void
 	AS 'MODULE_PATHNAME' LANGUAGE C;
-VERSION
-)]}
+#endif
+
 CREATE FUNCTION plv8_call_validator(oid) RETURNS void
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 
+DELETE FROM pg_pltemplate WHERE tmplname = 'plv8';
 INSERT INTO pg_pltemplate (
 	tmplname,
 	tmpltrusted,
 	tmpldbacreate,
 	tmplhandler,
-	@{[ &version(9.0, "tmplinline,") ]}
+#if PG_VERSION_NUM >= 90000
+	tmplinline,
+#endif
 	tmplvalidator,
 	tmpllibrary)
 SELECT
@@ -32,12 +33,13 @@ SELECT
 	true,
 	false,
 	'plv8_call_handler',
-	@{[ &version(9.0, "'plv8_inline_handler',") ]}
+#if PG_VERSION_NUM >= 90000
+	'plv8_inline_handler',
+#endif
 	'plv8_call_validator',
 	'MODULE_PATHNAME'
-WHERE
-	NOT EXISTS (SELECT 1 FROM pg_pltemplate WHERE tmplname = 'plv8')
 ;
 
+#if PG_VERSION_NUM < 90100
 COMMIT;
-EOF
+#endif

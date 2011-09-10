@@ -1,2 +1,1 @@
- DO $$ print(NOTICE, 'this', 'is', 'inline', 'code') $$ LANGUAGE plv8;
-
+DO $$ print(NOTICE, 'this', 'is', 'inline', 'code') $$ LANGUAGE plv8;

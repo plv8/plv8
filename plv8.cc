@@ -19,6 +19,7 @@ extern "C" {
 #include "utils/memutils.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/syscache.h"
 
 #undef delete
@@ -385,7 +386,6 @@ plv8_call_validator(PG_FUNCTION_ARGS) throw()
 	Form_pg_proc	proc;
 	char			functyptype;
 	bool			is_trigger = false;
-	js_error		error;
 
 	/* Get the new function's pg_proc entry */
 	tuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);

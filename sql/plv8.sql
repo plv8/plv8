@@ -1,12 +1,3 @@
--- INSTALL
-SET client_min_messages = warning;
-\set ECHO none
-\i plv8.sql
-\set ECHO all
-RESET client_min_messages;
-
-CREATE LANGUAGE plv8;
-
 -- CREATE FUNCTION
 CREATE FUNCTION plv8_test(keys text[], vals text[]) RETURNS text AS
 $$

@@ -1,5 +1,8 @@
 V8DIR = ../v8
 
+# set your custom C++ compler
+CUSTOM_CC = g++
+
 SRCS = plv8.cc plv8_type.cc plv8_func.cc
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8

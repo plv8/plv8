@@ -502,11 +502,7 @@ EpochToDate(double epoch)
 {
 	epoch -= (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * 86400000.0;
 
-#ifdef HAVE_INT64_TIMESTAMP
-	return Int64GetDatum((int64) (epoch * 1000 / USECS_PER_DAY));
-#else
-	return Float8GetDatum(epoch / 1000.0 / SECS_PER_DAY);
-#endif
+	PG_RETURN_DATEADT((DateADT) (epoch * 1000 / USECS_PER_DAY));
 }
 
 CString::CString(Handle<v8::Value> value) : m_utf8(value)

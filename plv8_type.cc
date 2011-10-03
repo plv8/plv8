@@ -130,7 +130,7 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			Oid    input_func;
 
 			getTypeInputInfo(type->typid, &input_func, &type->ioparam);
-			fmgr_info(input_func, &type->fn_input);
+			fmgr_info_cxt(input_func, &type->fn_input, type->fn_input.fn_mcxt);
 		}
 		result = InputFunctionCall(&type->fn_input, str, type->ioparam, -1);
 	}
@@ -347,7 +347,7 @@ ToString(Datum value, plv8_type *type)
 			bool	isvarlen;
 
 			getTypeOutputInfo(type->typid, &output_func, &isvarlen);
-			fmgr_info(output_func, &type->fn_output);
+			fmgr_info_cxt(output_func, &type->fn_output, type->fn_output.fn_mcxt);
 		}
 		str = OutputFunctionCall(&type->fn_output, value);
 	}

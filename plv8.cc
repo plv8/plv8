@@ -44,7 +44,7 @@ Datum	plv8_inline_handler(PG_FUNCTION_ARGS) throw();
 
 using namespace v8;
 
-typedef struct plv8_proc
+typedef struct plv8_proc_cache
 {
 	Oid						fn_oid;
 
@@ -57,24 +57,35 @@ typedef struct plv8_proc
 	
 	int						nargs;
 	bool					retset;		/* true if SRF */
+	Oid						rettype;
+	Oid						argtypes[FUNC_MAX_ARGS];
+} plv8_proc_cache;
+
+/*
+ * We cannot cache plv8_type inter executions because it has FmgrInfo fields.
+ * So, we cache rettype and argtype in fn_extra only during one execution.
+ */
+typedef struct plv8_proc
+{
+	plv8_proc_cache		   *cache;
 	plv8_type				rettype;
 	plv8_type				argtypes[FUNC_MAX_ARGS];
 } plv8_proc;
 
-static HTAB *plv8_proc_hash = NULL;
+static HTAB *plv8_proc_cache_hash = NULL;
 
 /*
  * loser_case_functions are postgres-like C functions.
  * They could raise errors with elog/ereport(ERROR).
  */
-static plv8_proc *plv8_get_proc_cache(Oid fn_oid, bool validate, char ***argnames) throw();
-static void plv8_fill_type(plv8_type *type, Oid typid) throw();
+static plv8_proc *plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames) throw();
+static void plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt) throw();
 
 /*
  * CamelCaseFunctions are C++ functions.
  * They could raise errors with C++ throw statements, or never throw exceptions.
  */
-static plv8_proc *Compile(Oid fn_oid, bool validate, bool is_trigger);
+static plv8_proc *Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger);
 static Handle<Function> CreateFunction(const char *proname, int proarglen,
 					const char *proargs[], const char *prosrc,
 					bool is_trigger, bool retset);
@@ -97,18 +108,19 @@ plv8_call_handler(PG_FUNCTION_ARGS) throw()
 		HandleScope	handle_scope;
 
 		if (!fcinfo->flinfo->fn_extra)
-			fcinfo->flinfo->fn_extra = Compile(fn_oid, false, is_trigger);
+			fcinfo->flinfo->fn_extra = Compile(fn_oid, fcinfo->flinfo->fn_mcxt, false, is_trigger);
 
-		plv8_proc   *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
+		plv8_proc *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
+		plv8_proc_cache *cache = proc->cache;
 
 		if (is_trigger)
-			return CallTrigger(fcinfo, proc->function);
-		else if (proc->retset)
-			return CallSRFunction(fcinfo, proc->function,
-						proc->nargs, proc->argtypes, &proc->rettype);
+			return CallTrigger(fcinfo, cache->function);
+		else if (cache->retset)
+			return CallSRFunction(fcinfo, cache->function,
+						cache->nargs, proc->argtypes, &proc->rettype);
 		else
-			return CallFunction(fcinfo, proc->function,
-						proc->nargs, proc->argtypes, &proc->rettype);
+			return CallFunction(fcinfo, cache->function,
+						cache->nargs, proc->argtypes, &proc->rettype);
 	}
 	catch (js_error& e)	{ e.rethrow(); }
 	catch (pg_error& e)	{ e.rethrow(); }
@@ -415,7 +427,7 @@ plv8_call_validator(PG_FUNCTION_ARGS) throw()
 
 	try
 	{
-		(void) Compile(fn_oid, true, is_trigger);
+		(void) Compile(fn_oid, fcinfo->flinfo->fn_mcxt, true, is_trigger);
 		/* the result of a validator is ignored */
 		PG_RETURN_VOID();
 	}
@@ -426,27 +438,26 @@ plv8_call_validator(PG_FUNCTION_ARGS) throw()
 }
 
 static plv8_proc *
-plv8_get_proc_cache(Oid fn_oid, bool validate, char ***argnames) throw()
+plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames) throw()
 {
-	HeapTuple		procTup;
-	Form_pg_proc	procStruct;
-	plv8_proc	   *proc;
-	bool			found;
-	bool			isnull;
-	Datum			prosrc;
-	Oid			   *argtypes;
-	char		   *argmodes;
-	Oid				rettype;
-	MemoryContext	oldcontext;
+	HeapTuple			procTup;
+	plv8_proc_cache	   *cache;
+	bool				found;
+	bool				isnull;
+	Datum				prosrc;
+	Oid				   *argtypes;
+	char			   *argmodes;
+	Oid					rettype;
+	MemoryContext		oldcontext;
 
-	if (plv8_proc_hash == NULL)
+	if (plv8_proc_cache_hash == NULL)
 	{
 		HASHCTL    hash_ctl = { 0 };
 
 		hash_ctl.keysize = sizeof(Oid);
-		hash_ctl.entrysize = sizeof(plv8_proc);
+		hash_ctl.entrysize = sizeof(plv8_proc_cache);
 		hash_ctl.hash = oid_hash;
-		plv8_proc_hash = hash_create("PLv8 Procedures", 32,
+		plv8_proc_cache_hash = hash_create("PLv8 Procedures", 32,
 									 &hash_ctl, HASH_ELEM | HASH_FUNCTION);
 	}
 
@@ -454,113 +465,119 @@ plv8_get_proc_cache(Oid fn_oid, bool validate, char ***argnames) throw()
 	if (!HeapTupleIsValid(procTup))
 		elog(ERROR, "cache lookup failed for function %u", fn_oid);
 
-	proc = (plv8_proc *) hash_search(plv8_proc_hash, &fn_oid, HASH_ENTER, &found);
+	cache = (plv8_proc_cache *) hash_search(plv8_proc_cache_hash, &fn_oid, HASH_ENTER, &found);
 
 	if (found)
 	{
 		bool    uptodate;
 
-		uptodate = (!proc->function.IsEmpty() &&
-			proc->fn_xmin == HeapTupleHeaderGetXmin(procTup->t_data) &&
-			ItemPointerEquals(&proc->fn_tid, &procTup->t_self));
+		uptodate = (!cache->function.IsEmpty() &&
+			cache->fn_xmin == HeapTupleHeaderGetXmin(procTup->t_data) &&
+			ItemPointerEquals(&cache->fn_tid, &procTup->t_self));
 
 		if (!uptodate)
 		{
-			if (proc->prosrc)
+			if (cache->prosrc)
 			{
-				pfree(proc->prosrc);
-				proc->prosrc = NULL;
+				pfree(cache->prosrc);
+				cache->prosrc = NULL;
 			}
-			proc->function.Dispose();
-			proc->function.Clear();
+			cache->function.Dispose();
+			cache->function.Clear();
 		}
 		else
 		{
 			ReleaseSysCache(procTup);
-			return proc;
 		}
 	}
 	else
 	{
-		new(&proc->function) Persistent<Function>();
-		proc->prosrc = NULL;
+		new(&cache->function) Persistent<Function>();
+		cache->prosrc = NULL;
 	}
 
-	Assert(proc->function.IsEmpty());
-
-	procStruct = (Form_pg_proc) GETSTRUCT(procTup);
-
-	prosrc = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_prosrc, &isnull);
-	if (isnull)
-		elog(ERROR, "null prosrc");
-
-	proc->retset = procStruct->proretset;
-	rettype = procStruct->prorettype;
-
-	strlcpy(proc->proname, NameStr(procStruct->proname), NAMEDATALEN);
-	proc->fn_xmin = HeapTupleHeaderGetXmin(procTup->t_data);
-	proc->fn_tid = procTup->t_self;
-	int nargs = get_func_arg_info(procTup, &argtypes, argnames, &argmodes);
-
-	if (validate)
+	if (cache->function.IsEmpty())
 	{
-		/* Disallow pseudotypes in arguments (either IN or OUT) */
+		Form_pg_proc	procStruct;
+
+		procStruct = (Form_pg_proc) GETSTRUCT(procTup);
+
+		prosrc = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_prosrc, &isnull);
+		if (isnull)
+			elog(ERROR, "null prosrc");
+
+		cache->retset = procStruct->proretset;
+		cache->rettype = procStruct->prorettype;
+
+		strlcpy(cache->proname, NameStr(procStruct->proname), NAMEDATALEN);
+		cache->fn_xmin = HeapTupleHeaderGetXmin(procTup->t_data);
+		cache->fn_tid = procTup->t_self;
+
+		int nargs = get_func_arg_info(procTup, &argtypes, argnames, &argmodes);
+
+		if (validate)
+		{
+			/* Disallow pseudotypes in arguments (either IN or OUT) */
+			for (int i = 0; i < nargs; i++)
+			{
+				if (get_typtype(argtypes[i]) == TYPTYPE_PSEUDO)
+					ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("PL/v8 functions cannot accept type %s",
+								format_type_be(argtypes[i]))));
+			}
+		}
+
+		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+		cache->prosrc = TextDatumGetCString(prosrc);
+		MemoryContextSwitchTo(oldcontext);
+
+		ReleaseSysCache(procTup);
+
+		int	inargs = 0;
 		for (int i = 0; i < nargs; i++)
 		{
-			if (get_typtype(argtypes[i]) == TYPTYPE_PSEUDO)
-				ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("PL/v8 functions cannot accept type %s",
-							format_type_be(argtypes[i]))));
+			Oid		argtype = argtypes[i];
+			char	argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
+
+			switch (argmode)
+			{
+			case PROARGMODE_IN:
+			case PROARGMODE_INOUT:
+			case PROARGMODE_VARIADIC:
+				break;
+			default:
+				continue;
+			}
+
+			if (*argnames)
+				(*argnames)[inargs] = (*argnames)[i];
+			cache->argtypes[inargs] = argtype;
+			inargs++;
 		}
+		cache->nargs = inargs;
 	}
 
-	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+	plv8_proc *proc = (plv8_proc *) MemoryContextAllocZero(fn_mcxt,
+		offsetof(plv8_proc, argtypes) + sizeof(plv8_type) * cache->nargs);
 
-	proc->prosrc = TextDatumGetCString(prosrc);
-
-	ReleaseSysCache(procTup);
-
-	int	inargs = 0;
-	for (int i = 0; i < nargs; i++)
-	{
-		Oid		argtype = argtypes[i];
-		char	argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
-
-		switch (argmode)
-		{
-		case PROARGMODE_IN:
-		case PROARGMODE_INOUT:
-		case PROARGMODE_VARIADIC:
-			break;
-		default:
-			continue;
-		}
-
-		if (*argnames)
-			(*argnames)[inargs] = (*argnames)[i];
-		plv8_fill_type(&proc->argtypes[inargs], argtype);
-		inargs++;
-	}
-	proc->nargs = inargs;
-
-	plv8_fill_type(&proc->rettype, rettype);
-
-	/* restore */
-	MemoryContextSwitchTo(oldcontext);
+	proc->cache = cache;
+	for (int i = 0; i < cache->nargs; i++)
+		plv8_fill_type(&proc->argtypes[i], cache->argtypes[i], fn_mcxt);
+	plv8_fill_type(&proc->rettype, cache->rettype, fn_mcxt);
 
 	return proc;
 }
 
 static plv8_proc *
-Compile(Oid fn_oid, bool validate, bool is_trigger)
+Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger)
 {
 	plv8_proc  *proc;
 	char	  **argnames;
 
 	PG_TRY();
 	{
-		proc = plv8_get_proc_cache(fn_oid, validate, &argnames);
+		proc = plv8_get_proc(fn_oid, fn_mcxt, validate, &argnames);
 	}
 	PG_CATCH();
 	{
@@ -568,14 +585,16 @@ Compile(Oid fn_oid, bool validate, bool is_trigger)
 	}
 	PG_END_TRY();
 
-	if (proc->function.IsEmpty())
-		proc->function = Persistent<Function>::New(CreateFunction(
-						proc->proname,
-						proc->nargs,
+	plv8_proc_cache *cache = proc->cache;
+
+	if (cache->function.IsEmpty())
+		cache->function = Persistent<Function>::New(CreateFunction(
+						cache->proname,
+						cache->nargs,
 						(const char **) argnames,
-						proc->prosrc,
+						cache->prosrc,
 						is_trigger,
-						proc->retset));
+						cache->retset));
 
 	return proc;
 }
@@ -660,11 +679,15 @@ CreateFunction(
 }
 
 static void
-plv8_fill_type(plv8_type *type, Oid typid) throw()
+plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt) throw()
 {
 	bool    ispreferred;
 
+	if (!mcxt)
+		mcxt = CurrentMemoryContext;
+
 	type->typid = typid;
+	type->fn_input.fn_mcxt = type->fn_output.fn_mcxt = mcxt;
 	get_type_category_preferred(typid, &type->category, &ispreferred);
 	get_typlenbyvalalign(typid, &type->len, &type->byval, &type->align);
 
@@ -732,7 +755,7 @@ Converter::Converter(TupleDesc tupdesc) :
 		m_colnames[c] = ToString(NameStr(tupdesc->attrs[c]->attname));
 		PG_TRY();
 		{
-			plv8_fill_type(&m_coltypes[c], m_tupdesc->attrs[c]->atttypid);
+			plv8_fill_type(&m_coltypes[c], m_tupdesc->attrs[c]->atttypid, NULL);
 		}
 		PG_CATCH();
 		{

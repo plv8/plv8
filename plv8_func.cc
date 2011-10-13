@@ -118,12 +118,11 @@ ExecuteSql(const Arguments& args) throw()
 
 	Handle<v8::Value>	result;
 
-	SPI_connect();
 	if (args.Length() == 1)
 		result = SafeCall(ExecuteSqlInternal, args);
 	else
 		result = SafeCall(ExecuteSqlWithArgs, args);
-	SPI_finish();
+
 	return result;
 }
 
@@ -166,8 +165,6 @@ SPIResultToValue(int status)
 static Handle<v8::Value>
 ExecuteSqlInternal(const Arguments& args)
 {
-	SPI_connect();
-
 	int			status;
 	CString		sql(args[0]);
 

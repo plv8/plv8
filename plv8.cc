@@ -14,6 +14,7 @@ extern "C" {
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/trigger.h"
+#include "executor/spi.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "utils/memutils.h"
@@ -151,6 +152,30 @@ plv8_inline_handler(PG_FUNCTION_ARGS) throw()
 }
 #endif
 
+/*
+ * DoCall -- Call a JS function with SPI support.
+ *
+ * This function could throw C++ exceptions, but must not throw PG exceptions.
+ */
+static Handle<v8::Value>
+DoCall(Handle<Function> fn, Handle<Object> context,
+	int nargs, Handle<v8::Value> args[])
+{
+	TryCatch		try_catch;
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+		throw js_error(_("could not connect to SPI manager"));
+	Handle<v8::Value> result = fn->Call(context, nargs, args);
+	int	ret = SPI_finish();
+
+	if (result.IsEmpty())
+		throw js_error(try_catch);
+	if (ret != SPI_OK_FINISH)
+		throw js_error(_("SPI_finish() failed"));
+
+	return result;
+}
+
 static Datum
 CallFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 	int nargs, plv8_type argtypes[], plv8_type *rettype)
@@ -159,14 +184,10 @@ CallFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 	Context::Scope		context_scope(global_context);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS];
 
-	TryCatch			try_catch;
-
 	for (int i = 0; i < nargs; i++)
 		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
 	Handle<v8::Value> result =
-		fn->Call(global_context->Global(), nargs, args);
-	if (result.IsEmpty())
-		throw js_error(try_catch);
+		DoCall(fn, global_context->Global(), nargs, args);
 
 	if (rettype)
 		return ToDatum(result, &fcinfo->isnull, rettype);
@@ -235,8 +256,6 @@ CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 	Converter			conv(tupdesc);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS + 1];
 
-	TryCatch			try_catch;
-
 	for (int i = 0; i < nargs; i++)
 		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
 
@@ -245,9 +264,7 @@ CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 	args[nargs] = CreateYieldFunction(&conv, tupstore);
 
 	Handle<v8::Value> result =
-		fn->Call(global_context->Global(), nargs + 1, args);
-	if (result.IsEmpty())
-		throw js_error(try_catch);
+		DoCall(fn, global_context->Global(), nargs + 1, args);
 
 	if (result->IsUndefined())
 	{
@@ -299,7 +316,6 @@ CallTrigger(PG_FUNCTION_ARGS, Handle<Function> fn)
 
 	Handle<Context>		global_context = GetGlobalContext();
 	Context::Scope		context_scope(global_context);
-	TryCatch			try_catch;
 
 	if (TRIGGER_FIRED_FOR_ROW(event))
 	{
@@ -381,9 +397,7 @@ CallTrigger(PG_FUNCTION_ARGS, Handle<Function> fn)
 	args[9] = tgargs;
 
 	Handle<v8::Value> newtup =
-		fn->Call(global_context->Global(), lengthof(args), args);
-	if (newtup.IsEmpty())
-		throw js_error(try_catch);
+		DoCall(fn, global_context->Global(), lengthof(args), args);
 
 	// TODO: replace NEW tuple if modified.
 

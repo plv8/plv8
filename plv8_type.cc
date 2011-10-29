@@ -216,7 +216,7 @@ ToValue(Datum datum, bool isnull, plv8_type *type)
 {
 	if (isnull)
 		return Null();
-	else if (type->category == TYPCATEGORY_ARRAY)
+	else if (type->category == TYPCATEGORY_ARRAY || type->typid == RECORDARRAYOID)
 		return ToArrayValue(datum, isnull, type);
 	else if (type->category == TYPCATEGORY_COMPOSITE || type->typid == RECORDOID)
 		return ToRecordValue(datum, isnull, type);
@@ -282,8 +282,20 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 						type->typid, type->len, type->byval, type->align,
 						&values, &nulls, &nelems);
 	Handle<Array>  result = Array::New(nelems);
+	plv8_type base;
+	bool    ispreferred;
+
+	base.typid = type->typid;
+	if (base.typid == RECORDARRAYOID)
+		base.typid = RECORDOID;
+	
+
+	base.fn_input.fn_mcxt = base.fn_output.fn_mcxt = type->fn_input.fn_mcxt;
+	get_type_category_preferred(base.typid, &(base.category), &ispreferred);
+	get_typlenbyvalalign(base.typid, &(base.len), &(base.byval), &(base.align));
+
 	for (int i = 0; i < nelems; i++)
-		result->Set(i, ToValue(values[i], nulls[i], type));
+		result->Set(i, ToValue(values[i], nulls[i], &base));
 
 	return result;
 }

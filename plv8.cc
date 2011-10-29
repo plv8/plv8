@@ -749,9 +749,29 @@ GetGlobalContext() throw()
 		global->Set(String::NewSymbol("WARNING"), Int32::New(WARNING));
 		// ERROR or higher severity levels are not allowed. Use "throw" instead.
 
-		// built-in function executeSql(sql)
+		// built-in SPI access
+
 		global->Set(String::NewSymbol("executeSql"),
 					FunctionTemplate::New(ExecuteSql));
+
+		global->Set(String::NewSymbol("createPlan"),
+					FunctionTemplate::New(CreatePlan));
+		
+		global->Set(String::NewSymbol("executePlan"),
+					FunctionTemplate::New(ExecutePlan));
+		
+		global->Set(String::NewSymbol("freePlan"),
+					FunctionTemplate::New(FreePlan));
+		
+		global->Set(String::NewSymbol("createCursor"),
+					FunctionTemplate::New(CreateCursor));
+		
+		global->Set(String::NewSymbol("fetchCursor"),
+					FunctionTemplate::New(FetchCursor));
+		
+		global->Set(String::NewSymbol("closeCursor"),
+					FunctionTemplate::New(CloseCursor));
+
 
 		global_context = Context::New(NULL, global);
 	}

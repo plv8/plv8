@@ -13,7 +13,9 @@ extern "C" {
 
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
+#include "parser/parse_type.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
 
 #undef delete
 #undef namespace
@@ -27,6 +29,12 @@ using namespace v8;
 static Handle<v8::Value> PrintInternal(const Arguments& args);
 static Handle<v8::Value> ExecuteSqlInternal(const Arguments& args);
 static Handle<v8::Value> ExecuteSqlWithArgs(const Arguments& args);
+static Handle<v8::Value> CreatePlanInternal(const Arguments& args);
+static Handle<v8::Value> ExecutePlanInternal(const Arguments& args);
+static Handle<v8::Value> FreePlanInternal(const Arguments& args);
+static Handle<v8::Value> CreateCursorInternal(const Arguments& args);
+static Handle<v8::Value> FetchCursorInternal(const Arguments& args);
+static Handle<v8::Value> CloseCursorInternal(const Arguments& args);
 static Handle<v8::Value> YieldInternal(const Arguments& args);
 
 /*
@@ -258,6 +266,188 @@ ExecuteSqlWithArgs(const Arguments& args)
 	PG_END_TRY();
 
 	return SPIResultToValue(status);
+}
+
+Handle<v8::Value> 
+CreatePlan(const Arguments& args) throw()
+{
+	return SafeCall(CreatePlanInternal, args);
+}
+
+static Handle<v8::Value> 
+CreatePlanInternal(const Arguments& args)
+{
+	SPIPlanPtr initial, saved;
+	CString    sql(args[0]);
+	Oid *types = NULL;
+	Oid typeoid;
+	int32 typemod;
+	
+	if (args.Length() > 1)
+		types = (Oid *) palloc(sizeof(Oid) * args.Length() - 1);
+	
+	for (int i = 1; i < args.Length(); i++)
+	{
+		CString  typestr(args[i]);
+		parseTypeString(typestr, &typeoid, &typemod);
+		types[i-1] = typeoid;
+	}
+    
+	initial = SPI_prepare(sql,args.Length() - 1,types);
+	
+	saved = SPI_saveplan(initial);
+	SPI_freeplan(initial);
+	return External::Wrap(saved);
+}
+
+Handle<v8::Value> 
+ExecutePlan(const Arguments& args) throw()
+{
+	return SafeCall(ExecutePlanInternal, args);
+}
+
+static Handle<v8::Value> 
+ExecutePlanInternal(const Arguments& args)
+{
+	return ThrowError("executePlan is not yet implemented");
+}
+
+Handle<v8::Value> 
+FreePlan(const Arguments& args) throw()
+{
+	return SafeCall(FreePlanInternal, args);
+}
+
+
+static Handle<v8::Value> 
+FreePlanInternal(const Arguments& args)
+{
+	int                     status;
+	SPIPlanPtr      plan;
+	
+	plan = (SPIPlanPtr) External::Unwrap(args[0]);
+	status = SPI_freeplan(plan);
+    return Int32::New(status);
+}
+
+Handle<v8::Value>
+CreateCursor(const Arguments& args) throw()
+{
+	return SafeCall(CreateCursorInternal, args);
+}
+
+static Handle<v8::Value>
+CreateCursorInternal(const Arguments& args)
+{
+	SPIPlanPtr      plan;
+	Portal cursor;
+	int nargs;
+	Datum *cargs = NULL;
+	char *nulls = NULL;
+    
+	plan = (SPIPlanPtr) External::Unwrap(args[0]);
+	nargs = SPI_getargcount(plan);
+    
+	if (args.Length() - 1 != nargs)
+	{
+		// XXX Fill in error here
+	}
+	
+	if (nargs > 0)
+	{
+		cargs = (Datum *) palloc(sizeof(Datum) * nargs);
+		nulls = (char *) palloc(sizeof(char) * nargs);
+	}
+	
+	for (int i = 0; i < nargs; i++)
+	{
+		Handle<v8::Value> value = args[i+1];
+		
+		if (value->IsUndefined() || value->IsNull())
+		{
+			cargs[i] = (Datum) 0;
+			nulls[i] = 'n';
+		}
+		else
+		{
+			
+			// code stolen from plv8_fill_type()
+			plv8_type typinfo;
+			plv8_type *type = &typinfo;
+			Oid typid =  SPI_getargtypeid(plan, i);
+			MemoryContext mcxt = CurrentMemoryContext;
+			bool isnull, ispreferred;
+			nulls[i] = ' ';
+			
+			type->typid = typid;
+			type->fn_input.fn_mcxt = type->fn_output.fn_mcxt = mcxt;
+			get_type_category_preferred(typid, &type->category, &ispreferred);
+			get_typlenbyvalalign(typid, &type->len, &type->byval, &type->align);
+			
+			if (type->category == TYPCATEGORY_ARRAY)
+			{
+				Oid      elemid = get_element_type(typid);
+                
+				if (elemid == InvalidOid)
+					ereport(ERROR,
+							(errmsg("cannot determine element type of array: %u", typid)));
+				
+				type->typid = elemid;
+				get_typlenbyvalalign(type->typid, &type->len, &type->byval, &type->align);
+			}
+			
+			cargs[i] = ToDatum(value,&isnull,type);
+		}
+	}
+
+	cursor = SPI_cursor_open(NULL, plan, cargs, nulls, false);
+	Handle<String> cname = ToString(cursor->name, strlen(cursor->name));
+	return cname;
+}
+
+Handle<v8::Value> 
+FetchCursor(const Arguments& args) throw()
+{
+	return SafeCall(FetchCursorInternal, args);
+}
+
+static Handle<v8::Value> 
+FetchCursorInternal(const Arguments& args)
+{
+	CString cname(args[0]);
+	Portal cursor = SPI_cursor_find(cname);
+	SPI_cursor_fetch(cursor, true, 1);
+	
+	if (SPI_processed == 1)
+	{
+		// XXX: we need to cache this converter object instead of
+		// making a new one per row, but we can't cache it until
+		// we have the first row so we have a tupdesc
+		Converter               conv(SPI_tuptable->tupdesc);
+		Handle<v8::Object> result = conv.ToValue(SPI_tuptable->vals[0]);
+		CString rstr(result);
+		char * rcstr = rstr;
+		return result;
+	}
+	else
+	{
+		return Undefined();
+	}
+}
+
+Handle<v8::Value> 
+CloseCursor(const Arguments& args) throw()
+{
+	return SafeCall(CloseCursorInternal, args);
+}
+
+static Handle<v8::Value> 
+CloseCursorInternal(const Arguments& args)
+{
+	CString cname(args[0]);
+	Portal cursor = SPI_cursor_find(cname);
+	SPI_cursor_close(cursor);
+    return Int32::New(1);
 }
 
 Handle<v8::Value>

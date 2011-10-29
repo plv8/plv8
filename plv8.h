@@ -116,6 +116,12 @@ extern char *ToCStringCopy(const v8::String::Utf8Value &value);
 // plv8_func.cc
 extern v8::Handle<v8::Value> Print(const v8::Arguments& args) throw();
 extern v8::Handle<v8::Value> ExecuteSql(const v8::Arguments& args) throw();
+extern v8::Handle<v8::Value> CreatePlan(const v8::Arguments& args) throw();
+extern v8::Handle<v8::Value> ExecutePlan(const v8::Arguments& args) throw();
+extern v8::Handle<v8::Value> FreePlan(const v8::Arguments& args) throw();
+extern v8::Handle<v8::Value> CreateCursor(const v8::Arguments& args) throw();
+extern v8::Handle<v8::Value> FetchCursor(const v8::Arguments& args) throw();
+extern v8::Handle<v8::Value> CloseCursor(const v8::Arguments& arg) throw();
 extern v8::Handle<v8::Value> Yield(const v8::Arguments& args) throw();
 extern v8::Handle<v8::Function> CreateYieldFunction(Converter *conv, Tuplestorestate *tupstore);
 

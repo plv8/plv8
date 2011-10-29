@@ -283,7 +283,7 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 						&values, &nulls, &nelems);
 	Handle<Array>  result = Array::New(nelems);
 	for (int i = 0; i < nelems; i++)
-		result->Set(i, ToScalarValue(values[i], nulls[i], type));
+		result->Set(i, ToValue(values[i], nulls[i], type));
 
 	return result;
 }

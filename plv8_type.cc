@@ -214,8 +214,12 @@ ToRecordDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 Handle<v8::Value>
 ToValue(Datum datum, bool isnull, plv8_type *type)
 {
-	if (type->category == TYPCATEGORY_ARRAY)
+	if (isnull)
+		return Null();
+	else if (type->category == TYPCATEGORY_ARRAY)
 		return ToArrayValue(datum, isnull, type);
+	else if (type->category == TYPCATEGORY_COMPOSITE || type->typid == RECORDOID)
+		return ToRecordValue(datum, isnull, type);
 	else
 		return ToScalarValue(datum, isnull, type);
 }
@@ -223,12 +227,6 @@ ToValue(Datum datum, bool isnull, plv8_type *type)
 static Handle<v8::Value>
 ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 {
-	if (isnull)
-		return Null();
-
-	if (type->category == TYPCATEGORY_COMPOSITE)
-		return ToRecordValue(datum, isnull, type);
-
 	switch (type->typid)
 	{
 	case OIDOID:
@@ -280,9 +278,6 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 	bool	   *nulls;
 	int			nelems;
 
-	if (isnull)
-		return Null();
-
 	deconstruct_array(DatumGetArrayTypeP(datum),
 						type->typid, type->len, type->byval, type->align,
 						&values, &nulls, &nelems);
@@ -296,9 +291,6 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 static Handle<v8::Value>
 ToRecordValue(Datum datum, bool isnull, plv8_type *type)
 {
-	if (isnull)
-		return Null();
-
 	HeapTupleHeader	rec = DatumGetHeapTupleHeader(datum);
 	Oid				tupType;
 	int32			tupTypmod;

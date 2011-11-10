@@ -103,6 +103,7 @@ private:
 	Converter& operator = (const Converter&);
 };
 
+extern const char *FormatSPIStatus(int status) throw();
 extern v8::Handle<v8::Value> ThrowError(const char *message) throw();
 
 // plv8_type.cc

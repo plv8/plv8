@@ -167,6 +167,27 @@ SELECT * FROM return_sql();
 CREATE FUNCTION test_sql_error() RETURNS void AS $$ executeSql("ERROR") $$ LANGUAGE plv8;
 SELECT test_sql_error();
 
+CREATE FUNCTION catch_sql_error() RETURNS void AS $$
+try {
+	executeSql("throw SQL error");
+	print(NOTICE, "should not come here");
+} catch (e) {
+	print(NOTICE, e);
+}
+$$ LANGUAGE plv8;
+SELECT catch_sql_error();
+
+CREATE FUNCTION catch_sql_error_2() RETURNS void AS $$
+try {
+	executeSql("throw SQL error");
+	print(NOTICE, "should not come here");
+} catch (e) {
+	print(NOTICE, e);
+	executeSql("but cannot execute queries any more after error");
+}
+$$ LANGUAGE plv8;
+SELECT catch_sql_error_2();
+
 -- REPLACE FUNCTION
 CREATE FUNCTION replace_test() RETURNS integer AS $$ return 1; $$ LANGUAGE plv8;
 SELECT replace_test();

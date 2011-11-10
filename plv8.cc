@@ -166,12 +166,13 @@ DoCall(Handle<Function> fn, Handle<Object> context,
 	if (SPI_connect() != SPI_OK_CONNECT)
 		throw js_error(_("could not connect to SPI manager"));
 	Handle<v8::Value> result = fn->Call(context, nargs, args);
-	int	ret = SPI_finish();
+	int	status = SPI_finish();
 
 	if (result.IsEmpty())
 		throw js_error(try_catch);
-	if (ret != SPI_OK_FINISH)
-		throw js_error(_("SPI_finish() failed"));
+
+	if (status < 0)
+		throw js_error(FormatSPIStatus(status));
 
 	return result;
 }
@@ -715,6 +716,48 @@ plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt) throw()
 
 		type->typid = elemid;
 		get_typlenbyvalalign(type->typid, &type->len, &type->byval, &type->align);
+	}
+}
+
+/*
+ * NOTICE: the returned buffer could be an internal static buffer.
+ */
+const char *
+FormatSPIStatus(int status) throw()
+{
+	static char	private_buf[1024];
+
+	if (status > 0)
+		return "OK";
+
+	switch (status)
+	{
+		case SPI_ERROR_CONNECT:
+			return "SPI_ERROR_CONNECT";
+		case SPI_ERROR_COPY:
+			return "SPI_ERROR_COPY";
+		case SPI_ERROR_OPUNKNOWN:
+			return "SPI_ERROR_OPUNKNOWN";
+		case SPI_ERROR_UNCONNECTED:
+		case SPI_ERROR_TRANSACTION:
+			return _("current transaction is aborted, "
+					 "commands ignored until end of transaction block");
+		case SPI_ERROR_CURSOR:
+			return "SPI_ERROR_CURSOR";
+		case SPI_ERROR_ARGUMENT:
+			return "SPI_ERROR_ARGUMENT";
+		case SPI_ERROR_PARAM:
+			return "SPI_ERROR_PARAM";
+		case SPI_ERROR_NOATTRIBUTE:
+			return "SPI_ERROR_NOATTRIBUTE";
+		case SPI_ERROR_NOOUTFUNC:
+			return "SPI_ERROR_NOOUTFUNC";
+		case SPI_ERROR_TYPUNKNOWN:
+			return "SPI_ERROR_TYPUNKNOWN";
+		default:
+			snprintf(private_buf, sizeof(private_buf),
+				_("SPI_ERROR: %d"), status);
+			return private_buf;
 	}
 }
 

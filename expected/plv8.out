@@ -313,6 +313,30 @@ CREATE FUNCTION test_sql_error() RETURNS void AS $$ executeSql("ERROR") $$ LANGU
 SELECT test_sql_error();
 ERROR:  Error: syntax error at or near "ERROR"
 DETAIL:  test_sql_error() LINE 1:  executeSql("ERROR") 
+CREATE FUNCTION catch_sql_error() RETURNS void AS $$
+try {
+	executeSql("throw SQL error");
+	print(NOTICE, "should not come here");
+} catch (e) {
+	print(NOTICE, e);
+}
+$$ LANGUAGE plv8;
+SELECT catch_sql_error();
+NOTICE:  Error: syntax error at or near "throw"
+ERROR:  current transaction is aborted, commands ignored until end of transaction block
+CREATE FUNCTION catch_sql_error_2() RETURNS void AS $$
+try {
+	executeSql("throw SQL error");
+	print(NOTICE, "should not come here");
+} catch (e) {
+	print(NOTICE, e);
+	executeSql("but cannot execute queries any more after error");
+}
+$$ LANGUAGE plv8;
+SELECT catch_sql_error_2();
+NOTICE:  Error: syntax error at or near "throw"
+ERROR:  Error: current transaction is aborted, commands ignored until end of transaction block
+DETAIL:  catch_sql_error_2() LINE 7: 	executeSql("but cannot execute queries any more after error");
 -- REPLACE FUNCTION
 CREATE FUNCTION replace_test() RETURNS integer AS $$ return 1; $$ LANGUAGE plv8;
 SELECT replace_test();

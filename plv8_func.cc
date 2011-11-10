@@ -140,7 +140,7 @@ SPIResultToValue(int status)
 	Handle<v8::Value>	result;
 
 	if (status < 0)
-		return ThrowError("SPI failed");
+		return ThrowError(FormatSPIStatus(status));
 
 	switch (status)
 	{

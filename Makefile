@@ -10,7 +10,7 @@ EXTENSION = plv8
 DATA = plv8.control plv8--1.0.sql
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 inline json
-override SHLIB_LINK += -lv8
+SHLIB_LINK := $(SHLIB_LINK) -lv8
 
 CCFLAGS := $(filter-out -Wmissing-prototypes, $(CFLAGS))
 CCFLAGS := $(filter-out -Wdeclaration-after-statement, $(CCFLAGS))

@@ -1,3 +1,4 @@
+CREATE SCHEMA plv8;
 CREATE FUNCTION valid_json(json text) RETURNS boolean
 LANGUAGE plv8 IMMUTABLE STRICT
 AS $$
@@ -9,10 +10,10 @@ AS $$
   }
 $$;
 
-CREATE DOMAIN json AS text
+CREATE DOMAIN plv8.json AS text
         CONSTRAINT json_check CHECK (valid_json(VALUE));
 
-CREATE FUNCTION get_key(key text, json_raw text) RETURNS json
+CREATE FUNCTION get_key(key text, json_raw text) RETURNS plv8.json
 LANGUAGE plv8 IMMUTABLE STRICT
 AS $$
   var val = JSON.parse(json_raw)[key];
@@ -22,7 +23,7 @@ AS $$
 $$;
 
 CREATE TABLE jsononly (
-    data json
+    data plv8.json
 );
 
 COPY jsononly (data) FROM stdin;

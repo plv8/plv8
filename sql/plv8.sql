@@ -177,16 +177,42 @@ try {
 $$ LANGUAGE plv8;
 SELECT catch_sql_error();
 
-CREATE FUNCTION catch_sql_error_2() RETURNS void AS $$
+CREATE FUNCTION catch_sql_error_2() RETURNS text AS $$
 try {
 	executeSql("throw SQL error");
 	print(NOTICE, "should not come here");
 } catch (e) {
 	print(NOTICE, e);
-	executeSql("but cannot execute queries any more after error");
+	return executeSql("select 'and can execute queries again' t").shift().t;
 }
 $$ LANGUAGE plv8;
 SELECT catch_sql_error_2();
+
+-- subtransaction()
+CREATE TABLE subtrant(a int);
+CREATE FUNCTION test_subtransaction_catch() RETURNS void AS $$
+try {
+	subtransaction(function(){
+		executeSql("INSERT INTO subtrant VALUES(1)");
+		executeSql("INSERT INTO subtrant VALUES(1/0)");
+	});
+} catch (e) {
+	print(NOTICE, e);
+	executeSql("INSERT INTO subtrant VALUES(2)");
+}
+$$ LANGUAGE plv8;
+SELECT test_subtransaction_catch();
+SELECT * FROM subtrant;
+
+TRUNCATE subtrant;
+CREATE FUNCTION test_subtransaction_throw() RETURNS void AS $$
+subtransaction(function(){
+	executeSql("INSERT INTO subtrant VALUES(1)");
+	executeSql("INSERT INTO subtrant VALUES(1/0)");
+});
+$$ LANGUAGE plv8;
+SELECT test_subtransaction_throw();
+SELECT * FROM subtrant;
 
 -- REPLACE FUNCTION
 CREATE FUNCTION replace_test() RETURNS integer AS $$ return 1; $$ LANGUAGE plv8;

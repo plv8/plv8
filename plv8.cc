@@ -815,6 +815,8 @@ GetGlobalContext() throw()
 		global->Set(String::NewSymbol("closeCursor"),
 					FunctionTemplate::New(CloseCursor));
 
+		global->Set(String::NewSymbol("subtransaction"),
+					FunctionTemplate::New(Subtransaction));
 
 		global_context = Context::New(NULL, global);
 	}
@@ -948,6 +950,20 @@ js_error::js_error(TryCatch &try_catch) throw()
 	{
 		// nested error, keep quiet.
 	}
+}
+
+Handle<v8::Value>
+js_error::error_object()
+{
+	char *msg = pstrdup(m_msg ? m_msg : "unknown exception");
+	/*
+	 * Trim leading "Error: ", in case the message is generated from
+	 * another Error.
+	 */
+	if (strstr(msg, "Error: ") == msg)
+		msg += 7;
+	Handle<String> message = ToString(msg);
+	return Exception::Error(message);
 }
 
 __attribute__((noreturn))

@@ -11,6 +11,7 @@ extern "C" {
 #define	typename	typename_
 #define	using		using_
 
+#include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
 #include "parser/parse_type.h"
@@ -36,6 +37,18 @@ static Handle<v8::Value> CreateCursorInternal(const Arguments& args);
 static Handle<v8::Value> FetchCursorInternal(const Arguments& args);
 static Handle<v8::Value> CloseCursorInternal(const Arguments& args);
 static Handle<v8::Value> YieldInternal(const Arguments& args);
+static Handle<v8::Value> SubtransactionInternal(const Arguments& args);
+
+class SubTranBlock
+{
+private:
+	ResourceOwner		m_resowner;
+	MemoryContext		m_mcontext;
+public:
+	SubTranBlock();
+	void enter();
+	void exit(bool success);
+};
 
 /*
  * v8 is not exception-safe! We cannot throw C++ exceptions over v8 functions.
@@ -53,7 +66,7 @@ SafeCall(InvocationCallback fn, const Arguments& args) throw()
 	}
 	catch (js_error& e)
 	{
-		return ThrowError("internal exception");
+		return ThrowException(e.error_object());
 	}
 	catch (pg_error& e)
 	{
@@ -175,17 +188,21 @@ ExecuteSqlInternal(const Arguments& args)
 {
 	int			status;
 	CString		sql(args[0]);
+	SubTranBlock	subtran;
 
+	subtran.enter();
 	PG_TRY();
 	{
 		status = SPI_exec(sql, 0);
 	}
 	PG_CATCH();
 	{
+		subtran.exit(false);
 		throw pg_error();
 	}
 	PG_END_TRY();
 
+	subtran.exit(true);
 	return SPIResultToValue(status);
 }
 
@@ -254,6 +271,9 @@ ExecuteSqlWithArgs(const Arguments& args)
 		}
 	}
 
+	SubTranBlock	subtran;
+
+	subtran.enter();
 	PG_TRY();
 	{
 		status = SPI_execute_with_args(sql, nargs,
@@ -261,10 +281,12 @@ ExecuteSqlWithArgs(const Arguments& args)
 	}
 	PG_CATCH();
 	{
+		subtran.exit(false);
 		throw pg_error();
 	}
 	PG_END_TRY();
 
+	subtran.exit(true);
 	return SPIResultToValue(status);
 }
 
@@ -477,4 +499,68 @@ CreateYieldFunction(Converter *conv, Tuplestorestate *tupstore)
 	data->Set(0, External::Wrap(conv));
 	data->Set(1, External::Wrap(tupstore));
 	return FunctionTemplate::New(Yield, data)->GetFunction();
+}
+
+Handle<v8::Value>
+Subtransaction(const Arguments& args) throw()
+{
+	return SafeCall(SubtransactionInternal, args);
+}
+
+static Handle<v8::Value>
+SubtransactionInternal(const Arguments& args)
+{
+	if (args.Length() < 1)
+		return Local<v8::Value>(*v8::Undefined());
+	if (!args[0]->IsFunction())
+		return Local<v8::Value>(*v8::Undefined());
+	Handle<v8::Function> func = Local<v8::Function>(Function::Cast(*args[0]));
+
+	SubTranBlock	subtran;
+
+	subtran.enter();
+
+	Handle<v8::Value> emptyargs[] = {};
+	TryCatch try_catch;
+	Handle<v8::Value> result = func->Call(func, 0, emptyargs);
+
+	subtran.exit(!result.IsEmpty());
+
+	if (result.IsEmpty())
+		throw js_error(try_catch);
+	return result;
+}
+
+SubTranBlock::SubTranBlock()
+	: m_resowner(NULL),
+	  m_mcontext(NULL)
+{}
+
+void
+SubTranBlock::enter()
+{
+	m_resowner = CurrentResourceOwner;
+	m_mcontext = CurrentMemoryContext;
+	BeginInternalSubTransaction(NULL);
+	/* Do not want to leave the previous memory context */
+	MemoryContextSwitchTo(m_mcontext);
+
+}
+
+void
+SubTranBlock::exit(bool success)
+{
+	if (success)
+		ReleaseCurrentSubTransaction();
+	else
+		RollbackAndReleaseCurrentSubTransaction();
+
+	MemoryContextSwitchTo(m_mcontext);
+	CurrentResourceOwner = m_resowner;
+
+	/*
+	 * AtEOSubXact_SPI() should not have popped any SPI context, but just
+	 * in case it did, make sure we remain connected.
+	 */
+	SPI_restore_connection();
 }

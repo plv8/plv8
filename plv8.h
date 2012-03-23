@@ -30,6 +30,7 @@ public:
 	js_error() throw();
 	js_error(const char *msg) throw();
 	js_error(v8::TryCatch &try_catch) throw();
+	v8::Handle<v8::Value> error_object();
 	__attribute__((noreturn)) void rethrow() throw();
 };
 
@@ -125,5 +126,6 @@ extern v8::Handle<v8::Value> FetchCursor(const v8::Arguments& args) throw();
 extern v8::Handle<v8::Value> CloseCursor(const v8::Arguments& arg) throw();
 extern v8::Handle<v8::Value> Yield(const v8::Arguments& args) throw();
 extern v8::Handle<v8::Function> CreateYieldFunction(Converter *conv, Tuplestorestate *tupstore);
+extern v8::Handle<v8::Value> Subtransaction(const v8::Arguments& args) throw();
 
 #endif	// _PLV8_

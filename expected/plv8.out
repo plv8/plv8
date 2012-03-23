@@ -323,20 +323,68 @@ try {
 $$ LANGUAGE plv8;
 SELECT catch_sql_error();
 NOTICE:  Error: syntax error at or near "throw"
-ERROR:  current transaction is aborted, commands ignored until end of transaction block
-CREATE FUNCTION catch_sql_error_2() RETURNS void AS $$
+ catch_sql_error 
+-----------------
+ 
+(1 row)
+
+CREATE FUNCTION catch_sql_error_2() RETURNS text AS $$
 try {
 	executeSql("throw SQL error");
 	print(NOTICE, "should not come here");
 } catch (e) {
 	print(NOTICE, e);
-	executeSql("but cannot execute queries any more after error");
+	return executeSql("select 'and can execute queries again' t").shift().t;
 }
 $$ LANGUAGE plv8;
 SELECT catch_sql_error_2();
 NOTICE:  Error: syntax error at or near "throw"
-ERROR:  Error: current transaction is aborted, commands ignored until end of transaction block
-DETAIL:  catch_sql_error_2() LINE 7: 	executeSql("but cannot execute queries any more after error");
+       catch_sql_error_2       
+-------------------------------
+ and can execute queries again
+(1 row)
+
+-- subtransaction()
+CREATE TABLE subtrant(a int);
+CREATE FUNCTION test_subtransaction_catch() RETURNS void AS $$
+try {
+	subtransaction(function(){
+		executeSql("INSERT INTO subtrant VALUES(1)");
+		executeSql("INSERT INTO subtrant VALUES(1/0)");
+	});
+} catch (e) {
+	print(NOTICE, e);
+	executeSql("INSERT INTO subtrant VALUES(2)");
+}
+$$ LANGUAGE plv8;
+SELECT test_subtransaction_catch();
+NOTICE:  Error: division by zero
+ test_subtransaction_catch 
+---------------------------
+ 
+(1 row)
+
+SELECT * FROM subtrant;
+ a 
+---
+ 2
+(1 row)
+
+TRUNCATE subtrant;
+CREATE FUNCTION test_subtransaction_throw() RETURNS void AS $$
+subtransaction(function(){
+	executeSql("INSERT INTO subtrant VALUES(1)");
+	executeSql("INSERT INTO subtrant VALUES(1/0)");
+});
+$$ LANGUAGE plv8;
+SELECT test_subtransaction_throw();
+ERROR:  Error: division by zero
+DETAIL:  test_subtransaction_throw() LINE 2: subtransaction(function(){
+SELECT * FROM subtrant;
+ a 
+---
+(0 rows)
+
 -- REPLACE FUNCTION
 CREATE FUNCTION replace_test() RETURNS integer AS $$ return 1; $$ LANGUAGE plv8;
 SELECT replace_test();

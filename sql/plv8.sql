@@ -97,18 +97,18 @@ SELECT * FROM return_record(1, 'a') AS t(x text, y text);
 
 CREATE FUNCTION set_of_records() RETURNS SETOF rec AS
 $$
-	yield( { "i": 1, "t": "a" } );
-	yield( { "i": 2, "t": "b" } );
-	yield( { "i": 3, "t": "c" } );
+	plv8.return_next( { "i": 1, "t": "a" } );
+	plv8.return_next( { "i": 2, "t": "b" } );
+	plv8.return_next( { "i": 3, "t": "c" } );
 $$
 LANGUAGE plv8;
 SELECT * FROM set_of_records();
 
 CREATE FUNCTION set_of_integers() RETURNS SETOF integer AS
 $$
-	yield( 1 );
-	yield( 2 );
-	yield( 3 );
+	plv8.return_next( 1 );
+	plv8.return_next( 2 );
+	plv8.return_next( 3 );
 $$
 LANGUAGE plv8;
 SELECT * FROM set_of_integers();
@@ -128,25 +128,25 @@ $$
 LANGUAGE plv8;
 SELECT one_out(123);
 
--- print()
-CREATE FUNCTION test_print(arg text) RETURNS void AS
+-- elog()
+CREATE FUNCTION test_elog(arg text) RETURNS void AS
 $$
-	print(NOTICE, 'args =', arg);
-	print(WARNING, 'warning');
-	print(20, 'ERROR is not allowed');
+	plv8.elog(NOTICE, 'args =', arg);
+	plv8.elog(WARNING, 'warning');
+	plv8.elog(20, 'ERROR is not allowed');
 $$
 LANGUAGE plv8;
-SELECT test_print('ABC');
+SELECT test_elog('ABC');
 
 -- executeSql()
 CREATE TABLE test_tbl (i integer, s text);
 CREATE FUNCTION test_sql() RETURNS integer AS
 $$
-	var rows = executeSql("SELECT i, 's' || i AS s FROM generate_series(1, 4) AS t(i)");
+	var rows = plv8.execute("SELECT i, 's' || i AS s FROM generate_series(1, 4) AS t(i)");
 	for (var r = 0; r < rows.length; r++)
 	{
-		var result = executeSql("INSERT INTO test_tbl VALUES(" + rows[r].i + ",'" + rows[r].s + "')");
-		print(NOTICE, JSON.stringify(rows[r]), result);
+		var result = plv8.execute("INSERT INTO test_tbl VALUES(" + rows[r].i + ",'" + rows[r].s + "')");
+		plv8.elog(NOTICE, JSON.stringify(rows[r]), result);
 	}
 	return rows.length;
 $$
@@ -156,7 +156,7 @@ SELECT * FROM test_tbl;
 
 CREATE FUNCTION return_sql() RETURNS SETOF test_tbl AS
 $$
-	return executeSql(
+	return plv8.execute(
 		"SELECT i, $1 || i AS s FROM generate_series(1, $2) AS t(i)",
 		[ 's', 4 ]
 	);
@@ -164,26 +164,26 @@ $$
 LANGUAGE plv8;
 SELECT * FROM return_sql();
 
-CREATE FUNCTION test_sql_error() RETURNS void AS $$ executeSql("ERROR") $$ LANGUAGE plv8;
+CREATE FUNCTION test_sql_error() RETURNS void AS $$ plv8.execute("ERROR") $$ LANGUAGE plv8;
 SELECT test_sql_error();
 
 CREATE FUNCTION catch_sql_error() RETURNS void AS $$
 try {
-	executeSql("throw SQL error");
-	print(NOTICE, "should not come here");
+	plv8.execute("throw SQL error");
+	plv8.elog(NOTICE, "should not come here");
 } catch (e) {
-	print(NOTICE, e);
+	plv8.elog(NOTICE, e);
 }
 $$ LANGUAGE plv8;
 SELECT catch_sql_error();
 
 CREATE FUNCTION catch_sql_error_2() RETURNS text AS $$
 try {
-	executeSql("throw SQL error");
-	print(NOTICE, "should not come here");
+	plv8.execute("throw SQL error");
+	plv8.elog(NOTICE, "should not come here");
 } catch (e) {
-	print(NOTICE, e);
-	return executeSql("select 'and can execute queries again' t").shift().t;
+	plv8.elog(NOTICE, e);
+	return plv8.execute("select 'and can execute queries again' t").shift().t;
 }
 $$ LANGUAGE plv8;
 SELECT catch_sql_error_2();
@@ -192,13 +192,13 @@ SELECT catch_sql_error_2();
 CREATE TABLE subtrant(a int);
 CREATE FUNCTION test_subtransaction_catch() RETURNS void AS $$
 try {
-	subtransaction(function(){
-		executeSql("INSERT INTO subtrant VALUES(1)");
-		executeSql("INSERT INTO subtrant VALUES(1/0)");
+	plv8.subtransaction(function(){
+		plv8.execute("INSERT INTO subtrant VALUES(1)");
+		plv8.execute("INSERT INTO subtrant VALUES(1/0)");
 	});
 } catch (e) {
-	print(NOTICE, e);
-	executeSql("INSERT INTO subtrant VALUES(2)");
+	plv8.elog(NOTICE, e);
+	plv8.execute("INSERT INTO subtrant VALUES(2)");
 }
 $$ LANGUAGE plv8;
 SELECT test_subtransaction_catch();
@@ -206,9 +206,9 @@ SELECT * FROM subtrant;
 
 TRUNCATE subtrant;
 CREATE FUNCTION test_subtransaction_throw() RETURNS void AS $$
-subtransaction(function(){
-	executeSql("INSERT INTO subtrant VALUES(1)");
-	executeSql("INSERT INTO subtrant VALUES(1/0)");
+plv8.subtransaction(function(){
+	plv8.execute("INSERT INTO subtrant VALUES(1)");
+	plv8.execute("INSERT INTO subtrant VALUES(1/0)");
 });
 $$ LANGUAGE plv8;
 SELECT test_subtransaction_throw();
@@ -223,10 +223,10 @@ SELECT replace_test();
 -- TRIGGER
 CREATE FUNCTION test_trigger() RETURNS trigger AS
 $$
-	print(NOTICE, "NEW = ", JSON.stringify(NEW));
-	print(NOTICE, "OLD = ", JSON.stringify(OLD));
-	print(NOTICE, "TG_OP = ", TG_OP);
-	print(NOTICE, "TG_ARGV = ", TG_ARGV);
+	plv8.elog(NOTICE, "NEW = ", JSON.stringify(NEW));
+	plv8.elog(NOTICE, "OLD = ", JSON.stringify(OLD));
+	plv8.elog(NOTICE, "TG_OP = ", TG_OP);
+	plv8.elog(NOTICE, "TG_ARGV = ", TG_ARGV);
 $$
 LANGUAGE "plv8";
 
@@ -248,3 +248,46 @@ SELECT reference_error();
 
 CREATE FUNCTION throw() RETURNS void AS $$throw new Error("an error");$$ LANGUAGE plv8;
 SELECT throw();
+
+-- SPI operations
+CREATE FUNCTION prep1() RETURNS void AS $$
+var plan = plv8.prepare("SELECT * FROM test_tbl");
+plv8.elog(INFO, plan.toString());
+var rows = plan.execute();
+for(var i = 0; i < rows.length; i++) {
+  plv8.elog(INFO, JSON.stringify(rows[i]));
+}
+var cursor = plan.cursor();
+plv8.elog(INFO, cursor.toString());
+var row;
+while(row = cursor.fetch()) {
+  plv8.elog(INFO, JSON.stringify(row));
+}
+cursor.close();
+plan.free();
+
+var plan = plv8.prepare("SELECT * FROM test_tbl WHERE i = $1 and s = $2", ["int", "text"]);
+var rows = plan.execute([2, "s2"]);
+plv8.elog(INFO, "rows.length = ", rows.length);
+var cursor = plan.cursor([2, "s2"]);
+plv8.elog(INFO, JSON.stringify(cursor.fetch()));
+cursor.close();
+plan.free();
+
+try{
+  var plan = plv8.prepare("SELECT * FROM test_tbl");
+  plan.free();
+  plan.execute();
+}catch(e){
+  plv8.elog(WARNING, e);
+}
+try{
+  var plan = plv8.prepare("SELECT * FROM test_tbl");
+  var cursor = plan.cursor();
+  cursor.close();
+  cursor.fetch();
+}catch(e){
+  plv8.elog(WARNING, e);
+}
+$$ LANGUAGE plv8 STRICT;
+SELECT prep1();

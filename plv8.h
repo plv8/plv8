@@ -108,6 +108,8 @@ extern const char *FormatSPIStatus(int status) throw();
 extern v8::Handle<v8::Value> ThrowError(const char *message) throw();
 
 // plv8_type.cc
+extern void plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt = NULL) throw();
+extern Oid InferredDatumType(v8::Handle<v8::Value> value);
 extern Datum ToDatum(v8::Handle<v8::Value> value, bool *isnull, plv8_type *type);
 extern v8::Handle<v8::Value> ToValue(Datum datum, bool isnull, plv8_type *type);
 extern v8::Handle<v8::String> ToString(Datum value, plv8_type *type);
@@ -127,5 +129,7 @@ extern v8::Handle<v8::Value> CloseCursor(const v8::Arguments& arg) throw();
 extern v8::Handle<v8::Value> Yield(const v8::Arguments& args) throw();
 extern v8::Handle<v8::Function> CreateYieldFunction(Converter *conv, Tuplestorestate *tupstore);
 extern v8::Handle<v8::Value> Subtransaction(const v8::Arguments& args) throw();
+
+extern void SetupPlv8Functions(v8::Handle<v8::ObjectTemplate> plv8);
 
 #endif	// _PLV8_

@@ -80,7 +80,6 @@ static HTAB *plv8_proc_cache_hash = NULL;
  * They could raise errors with elog/ereport(ERROR).
  */
 static plv8_proc *plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames) throw();
-static void plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt) throw();
 
 /*
  * CamelCaseFunctions are C++ functions.
@@ -256,6 +255,8 @@ CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 	Context::Scope		context_scope(global_context);
 	Converter			conv(tupdesc);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS + 1];
+	Handle<Object>		plv8obj = Handle<Object>::Cast(
+			global_context->Global()->Get(String::NewSymbol("plv8")));
 
 	for (int i = 0; i < nargs; i++)
 		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
@@ -264,8 +265,13 @@ CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 	// TODO: yield should be passed as a global variable.
 	args[nargs] = CreateYieldFunction(&conv, tupstore);
 
+	/*
+	 * Not safe for recursive calls.  Revisit when we introduce SQL function call.
+	 */
+	plv8obj->Set(String::NewSymbol("return_next"), CreateYieldFunction(&conv, tupstore));
 	Handle<v8::Value> result =
 		DoCall(fn, global_context->Global(), nargs + 1, args);
+	plv8obj->Delete(String::NewSymbol("return_next"));
 
 	if (result->IsUndefined())
 	{
@@ -693,32 +699,6 @@ CreateFunction(
 	return fn;
 }
 
-static void
-plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt) throw()
-{
-	bool    ispreferred;
-
-	if (!mcxt)
-		mcxt = CurrentMemoryContext;
-
-	type->typid = typid;
-	type->fn_input.fn_mcxt = type->fn_output.fn_mcxt = mcxt;
-	get_type_category_preferred(typid, &type->category, &ispreferred);
-	get_typlenbyvalalign(typid, &type->len, &type->byval, &type->align);
-
-	if (type->category == TYPCATEGORY_ARRAY)
-	{
-		Oid      elemid = get_element_type(typid);
-
-		if (elemid == InvalidOid)
-			ereport(ERROR,
-				(errmsg("cannot determine element type of array: %u", typid)));
-
-		type->typid = elemid;
-		get_typlenbyvalalign(type->typid, &type->len, &type->byval, &type->align);
-	}
-}
-
 /*
  * NOTICE: the returned buffer could be an internal static buffer.
  */
@@ -817,6 +797,13 @@ GetGlobalContext() throw()
 
 		global->Set(String::NewSymbol("subtransaction"),
 					FunctionTemplate::New(Subtransaction));
+
+
+		Handle<ObjectTemplate>	plv8 = ObjectTemplate::New();
+
+		SetupPlv8Functions(plv8);
+
+		global->Set(String::NewSymbol("plv8"), plv8);
 
 		global_context = Context::New(NULL, global);
 	}

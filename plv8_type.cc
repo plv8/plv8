@@ -40,6 +40,57 @@ static Datum EpochToTimestampTz(double epoch);
 static double DateToEpoch(DateADT date);
 static Datum EpochToDate(double epoch);
 
+void
+plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt) throw()
+{
+	bool    ispreferred;
+
+	if (!mcxt)
+		mcxt = CurrentMemoryContext;
+
+	type->typid = typid;
+	type->fn_input.fn_mcxt = type->fn_output.fn_mcxt = mcxt;
+	get_type_category_preferred(typid, &type->category, &ispreferred);
+	get_typlenbyvalalign(typid, &type->len, &type->byval, &type->align);
+
+	if (type->category == TYPCATEGORY_ARRAY)
+	{
+		Oid      elemid = get_element_type(typid);
+
+		if (elemid == InvalidOid)
+			ereport(ERROR,
+				(errmsg("cannot determine element type of array: %u", typid)));
+
+		type->typid = elemid;
+		get_typlenbyvalalign(type->typid, &type->len, &type->byval, &type->align);
+	}
+}
+
+Oid
+InferredDatumType(Handle<v8::Value> value)
+{
+	if (value->IsUndefined() || value->IsNull())
+		return TEXTOID;
+	if (value->IsBoolean())
+		return BOOLOID;
+	else if (value->IsInt32())
+		return INT4OID;
+	else if (value->IsUint32())
+		return INT8OID;
+	else if (value->IsNumber())
+		return FLOAT8OID;
+	else if (value->IsString())
+		return TEXTOID;
+	else if (value->IsDate())
+		return TIMESTAMPOID;
+/*
+	else if (value->IsObject())
+	else if (value->IsArray())
+*/
+
+	return InvalidOid;
+}
+
 Datum
 ToDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 {

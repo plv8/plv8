@@ -704,11 +704,10 @@ ValueGetDatum(Handle<v8::Value> value, Oid typid, char *isnull)
 	}
 	else
 	{
-		plv8_type	typinfo;
+		plv8_type	typinfo = { 0 };
 		bool		IsNull;
 		Datum		datum;
 
-		memset(&typinfo, 0, sizeof(typinfo));
 		plv8_fill_type(&typinfo, typid);
 		datum = ToDatum(value, &IsNull, &typinfo);
 		*isnull = (IsNull ?  'n' : ' ');

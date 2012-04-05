@@ -11,14 +11,16 @@ extern "C" {
 #define	typename	typename_
 #define	using		using_
 
+#include "access/xact.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/trigger.h"
 #include "executor/spi.h"
 #include "funcapi.h"
 #include "miscadmin.h"
-#include "utils/memutils.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
+#include "utils/memutils.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
@@ -37,6 +39,8 @@ PG_FUNCTION_INFO_V1(plv8_call_validator);
 Datum	plv8_call_handler(PG_FUNCTION_ARGS) throw();
 Datum	plv8_call_validator(PG_FUNCTION_ARGS) throw();
 
+void _PG_init(void);
+
 #if PG_VERSION_NUM >= 90000
 PG_FUNCTION_INFO_V1(plv8_inline_handler);
 Datum	plv8_inline_handler(PG_FUNCTION_ARGS) throw();
@@ -49,18 +53,30 @@ typedef struct plv8_proc_cache
 {
 	Oid						fn_oid;
 
-	Persistent<Function>	function;
+	Persistent<Script>		script;
 	char					proname[NAMEDATALEN];
 	char				   *prosrc;
-	
+
 	TransactionId			fn_xmin;
 	ItemPointerData			fn_tid;
-	
+
 	int						nargs;
 	bool					retset;		/* true if SRF */
 	Oid						rettype;
 	Oid						argtypes[FUNC_MAX_ARGS];
 } plv8_proc_cache;
+
+/*
+ * The function and context are created at the first invocation.  Their
+ * lifetime is same as plv8_poc, but they are not palloc'ed memory,
+ * so we need to clear them at the end of transaction.
+ */
+typedef struct plv8_exec_env
+{
+	Persistent<Function>	function;
+	Persistent<Context>		context;
+	struct plv8_exec_env   *next;
+} plv8_exec_env;
 
 /*
  * We cannot cache plv8_type inter executions because it has FmgrInfo fields.
@@ -69,33 +85,103 @@ typedef struct plv8_proc_cache
 typedef struct plv8_proc
 {
 	plv8_proc_cache		   *cache;
+	plv8_exec_env		   *xenv;
 	plv8_type				rettype;
 	plv8_type				argtypes[FUNC_MAX_ARGS];
 } plv8_proc;
 
 static HTAB *plv8_proc_cache_hash = NULL;
 
+static plv8_exec_env		   *exec_env_head = NULL;
 /*
- * loser_case_functions are postgres-like C functions.
+ * The separate context feature is currently experimental.  One benchmark shows
+ * creating a new Context takes 1 ms or so, which may or may not be fine
+ * depending on use cases.  It is much, much longer than a typical hash_search.
+ */
+static bool plv8_use_separate_context = false;
+
+/*
+ * lower_case_functions are postgres-like C functions.
  * They could raise errors with elog/ereport(ERROR).
  */
 static plv8_proc *plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames) throw();
+static void plv8_xact_cb(XactEvent event, void *arg);
 
 /*
  * CamelCaseFunctions are C++ functions.
  * They could raise errors with C++ throw statements, or never throw exceptions.
  */
+static plv8_exec_env *CreateExecEnv(Handle<Script> script);
 static plv8_proc *Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger);
-static Handle<Function> CreateFunction(const char *proname, int proarglen,
+static Local<Script> CompileScript(const char *proname, int proarglen,
 					const char *proargs[], const char *prosrc,
 					bool is_trigger, bool retset);
-static Datum CallFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
+static Datum CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		int nargs, plv8_type argtypes[], plv8_type *rettype);
-static Datum CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
+static Datum CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		int nargs, plv8_type argtypes[], plv8_type *rettype);
-static Datum CallTrigger(PG_FUNCTION_ARGS, Handle<Function> fn);
-static Handle<Context> GetGlobalContext() throw();
+static Datum CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv);
+static Persistent<Context> GetGlobalContext() throw();
+static Persistent<ObjectTemplate> GetGlobalObjectTemplate() throw();
 
+void
+_PG_init(void)
+{
+	DefineCustomBoolVariable("plv8.use_separate_context",
+							 gettext_noop("ON to use separate context for each function execution."),
+							 gettext_noop("Enabling this may increase execution overhead."),
+							 &plv8_use_separate_context,
+							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+	RegisterXactCallback(plv8_xact_cb, NULL);
+}
+
+static void
+plv8_xact_cb(XactEvent event, void *arg)
+{
+	plv8_exec_env	   *env = exec_env_head;
+
+	while (env)
+	{
+		if (!env->function.IsEmpty())
+		{
+			env->function.Dispose();
+			env->function.Clear();
+		}
+		if (!env->context.IsEmpty() &&
+				GetGlobalContext() != env->context)
+		{
+			env->context.Dispose();
+			env->context.Clear();
+		}
+		env = env->next;
+		/*
+		 * Each item was allocated in TopTransactionContext, so
+		 * it will be freed eventually.
+		 */
+	}
+	exec_env_head = NULL;
+}
+
+static inline plv8_exec_env *
+plv8_new_exec_env()
+{
+	plv8_exec_env	   *xenv = (plv8_exec_env *)
+		MemoryContextAllocZero(TopTransactionContext, sizeof(plv8_exec_env));
+
+	new(&xenv->context) Persistent<Context>();
+	new(&xenv->function) Persistent<Function>();
+
+	/*
+	 * Add it to the list, which will be freed in the end of top transaction.
+	 */
+	xenv->next = exec_env_head;
+	exec_env_head = xenv;
+
+	return xenv;
+}
 
 Datum
 plv8_call_handler(PG_FUNCTION_ARGS) throw()
@@ -114,12 +200,12 @@ plv8_call_handler(PG_FUNCTION_ARGS) throw()
 		plv8_proc_cache *cache = proc->cache;
 
 		if (is_trigger)
-			return CallTrigger(fcinfo, cache->function);
+			return CallTrigger(fcinfo, proc->xenv);
 		else if (cache->retset)
-			return CallSRFunction(fcinfo, cache->function,
+			return CallSRFunction(fcinfo, proc->xenv,
 						cache->nargs, proc->argtypes, &proc->rettype);
 		else
-			return CallFunction(fcinfo, cache->function,
+			return CallFunction(fcinfo, proc->xenv,
 						cache->nargs, proc->argtypes, &proc->rettype);
 	}
 	catch (js_error& e)	{ e.rethrow(); }
@@ -140,9 +226,10 @@ plv8_inline_handler(PG_FUNCTION_ARGS) throw()
 	{
 		HandleScope			handle_scope;
 
-		Handle<Function>	fn = CreateFunction(NULL, 0, NULL,
+		Handle<Script>		script = CompileScript(NULL, 0, NULL,
 										codeblock->source_text, false, false);
-		return CallFunction(fcinfo, fn, 0, NULL, NULL);
+		plv8_exec_env	   *xenv = CreateExecEnv(script);
+		return CallFunction(fcinfo, xenv, 0, NULL, NULL);
 	}
 	catch (js_error& e)	{ e.rethrow(); }
 	catch (pg_error& e)	{ e.rethrow(); }
@@ -177,17 +264,17 @@ DoCall(Handle<Function> fn, Handle<Object> context,
 }
 
 static Datum
-CallFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
+CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	int nargs, plv8_type argtypes[], plv8_type *rettype)
 {
-	Handle<Context>		global_context = GetGlobalContext();
-	Context::Scope		context_scope(global_context);
+	Handle<Context>		context = xenv->context;
+	Context::Scope		context_scope(context);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS];
 
 	for (int i = 0; i < nargs; i++)
 		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
 	Handle<v8::Value> result =
-		DoCall(fn, global_context->Global(), nargs, args);
+		DoCall(xenv->function, context->Global(), nargs, args);
 
 	if (rettype)
 		return ToDatum(result, &fcinfo->isnull, rettype);
@@ -243,7 +330,7 @@ CreateTupleStore(PG_FUNCTION_ARGS, TupleDesc *tupdesc)
 }
 
 static Datum
-CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
+CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	int nargs, plv8_type argtypes[], plv8_type *rettype)
 {
 	TupleDesc			tupdesc;
@@ -251,12 +338,12 @@ CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 
 	tupstore = CreateTupleStore(fcinfo, &tupdesc);
 
-	Handle<Context>		global_context = GetGlobalContext();
-	Context::Scope		context_scope(global_context);
+	Handle<Context>		context = xenv->context;
+	Context::Scope		context_scope(context);
 	Converter			conv(tupdesc);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS + 1];
 	Handle<Object>		plv8obj = Handle<Object>::Cast(
-			global_context->Global()->Get(String::NewSymbol("plv8")));
+			context->Global()->Get(String::NewSymbol("plv8")));
 
 	for (int i = 0; i < nargs; i++)
 		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
@@ -270,7 +357,7 @@ CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 	 */
 	plv8obj->Set(String::NewSymbol("return_next"), CreateYieldFunction(&conv, tupstore));
 	Handle<v8::Value> result =
-		DoCall(fn, global_context->Global(), nargs + 1, args);
+		DoCall(xenv->function, context->Global(), nargs + 1, args);
 	plv8obj->Delete(String::NewSymbol("return_next"));
 
 	if (result->IsUndefined())
@@ -302,7 +389,7 @@ CallSRFunction(PG_FUNCTION_ARGS, Handle<Function> fn,
 }
 
 static Datum
-CallTrigger(PG_FUNCTION_ARGS, Handle<Function> fn)
+CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 {
 	// trigger arguments are:
 	//	0: NEW
@@ -321,8 +408,8 @@ CallTrigger(PG_FUNCTION_ARGS, Handle<Function> fn)
 	Handle<v8::Value>	args[10];
 	Datum				result = (Datum) 0;
 
-	Handle<Context>		global_context = GetGlobalContext();
-	Context::Scope		context_scope(global_context);
+	Handle<Context>		context = xenv->context;
+	Context::Scope		context_scope(context);
 
 	if (TRIGGER_FIRED_FOR_ROW(event))
 	{
@@ -404,7 +491,7 @@ CallTrigger(PG_FUNCTION_ARGS, Handle<Function> fn)
 	args[9] = tgargs;
 
 	Handle<v8::Value> newtup =
-		DoCall(fn, global_context->Global(), lengthof(args), args);
+		DoCall(xenv->function, context->Global(), lengthof(args), args);
 
 	// TODO: replace NEW tuple if modified.
 
@@ -492,7 +579,7 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 	{
 		bool    uptodate;
 
-		uptodate = (!cache->function.IsEmpty() &&
+		uptodate = (!cache->script.IsEmpty() &&
 			cache->fn_xmin == HeapTupleHeaderGetXmin(procTup->t_data) &&
 			ItemPointerEquals(&cache->fn_tid, &procTup->t_self));
 
@@ -503,8 +590,8 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 				pfree(cache->prosrc);
 				cache->prosrc = NULL;
 			}
-			cache->function.Dispose();
-			cache->function.Clear();
+			cache->script.Dispose();
+			cache->script.Clear();
 		}
 		else
 		{
@@ -513,11 +600,11 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 	}
 	else
 	{
-		new(&cache->function) Persistent<Function>();
+		new(&cache->script) Persistent<Script>();
 		cache->prosrc = NULL;
 	}
 
-	if (cache->function.IsEmpty())
+	if (cache->script.IsEmpty())
 	{
 		Form_pg_proc	procStruct;
 
@@ -590,6 +677,41 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 	return proc;
 }
 
+static plv8_exec_env *
+CreateExecEnv(Handle<Script> script)
+{
+	plv8_exec_env	   *xenv;
+	HandleScope			handle_scope;
+
+	PG_TRY();
+	{
+		xenv = plv8_new_exec_env();
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	if (plv8_use_separate_context)
+		xenv->context = Context::New(NULL,
+									 GetGlobalObjectTemplate());
+	else
+		xenv->context = GetGlobalContext();
+
+	Context::Scope		scope(xenv->context);
+	TryCatch			try_catch;
+	Local<v8::Value>	result = script->Run();
+
+	if (result.IsEmpty())
+		throw js_error(try_catch);
+
+	xenv->function =
+		Persistent<Function>::New(Local<Function>::Cast(result));
+
+	return xenv;
+}
+
 static plv8_proc *
 Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger)
 {
@@ -606,22 +728,24 @@ Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger)
 	}
 	PG_END_TRY();
 
+	HandleScope		handle_scope;
 	plv8_proc_cache *cache = proc->cache;
 
-	if (cache->function.IsEmpty())
-		cache->function = Persistent<Function>::New(CreateFunction(
+	if (cache->script.IsEmpty())
+		cache->script = Persistent<Script>::New(CompileScript(
 						cache->proname,
 						cache->nargs,
 						(const char **) argnames,
 						cache->prosrc,
 						is_trigger,
 						cache->retset));
+	proc->xenv = CreateExecEnv(cache->script);
 
 	return proc;
 }
 
-static Handle<Function>
-CreateFunction(
+static Local<Script>
+CompileScript(
 	const char *proname,
 	int proarglen,
 	const char *proargs[],
@@ -683,20 +807,12 @@ CreateFunction(
 
 	Context::Scope	context_scope(global_context);
 	TryCatch		try_catch;
-	Handle<Script>	script = Script::Compile(source, name);
+	Local<Script>	script = Script::New(source, name);
 
 	if (script.IsEmpty())
 		throw js_error(try_catch);
 
-	Handle<v8::Value> result = script->Run();
-	if (result.IsEmpty())
-		throw js_error(try_catch);
-
-	Handle<Function> fn = Handle<Function>::Cast(result);
-	if (fn.IsEmpty())
-		throw js_error(try_catch);
-
-	return fn;
+	return handle_scope.Close(script);
 }
 
 /*
@@ -747,7 +863,7 @@ ThrowError(const char *message) throw()
 	return ThrowException(Exception::Error(String::New(message)));
 }
 
-static Handle<Context>
+static Persistent<Context>
 GetGlobalContext() throw()
 {
 	static Persistent<Context>	global_context;
@@ -755,8 +871,24 @@ GetGlobalContext() throw()
 	if (global_context.IsEmpty())
 	{
 		HandleScope				handle_scope;
-		Handle<ObjectTemplate>	global = ObjectTemplate::New();
+		Handle<ObjectTemplate>	global = GetGlobalObjectTemplate();
 
+		global_context = Context::New(NULL, global);
+	}
+
+	return global_context;
+}
+
+static Persistent<ObjectTemplate>
+GetGlobalObjectTemplate() throw()
+{
+	static Persistent<ObjectTemplate>	global;
+
+	if (global.IsEmpty())
+	{
+		HandleScope				handle_scope;
+
+		global = Persistent<ObjectTemplate>::New(ObjectTemplate::New());
 		// built-in function print(elevel, ...)
 		global->Set(String::NewSymbol("print"),
 					FunctionTemplate::New(Print));
@@ -804,11 +936,9 @@ GetGlobalContext() throw()
 		SetupPlv8Functions(plv8);
 
 		global->Set(String::NewSymbol("plv8"), plv8);
-
-		global_context = Context::New(NULL, global);
 	}
 
-	return global_context;
+	return global;
 }
 
 Converter::Converter(TupleDesc tupdesc) :

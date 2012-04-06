@@ -30,7 +30,7 @@ public:
 	js_error() throw();
 	js_error(const char *msg) throw();
 	js_error(v8::TryCatch &try_catch) throw();
-	v8::Handle<v8::Value> error_object();
+	v8::Local<v8::Value> error_object();
 	__attribute__((noreturn)) void rethrow() throw();
 };
 
@@ -96,7 +96,7 @@ private:
 
 public:
 	Converter(TupleDesc tupdesc);
-	v8::Handle<v8::Object> ToValue(HeapTuple tuple);
+	v8::Local<v8::Object> ToValue(HeapTuple tuple);
 	Datum	ToDatum(v8::Handle<v8::Value> value, Tuplestorestate *tupstore = NULL);
 
 private:
@@ -108,12 +108,12 @@ extern const char *FormatSPIStatus(int status) throw();
 extern v8::Handle<v8::Value> ThrowError(const char *message) throw();
 
 // plv8_type.cc
-extern void plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt = NULL) throw();
+extern void plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt = NULL);
 extern Oid InferredDatumType(v8::Handle<v8::Value> value);
 extern Datum ToDatum(v8::Handle<v8::Value> value, bool *isnull, plv8_type *type);
-extern v8::Handle<v8::Value> ToValue(Datum datum, bool isnull, plv8_type *type);
-extern v8::Handle<v8::String> ToString(Datum value, plv8_type *type);
-extern v8::Handle<v8::String> ToString(const char *str, int len = -1, int encoding = GetDatabaseEncoding());
+extern v8::Local<v8::Value> ToValue(Datum datum, bool isnull, plv8_type *type);
+extern v8::Local<v8::String> ToString(Datum value, plv8_type *type);
+extern v8::Local<v8::String> ToString(const char *str, int len = -1, int encoding = GetDatabaseEncoding());
 extern char *ToCString(const v8::String::Utf8Value &value);
 extern char *ToCStringCopy(const v8::String::Utf8Value &value);
 

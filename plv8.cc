@@ -243,7 +243,7 @@ plv8_inline_handler(PG_FUNCTION_ARGS) throw()
  *
  * This function could throw C++ exceptions, but must not throw PG exceptions.
  */
-static Handle<v8::Value>
+static Local<v8::Value>
 DoCall(Handle<Function> fn, Handle<Object> context,
 	int nargs, Handle<v8::Value> args[])
 {
@@ -251,7 +251,7 @@ DoCall(Handle<Function> fn, Handle<Object> context,
 
 	if (SPI_connect() != SPI_OK_CONNECT)
 		throw js_error(_("could not connect to SPI manager"));
-	Handle<v8::Value> result = fn->Call(context, nargs, args);
+	Local<v8::Value> result = fn->Call(context, nargs, args);
 	int	status = SPI_finish();
 
 	if (result.IsEmpty())
@@ -273,7 +273,7 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 
 	for (int i = 0; i < nargs; i++)
 		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
-	Handle<v8::Value> result =
+	Local<v8::Value> result =
 		DoCall(xenv->function, context->Global(), nargs, args);
 
 	if (rettype)
@@ -802,7 +802,7 @@ CompileScript(
 		name = ToString(proname);
 	else
 		name = Undefined();
-	Handle<String> source = ToString(src.data, src.len);
+	Local<String> source = ToString(src.data, src.len);
 	pfree(src.data);
 
 	Context::Scope	context_scope(global_context);
@@ -963,10 +963,10 @@ Converter::Converter(TupleDesc tupdesc) :
 
 // TODO: use prototype instead of per tuple fields to reduce
 // memory consumption.
-Handle<Object>
+Local<Object>
 Converter::ToValue(HeapTuple tuple)
 {
-	Handle<Object>	obj = Object::New();
+	Local<Object>	obj = Object::New();
 
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
@@ -1069,7 +1069,7 @@ js_error::js_error(TryCatch &try_catch) throw()
 	}
 }
 
-Handle<v8::Value>
+Local<v8::Value>
 js_error::error_object()
 {
 	char *msg = pstrdup(m_msg ? m_msg : "unknown exception");
@@ -1079,7 +1079,7 @@ js_error::error_object()
 	 */
 	if (strstr(msg, "Error: ") == msg)
 		msg += 7;
-	Handle<String> message = ToString(msg);
+	Local<String> message = ToString(msg);
 	return Exception::Error(message);
 }
 

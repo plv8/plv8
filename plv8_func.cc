@@ -188,7 +188,7 @@ ExecuteSql(const Arguments& args) throw()
 static Handle<v8::Value>
 SPIResultToValue(int status)
 {
-	Handle<v8::Value>	result;
+	Local<v8::Value>	result;
 
 	if (status < 0)
 		return ThrowError(FormatSPIStatus(status));
@@ -202,7 +202,7 @@ SPIResultToValue(int status)
 	{
 		int				nrows = SPI_processed;
 		Converter		conv(SPI_tuptable->tupdesc);
-		Handle<Array>	rows = Array::New(nrows);
+		Local<Array>	rows = Array::New(nrows);
 
 		for (uint32 r = 0; r < nrows; r++)
 			rows->Set(r, conv.ToValue(SPI_tuptable->vals[r]));

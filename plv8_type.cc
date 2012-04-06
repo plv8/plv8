@@ -32,16 +32,16 @@ using namespace v8;
 static Datum ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type);
 static Datum ToArrayDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type);
 static Datum ToRecordDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type);
-static Handle<v8::Value> ToScalarValue(Datum datum, bool isnull, plv8_type *type);
-static Handle<v8::Value> ToArrayValue(Datum datum, bool isnull, plv8_type *type);
-static Handle<v8::Value> ToRecordValue(Datum datum, bool isnull, plv8_type *type);
+static Local<v8::Value> ToScalarValue(Datum datum, bool isnull, plv8_type *type);
+static Local<v8::Value> ToArrayValue(Datum datum, bool isnull, plv8_type *type);
+static Local<v8::Value> ToRecordValue(Datum datum, bool isnull, plv8_type *type);
 static double TimestampTzToEpoch(TimestampTz tm);
 static Datum EpochToTimestampTz(double epoch);
 static double DateToEpoch(DateADT date);
 static Datum EpochToDate(double epoch);
 
 void
-plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt) throw()
+plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt)
 {
 	bool    ispreferred;
 
@@ -262,11 +262,11 @@ ToRecordDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	return result;
 }
 
-Handle<v8::Value>
+Local<v8::Value>
 ToValue(Datum datum, bool isnull, plv8_type *type)
 {
 	if (isnull)
-		return Null();
+		return Local<v8::Value>(*Null());
 	else if (type->category == TYPCATEGORY_ARRAY || type->typid == RECORDARRAYOID)
 		return ToArrayValue(datum, isnull, type);
 	else if (type->category == TYPCATEGORY_COMPOSITE || type->typid == RECORDOID)
@@ -275,7 +275,7 @@ ToValue(Datum datum, bool isnull, plv8_type *type)
 		return ToScalarValue(datum, isnull, type);
 }
 
-static Handle<v8::Value>
+static Local<v8::Value>
 ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 {
 	switch (type->typid)
@@ -283,7 +283,7 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 	case OIDOID:
 		return Uint32::New(DatumGetObjectId(datum));
 	case BOOLOID:
-		return Boolean::New((bool) DatumGetBool(datum));
+		return Local<v8::Value>(*(Boolean::New((bool) DatumGetBool(datum))));
 	case INT2OID:
 		return Int32::New(DatumGetInt16(datum));
 	case INT4OID:
@@ -311,7 +311,7 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 		const char *str = VARDATA_ANY(p);
 		int			len = VARSIZE_ANY_EXHDR(p);
 
-		Handle<String>	result = ToString(str, len);
+		Local<String>	result = ToString(str, len);
 
 		if (p != DatumGetPointer(datum))
 			pfree(p);	// free if detoasted
@@ -322,7 +322,7 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 	}
 }
 
-static Handle<v8::Value>
+static Local<v8::Value>
 ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 {
 	Datum	   *values;
@@ -332,14 +332,13 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 	deconstruct_array(DatumGetArrayTypeP(datum),
 						type->typid, type->len, type->byval, type->align,
 						&values, &nulls, &nelems);
-	Handle<Array>  result = Array::New(nelems);
+	Local<Array>  result = Array::New(nelems);
 	plv8_type base;
 	bool    ispreferred;
 
 	base.typid = type->typid;
 	if (base.typid == RECORDARRAYOID)
 		base.typid = RECORDOID;
-	
 
 	base.fn_input.fn_mcxt = base.fn_output.fn_mcxt = type->fn_input.fn_mcxt;
 	get_type_category_preferred(base.typid, &(base.category), &ispreferred);
@@ -351,7 +350,7 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 	return result;
 }
 
-static Handle<v8::Value>
+static Local<v8::Value>
 ToRecordValue(Datum datum, bool isnull, plv8_type *type)
 {
 	HeapTupleHeader	rec = DatumGetHeapTupleHeader(datum);
@@ -381,14 +380,14 @@ ToRecordValue(Datum datum, bool isnull, plv8_type *type)
 	tuple.t_tableOid = InvalidOid;
 	tuple.t_data = rec;
 
-	Handle<v8::Value> result = conv.ToValue(&tuple);
+	Local<v8::Value> result = conv.ToValue(&tuple);
 
 	ReleaseTupleDesc(tupdesc);
 
 	return result;
 }
 
-Handle<String>
+Local<String>
 ToString(Datum value, plv8_type *type)
 {
 	int		encoding = GetDatabaseEncoding();
@@ -412,7 +411,7 @@ ToString(Datum value, plv8_type *type)
 	}
 	PG_END_TRY();
 
-	Handle<String>	result =
+	Local<String>	result =
 		encoding == PG_UTF8
 			? String::New(str)
 			: ToString(str, strlen(str), encoding);
@@ -421,7 +420,7 @@ ToString(Datum value, plv8_type *type)
 	return result;
 }
 
-Handle<String>
+Local<String>
 ToString(const char *str, int len, int encoding)
 {
 	char		   *utf8;
@@ -442,7 +441,7 @@ ToString(const char *str, int len, int encoding)
 
 	if (utf8 != str)
 		len = strlen(utf8);
-	Handle<String> result = String::New(utf8, len);
+	Local<String> result = String::New(utf8, len);
 	if (utf8 != str)
 		pfree(utf8);
 	return result;

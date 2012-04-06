@@ -653,6 +653,8 @@ plv8_FunctionInvoker(const Arguments &args) throw()
 static Handle<v8::Value>
 plv8_Elog(const Arguments& args)
 {
+	MemoryContext	ctx = CurrentMemoryContext;
+
 	if (args.Length() < 2)
 		return ThrowError("usage: print(elevel, ...)");
 
@@ -668,28 +670,45 @@ plv8_Elog(const Arguments& args)
 	case INFO:
 	case NOTICE:
 	case WARNING:
+	case ERROR:
 		break;
 	default:
 		return ThrowError("invalid error level");
 	}
 
-	if (args.Length() == 2)
-	{
-		// fast path for single argument
-		elog(elevel, "%s", CString(args[1]).str(""));
-	}
-	else
-	{
-		std::ostringstream	stream;
+	std::ostringstream	stream;
 
-		for (int i = 1; i < args.Length(); i++)
-		{
-			if (i > 1)
-				stream << ' ';
-			stream << CString(args[i]);
-		}
-		elog(elevel, "%s", stream.str().c_str());
+	for (int i = 1; i < args.Length(); i++)
+	{
+		if (i > 1)
+			stream << ' ';
+		stream << CString(args[i]);
 	}
+
+	const char	   *message = stream.str().c_str();
+
+	if (elevel != ERROR)
+	{
+		elog(elevel, "%s", message);
+		return Undefined();
+	}
+
+	/* ERROR case */
+	PG_TRY();
+	{
+		elog(elevel, "%s", message);
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(ctx);
+		ErrorData *edata = CopyErrorData();
+		Local<String> message = ToString(edata->message);
+		FlushErrorState();
+		FreeErrorData(edata);
+
+		return ThrowException(Exception::Error(message));
+	}
+	PG_END_TRY();
 
 	return Undefined();
 }

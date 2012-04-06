@@ -902,6 +902,7 @@ GetGlobalObjectTemplate() throw()
 		global->Set(String::NewSymbol("INFO"), Int32::New(INFO));
 		global->Set(String::NewSymbol("NOTICE"), Int32::New(NOTICE));
 		global->Set(String::NewSymbol("WARNING"), Int32::New(WARNING));
+		global->Set(String::NewSymbol("ERROR"), Int32::New(ERROR));
 		// ERROR or higher severity levels are not allowed. Use "throw" instead.
 
 		// built-in SPI access

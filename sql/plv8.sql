@@ -133,12 +133,17 @@ CREATE FUNCTION test_elog(arg text) RETURNS void AS
 $$
 	plv8.elog(NOTICE, 'args =', arg);
 	plv8.elog(WARNING, 'warning');
-	plv8.elog(20, 'ERROR is not allowed');
+	try{
+		plv8.elog(ERROR, 'ERROR');
+	}catch(e){
+		plv8.elog(INFO, e);
+	}
+	plv8.elog(21, 'FATAL is not allowed');
 $$
 LANGUAGE plv8;
 SELECT test_elog('ABC');
 
--- executeSql()
+-- execute()
 CREATE TABLE test_tbl (i integer, s text);
 CREATE FUNCTION test_sql() RETURNS integer AS
 $$

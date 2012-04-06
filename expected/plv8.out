@@ -252,15 +252,21 @@ CREATE FUNCTION test_elog(arg text) RETURNS void AS
 $$
 	plv8.elog(NOTICE, 'args =', arg);
 	plv8.elog(WARNING, 'warning');
-	plv8.elog(20, 'ERROR is not allowed');
+	try{
+		plv8.elog(ERROR, 'ERROR');
+	}catch(e){
+		plv8.elog(INFO, e);
+	}
+	plv8.elog(21, 'FATAL is not allowed');
 $$
 LANGUAGE plv8;
 SELECT test_elog('ABC');
 NOTICE:  args = ABC
 WARNING:  warning
+INFO:  Error: ERROR
 ERROR:  Error: invalid error level
-DETAIL:  test_elog() LINE 4: 	plv8.elog(20, 'ERROR is not allowed');
--- executeSql()
+DETAIL:  test_elog() LINE 9: 	plv8.elog(21, 'FATAL is not allowed');
+-- execute()
 CREATE TABLE test_tbl (i integer, s text);
 CREATE FUNCTION test_sql() RETURNS integer AS
 $$

@@ -766,12 +766,11 @@ CompileScript(
 	initStringInfo(&src);
 
 	/*
-	 *  function _(<arg1, ...>){
+	 *  (function (<arg1, ...>){
 	 *    <prosrc>
-	 *  }
-	 *  _
+	 *  })
 	 */
-	appendStringInfo(&src, "function _(");
+	appendStringInfo(&src, "(function (");
 	if (is_trigger)
 	{
 		if (proarglen != 0)
@@ -801,7 +800,7 @@ CompileScript(
 			appendStringInfoString(&src, "yield");
 		}
 	}
-	appendStringInfo(&src, "){\n%s\n};\n_", prosrc);
+	appendStringInfo(&src, "){\n%s\n})", prosrc);
 
 	Handle<v8::Value> name;
 	if (proname)

@@ -517,3 +517,49 @@ WARNING:  Error: cannot find cursor
  
 (1 row)
 
+-- find_function
+CREATE FUNCTION callee(a int) RETURNS int AS $$ return a * a $$ LANGUAGE plv8;
+CREATE FUNCTION sqlf(int) RETURNS int AS $$ SELECT $1 * $1 $$ LANGUAGE sql;
+CREATE FUNCTION caller(a int, t int) RETURNS int AS $$
+  var func;
+  if (t == 1) {
+    func = plv8.find_function("callee");
+  } else if (t == 2) {
+    func = plv8.find_function("callee(int)");
+  } else if (t == 3) {
+    func = plv8.find_function("sqlf");
+  } else if (t == 4) {
+    func = plv8.find_function("callee(int, int)");
+  } else if (t == 5) {
+    try{
+      func = plv8.find_function("caller()");
+    }catch(e){
+      func = function(a){ return a };
+    }
+  }
+  return func(a);
+$$ LANGUAGE plv8;
+SELECT caller(10, 1);
+ caller 
+--------
+    100
+(1 row)
+
+SELECT caller(10, 2);
+ caller 
+--------
+    100
+(1 row)
+
+SELECT caller(10, 3);
+ERROR:  Error: javascript function is not found for "sqlf"
+DETAIL:  caller() LINE 8:     func = plv8.find_function("sqlf");
+SELECT caller(10, 4);
+ERROR:  Error: function "callee(int, int)" does not exist
+DETAIL:  caller() LINE 10:     func = plv8.find_function("callee(int, int)");
+SELECT caller(10, 5);
+ caller 
+--------
+     10
+(1 row)
+

@@ -194,7 +194,12 @@ plv8_call_handler(PG_FUNCTION_ARGS) throw()
 		HandleScope	handle_scope;
 
 		if (!fcinfo->flinfo->fn_extra)
-			fcinfo->flinfo->fn_extra = Compile(fn_oid, fcinfo->flinfo->fn_mcxt, false, is_trigger);
+		{
+			plv8_proc	   *proc = Compile(fn_oid, fcinfo->flinfo->fn_mcxt,
+										   false, is_trigger);
+			proc->xenv = CreateExecEnv(proc->cache->script);
+			fcinfo->flinfo->fn_extra = proc;
+		}
 
 		plv8_proc *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
 		plv8_proc_cache *cache = proc->cache;
@@ -535,7 +540,9 @@ plv8_call_validator(PG_FUNCTION_ARGS) throw()
 
 	try
 	{
-		(void) Compile(fn_oid, fcinfo->flinfo->fn_mcxt, true, is_trigger);
+		plv8_proc	   *proc = Compile(fn_oid, fcinfo->flinfo->fn_mcxt,
+									   true, is_trigger);
+		(void) CreateExecEnv(proc->cache->script);
 		/* the result of a validator is ignored */
 		PG_RETURN_VOID();
 	}
@@ -739,7 +746,6 @@ Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger)
 						cache->prosrc,
 						is_trigger,
 						cache->retset));
-	proc->xenv = CreateExecEnv(cache->script);
 
 	return proc;
 }
@@ -813,6 +819,55 @@ CompileScript(
 		throw js_error(try_catch);
 
 	return handle_scope.Close(script);
+}
+
+Local<Function>
+find_js_function(Oid fn_oid)
+{
+	HeapTuple		tuple;
+	Form_pg_proc	proc;
+	Oid				prolang, langtupoid;
+	NameData		langname = { "plv8" };
+
+	tuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for function %u", fn_oid);
+	proc = (Form_pg_proc) GETSTRUCT(tuple);
+	prolang = proc->prolang;
+	ReleaseSysCache(tuple);
+
+	tuple = SearchSysCache(LANGNAME, NameGetDatum(&langname), 0, 0, 0);
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache look up failed for language %s", NameStr(langname));
+	langtupoid = HeapTupleGetOid(tuple);
+	ReleaseSysCache(tuple);
+
+	Local<Function> func;
+
+	/* Non-JS function */
+	if (langtupoid != prolang)
+		return func;
+
+	try
+	{
+		plv8_proc		   *proc = Compile(fn_oid, CurrentMemoryContext, true, false);
+
+		TryCatch			try_catch;
+
+		/*
+		 * This code is assumed to be inside of HandleScope and Context.
+		 */
+		Local<v8::Value>	result = proc->cache->script->Run();
+
+		if (result.IsEmpty())
+			throw js_error(try_catch);
+
+		func = Local<Function>::Cast(result);
+	}
+	catch (js_error& e) { e.rethrow(); }
+	catch (pg_error& e) { e.rethrow(); }
+
+	return func;
 }
 
 /*

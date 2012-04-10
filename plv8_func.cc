@@ -49,6 +49,7 @@ static Handle<v8::Value> plv8_PlanFree(const Arguments& args);
 static Handle<v8::Value> plv8_CursorFetch(const Arguments& args);
 static Handle<v8::Value> plv8_CursorClose(const Arguments& args);
 static Handle<v8::Value> plv8_Subtransaction(const Arguments& args);
+static Handle<v8::Value> plv8_FindFunction(const Arguments& args);
 
 static inline Local<v8::Value>
 WrapCallback(InvocationCallback func)
@@ -613,6 +614,7 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	SetCallback(plv8, "execute", plv8_Execute, attrFull);
 	SetCallback(plv8, "prepare", plv8_Prepare, attrFull);
 	SetCallback(plv8, "subtransaction", plv8_Subtransaction, attrFull);
+	SetCallback(plv8, "find_function", plv8_FindFunction, attrFull);
 }
 
 /*
@@ -1068,4 +1070,41 @@ plv8_Subtransaction(const Arguments& args)
 	if (result.IsEmpty())
 		throw js_error(try_catch);
 	return result;
+}
+
+/*
+ * plv8.find_function("signature")
+ */
+static Handle<v8::Value>
+plv8_FindFunction(const Arguments& args)
+{
+	if (args.Length() < 1)
+		return Undefined();
+	CString				signature(args[0]);
+	Oid					funcoid;
+	Local<Function>		func;
+
+	PG_TRY();
+	{
+		if (strchr(signature, '(') == NULL)
+		{
+			funcoid = DatumGetObjectId(
+					DirectFunctionCall1(regprocin, CStringGetDatum(signature.str())));
+		}
+		else
+		{
+			funcoid = DatumGetObjectId(
+					DirectFunctionCall1(regprocedurein, CStringGetDatum(signature.str())));
+		}
+		func = find_js_function(funcoid);
+		if (func.IsEmpty())
+			elog(ERROR, "javascript function is not found for \"%s\"", signature.str());
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return func;
 }

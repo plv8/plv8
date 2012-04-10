@@ -296,3 +296,32 @@ try{
 }
 $$ LANGUAGE plv8 STRICT;
 SELECT prep1();
+
+-- find_function
+CREATE FUNCTION callee(a int) RETURNS int AS $$ return a * a $$ LANGUAGE plv8;
+CREATE FUNCTION sqlf(int) RETURNS int AS $$ SELECT $1 * $1 $$ LANGUAGE sql;
+CREATE FUNCTION caller(a int, t int) RETURNS int AS $$
+  var func;
+  if (t == 1) {
+    func = plv8.find_function("callee");
+  } else if (t == 2) {
+    func = plv8.find_function("callee(int)");
+  } else if (t == 3) {
+    func = plv8.find_function("sqlf");
+  } else if (t == 4) {
+    func = plv8.find_function("callee(int, int)");
+  } else if (t == 5) {
+    try{
+      func = plv8.find_function("caller()");
+    }catch(e){
+      func = function(a){ return a };
+    }
+  }
+  return func(a);
+$$ LANGUAGE plv8;
+
+SELECT caller(10, 1);
+SELECT caller(10, 2);
+SELECT caller(10, 3);
+SELECT caller(10, 4);
+SELECT caller(10, 5);

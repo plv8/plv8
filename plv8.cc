@@ -73,7 +73,7 @@ typedef struct plv8_proc_cache
  */
 typedef struct plv8_exec_env
 {
-	Persistent<Function>	function;
+	Persistent<Object>		recv;
 	Persistent<Context>		context;
 	struct plv8_exec_env   *next;
 } plv8_exec_env;
@@ -145,10 +145,10 @@ plv8_xact_cb(XactEvent event, void *arg)
 
 	while (env)
 	{
-		if (!env->function.IsEmpty())
+		if (!env->recv.IsEmpty())
 		{
-			env->function.Dispose();
-			env->function.Clear();
+			env->recv.Dispose();
+			env->recv.Clear();
 		}
 		if (!env->context.IsEmpty() &&
 				GetGlobalContext() != env->context)
@@ -172,7 +172,7 @@ plv8_new_exec_env()
 		MemoryContextAllocZero(TopTransactionContext, sizeof(plv8_exec_env));
 
 	new(&xenv->context) Persistent<Context>();
-	new(&xenv->function) Persistent<Function>();
+	new(&xenv->recv) Persistent<Object>();
 
 	/*
 	 * Add it to the list, which will be freed in the end of top transaction.
@@ -278,8 +278,11 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 
 	for (int i = 0; i < nargs; i++)
 		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
+
+	Local<Function>		fn =
+		Local<Function>::Cast(xenv->recv->GetInternalField(0));
 	Local<v8::Value> result =
-		DoCall(xenv->function, context->Global(), nargs, args);
+		DoCall(fn, xenv->recv, nargs, args);
 
 	if (rettype)
 		return ToDatum(result, &fcinfo->isnull, rettype);
@@ -357,17 +360,17 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	// TODO: yield should be passed as a global variable.
 	args[nargs] = CreateYieldFunction(&conv, tupstore);
 
-	/*
-	 * Not safe for recursive calls.  Revisit when we introduce SQL function call.
-	 */
-	plv8obj->Set(String::NewSymbol("return_next"), CreateYieldFunction(&conv, tupstore));
+	Local<Function>		fn =
+		Local<Function>::Cast(xenv->recv->GetInternalField(0));
+	Local<String>		key = String::NewSymbol("return_next");
+	plv8obj->Set(key, args[nargs]);
 	Handle<v8::Value> result =
-		DoCall(xenv->function, context->Global(), nargs + 1, args);
-	plv8obj->Delete(String::NewSymbol("return_next"));
+		DoCall(fn, xenv->recv, nargs + 1, args);
+	plv8obj->Delete(key);
 
 	if (result->IsUndefined())
 	{
-		// no additinal values
+		// no additional values
 	}
 	else if (result->IsArray())
 	{
@@ -495,8 +498,10 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 		tgargs->Set(i, ToString(trig->tg_trigger->tgargs[i]));
 	args[9] = tgargs;
 
+	Local<Function>		fn =
+		Local<Function>::Cast(xenv->recv->GetInternalField(0));
 	Handle<v8::Value> newtup =
-		DoCall(xenv->function, context->Global(), lengthof(args), args);
+		DoCall(fn, xenv->recv, lengthof(args), args);
 
 	// TODO: replace NEW tuple if modified.
 
@@ -713,8 +718,15 @@ CreateExecEnv(Handle<Script> script)
 	if (result.IsEmpty())
 		throw js_error(try_catch);
 
-	xenv->function =
-		Persistent<Function>::New(Local<Function>::Cast(result));
+	static Persistent<ObjectTemplate> recv_templ;
+	if (recv_templ.IsEmpty())
+	{
+		recv_templ = Persistent<ObjectTemplate>::New(ObjectTemplate::New());
+		recv_templ->SetInternalFieldCount(1);
+	}
+	xenv->recv = Persistent<Object>::New(recv_templ->NewInstance());
+
+	xenv->recv->SetInternalField(0, result);
 
 	return xenv;
 }

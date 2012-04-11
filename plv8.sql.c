@@ -42,4 +42,6 @@ SELECT
 
 #if PG_VERSION_NUM < 90100
 COMMIT;
+#else
+CREATE LANGUAGE plv8;
 #endif

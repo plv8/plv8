@@ -86,6 +86,7 @@ typedef struct plv8_proc
 {
 	plv8_proc_cache		   *cache;
 	plv8_exec_env		   *xenv;
+	TypeFuncClass			functypclass;			/* For SRF */
 	plv8_type				rettype;
 	plv8_type				argtypes[FUNC_MAX_ARGS];
 } plv8_proc;
@@ -300,6 +301,7 @@ CreateTupleStore(PG_FUNCTION_ARGS, TupleDesc *tupdesc)
 		ReturnSetInfo  *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 		MemoryContext	per_query_ctx;
 		MemoryContext	oldcontext;
+		plv8_proc	   *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
 
 		/* check to see if caller supports us returning a tuplestore */
 		if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
@@ -312,11 +314,8 @@ CreateTupleStore(PG_FUNCTION_ARGS, TupleDesc *tupdesc)
 					 errmsg("materialize mode required, but it is not " \
 							"allowed in this context")));
 
-		/* Build a tuple descriptor for our result type */
-		if (get_call_result_type(fcinfo, NULL, tupdesc) != TYPEFUNC_COMPOSITE)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("SETOF a scalar type is not implemented yet")));
+		if (!proc->functypclass)
+			proc->functypclass = get_call_result_type(fcinfo, NULL, NULL);
 
 		per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
 		oldcontext = MemoryContextSwitchTo(per_query_ctx);
@@ -324,8 +323,10 @@ CreateTupleStore(PG_FUNCTION_ARGS, TupleDesc *tupdesc)
 		tupstore = tuplestore_begin_heap(true, false, work_mem);
 		rsinfo->returnMode = SFRM_Materialize;
 		rsinfo->setResult = tupstore;
-		rsinfo->setDesc = *tupdesc;
-
+		/* Build a tuple descriptor for our result type */
+		if (!rsinfo->setDesc)
+			rsinfo->setDesc = CreateTupleDescCopy(rsinfo->expectedDesc);
+		*tupdesc = rsinfo->setDesc;
 		MemoryContextSwitchTo(oldcontext);
 	}
 	PG_CATCH();
@@ -341,6 +342,7 @@ static Datum
 CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	int nargs, plv8_type argtypes[], plv8_type *rettype)
 {
+	plv8_proc		   *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
 	TupleDesc			tupdesc;
 	Tuplestorestate	   *tupstore;
 
@@ -348,7 +350,7 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 
 	Handle<Context>		context = xenv->context;
 	Context::Scope		context_scope(context);
-	Converter			conv(tupdesc);
+	Converter			conv(tupdesc, proc->functypclass == TYPEFUNC_SCALAR);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS + 1];
 	Handle<Object>		plv8obj = Handle<Object>::Cast(
 			context->Global()->Get(String::NewSymbol("plv8")));
@@ -380,14 +382,10 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		for (int i = 0; i < length; i++)
 			conv.ToDatum(array->Get(i), tupstore);
 	}
-	else if (result->IsObject())
-	{
-		// return a record
-		conv.ToDatum(result, tupstore);
-	}
 	else
 	{
-		throw js_error("SETOF function cannot return scalar value");
+		// return a record or a scalar
+		conv.ToDatum(result, tupstore);
 	}
 
 	/* clean up and return the tuplestore */
@@ -1011,11 +1009,27 @@ GetGlobalObjectTemplate() throw()
 Converter::Converter(TupleDesc tupdesc) :
 	m_tupdesc(tupdesc),
 	m_colnames(tupdesc->natts),
-	m_coltypes(tupdesc->natts)
+	m_coltypes(tupdesc->natts),
+	m_is_scalar(false)
 {
-	for (int c = 0; c < tupdesc->natts; c++)
+	Init();
+}
+
+Converter::Converter(TupleDesc tupdesc, bool is_scalar) :
+	m_tupdesc(tupdesc),
+	m_colnames(tupdesc->natts),
+	m_coltypes(tupdesc->natts),
+	m_is_scalar(is_scalar)
+{
+	Init();
+}
+
+void
+Converter::Init()
+{
+	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
-		m_colnames[c] = ToString(NameStr(tupdesc->attrs[c]->attname));
+		m_colnames[c] = ToString(NameStr(m_tupdesc->attrs[c]->attname));
 		PG_TRY();
 		{
 			plv8_fill_type(&m_coltypes[c], m_tupdesc->attrs[c]->atttypid, NULL);
@@ -1052,10 +1066,16 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 {
 	Datum			result;
 	TryCatch		try_catch;
+	Handle<Object>	obj;
 
-	Handle<Object>	obj = Handle<Object>::Cast(value);
-	if (obj.IsEmpty())
-		throw js_error(try_catch);
+	if (!m_is_scalar)
+	{
+		if (!value->IsObject())
+			throw js_error("argument must be an object");
+		obj = Handle<Object>::Cast(value);
+		if (obj.IsEmpty())
+			throw js_error(try_catch);
+	}
 
 	/*
 	 * Use vector<char> instead of vector<bool> because <bool> version is
@@ -1066,7 +1086,7 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
-		Handle<v8::Value> attr = obj->Get(m_colnames[c]);
+		Handle<v8::Value> attr = m_is_scalar ? value : obj->Get(m_colnames[c]);
 		if (attr.IsEmpty() || attr->IsUndefined() || attr->IsNull())
 			nulls[c] = true;
 		else

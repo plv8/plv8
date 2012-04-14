@@ -215,6 +215,14 @@ SELECT * FROM set_of_records();
  3 | c
 (3 rows)
 
+CREATE FUNCTION set_of_record_but_non_obj() RETURNS SETOF rec AS
+$$
+	plv8.return_next( "abc" );
+$$
+LANGUAGE plv8;
+SELECT * FROM set_of_record_but_non_obj();
+ERROR:  Error: argument must be an object
+DETAIL:  set_of_record_but_non_obj() LINE 2: 	plv8.return_next( "abc" );
 CREATE FUNCTION set_of_integers() RETURNS SETOF integer AS
 $$
 	plv8.return_next( 1 );
@@ -223,7 +231,13 @@ $$
 $$
 LANGUAGE plv8;
 SELECT * FROM set_of_integers();
-ERROR:  SETOF a scalar type is not implemented yet
+ set_of_integers 
+-----------------
+               1
+               2
+               3
+(3 rows)
+
 -- INOUT and OUT parameters
 CREATE FUNCTION one_inout(a integer, INOUT b text) AS
 $$

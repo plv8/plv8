@@ -93,15 +93,18 @@ private:
 	TupleDesc								m_tupdesc;
 	std::vector< v8::Handle<v8::String> >	m_colnames;
 	std::vector< plv8_type >				m_coltypes;
+	bool									m_is_scalar;
 
 public:
 	Converter(TupleDesc tupdesc);
+	Converter(TupleDesc tupdesc, bool is_scalar);
 	v8::Local<v8::Object> ToValue(HeapTuple tuple);
 	Datum	ToDatum(v8::Handle<v8::Value> value, Tuplestorestate *tupstore = NULL);
 
 private:
 	Converter(const Converter&);
 	Converter& operator = (const Converter&);
+	void	Init();
 };
 
 extern v8::Local<v8::Function> find_js_function(Oid fn_oid);

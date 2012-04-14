@@ -104,6 +104,13 @@ $$
 LANGUAGE plv8;
 SELECT * FROM set_of_records();
 
+CREATE FUNCTION set_of_record_but_non_obj() RETURNS SETOF rec AS
+$$
+	plv8.return_next( "abc" );
+$$
+LANGUAGE plv8;
+SELECT * FROM set_of_record_but_non_obj();
+
 CREATE FUNCTION set_of_integers() RETURNS SETOF integer AS
 $$
 	plv8.return_next( 1 );

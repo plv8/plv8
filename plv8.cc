@@ -496,12 +496,27 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 		tgargs->Set(i, ToString(trig->tg_trigger->tgargs[i]));
 	args[9] = tgargs;
 
+	TryCatch			try_catch;
 	Local<Function>		fn =
 		Local<Function>::Cast(xenv->recv->GetInternalField(0));
 	Handle<v8::Value> newtup =
 		DoCall(fn, xenv->recv, lengthof(args), args);
 
-	// TODO: replace NEW tuple if modified.
+	if (newtup.IsEmpty())
+		throw js_error(try_catch);
+
+	if (TRIGGER_FIRED_BY_UPDATE(event) &&
+			!(newtup->IsUndefined() || newtup->IsNull()))
+	{
+		TupleDesc		tupdesc = RelationGetDescr(rel);
+		Converter		conv(tupdesc);
+		HeapTupleHeader	header;
+
+		header = DatumGetHeapTupleHeader(conv.ToDatum(newtup));
+
+		/* We know it's there; heap_form_tuple stores with this layout. */
+		result = PointerGetDatum((char *) header - HEAPTUPLESIZE);
+	}
 
 	return result;
 }

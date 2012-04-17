@@ -427,6 +427,10 @@ $$
 	plv8.elog(NOTICE, "OLD = ", JSON.stringify(OLD));
 	plv8.elog(NOTICE, "TG_OP = ", TG_OP);
 	plv8.elog(NOTICE, "TG_ARGV = ", TG_ARGV);
+	if (TG_OP == "UPDATE") {
+		NEW.i = 102;
+		return NEW;
+	}
 $$
 LANGUAGE "plv8";
 CREATE TRIGGER test_trigger
@@ -449,7 +453,7 @@ NOTICE:  OLD =  {"i":100,"s":"ABC"}
 NOTICE:  TG_OP =  DELETE
 NOTICE:  TG_ARGV =  foo,bar
 NOTICE:  NEW =  undefined
-NOTICE:  OLD =  {"i":101,"s":"DEF"}
+NOTICE:  OLD =  {"i":102,"s":"DEF"}
 NOTICE:  TG_OP =  DELETE
 NOTICE:  TG_ARGV =  foo,bar
 SELECT * FROM test_tbl;

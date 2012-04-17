@@ -239,6 +239,10 @@ $$
 	plv8.elog(NOTICE, "OLD = ", JSON.stringify(OLD));
 	plv8.elog(NOTICE, "TG_OP = ", TG_OP);
 	plv8.elog(NOTICE, "TG_ARGV = ", TG_ARGV);
+	if (TG_OP == "UPDATE") {
+		NEW.i = 102;
+		return NEW;
+	}
 $$
 LANGUAGE "plv8";
 

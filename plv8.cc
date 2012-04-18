@@ -18,6 +18,8 @@ extern "C" {
 #include "executor/spi.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "utils/memutils.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
@@ -102,7 +104,7 @@ static plv8_exec_env		   *exec_env_head = NULL;
 static bool plv8_use_separate_context = false;
 
 /*
- * lower_case_functions are postgres-like C functions.
+ * Lower_case_functions are postgres-like C functions.
  * They could raise errors with elog/ereport(ERROR).
  */
 static plv8_proc *plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames) throw();
@@ -124,10 +126,29 @@ static Datum CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 static Datum CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv);
 static Persistent<Context> GetGlobalContext() throw();
 static Persistent<ObjectTemplate> GetGlobalObjectTemplate() throw();
+static bool inited = false;
+static char *plv8_start_proc = NULL;
+
 
 void
 _PG_init(void)
 {
+	HASHCTL    hash_ctl = { 0 };
+	
+	hash_ctl.keysize = sizeof(Oid);
+	hash_ctl.entrysize = sizeof(plv8_proc_cache);
+	hash_ctl.hash = oid_hash;
+	plv8_proc_cache_hash = hash_create("PLv8 Procedures", 32,
+									   &hash_ctl, HASH_ELEM | HASH_FUNCTION);
+
+    DefineCustomStringVariable("plv8.start_proc",
+                               gettext_noop("PLV8 function to run once when PLV8 is first used."),
+                               NULL,
+                               &plv8_start_proc,
+                               NULL,
+                               PGC_USERSET, 0,
+                               NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("plv8.use_separate_context",
 							 gettext_noop("ON to use separate context for each function execution."),
 							 gettext_noop("Enabling this may increase execution overhead."),
@@ -137,6 +158,9 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 	RegisterXactCallback(plv8_xact_cb, NULL);
+
+    EmitWarningsOnPlaceholders("plv8");
+
 }
 
 static void
@@ -184,6 +208,33 @@ plv8_new_exec_env()
 	return xenv;
 }
 
+
+static void
+plv8_init(FunctionCallInfo fcinfo) throw()
+{
+
+	inited = true;
+
+	if(plv8_start_proc != NULL && strlen(plv8_start_proc) < NAMEDATALEN)
+	{
+		// leverage find_function to find and run the start proc
+
+		char code[1024];
+
+		sprintf(code,"var sproc = plv8.find_function('%s'); sproc();", 
+				plv8_start_proc);
+
+		HandleScope			handle_scope;
+		
+		Handle<Script>		script = CompileScript(NULL, 0, NULL,
+												   code, false, false);
+		plv8_exec_env	   *xenv = CreateExecEnv(script);
+		(void) CallFunction(fcinfo, xenv, 0, NULL, NULL);
+		
+	}
+
+}
+
 Datum
 plv8_call_handler(PG_FUNCTION_ARGS) throw()
 {
@@ -192,6 +243,9 @@ plv8_call_handler(PG_FUNCTION_ARGS) throw()
 
 	try
 	{
+		if (!inited)
+			plv8_init(fcinfo);
+
 		HandleScope	handle_scope;
 
 		if (!fcinfo->flinfo->fn_extra)
@@ -230,6 +284,10 @@ plv8_inline_handler(PG_FUNCTION_ARGS) throw()
 
 	try
 	{
+
+		if (!inited)
+			plv8_init(fcinfo);
+
 		HandleScope			handle_scope;
 
 		Handle<Script>		script = CompileScript(NULL, 0, NULL,
@@ -558,6 +616,9 @@ plv8_call_validator(PG_FUNCTION_ARGS) throw()
 
 	try
 	{
+		if (!inited)
+			plv8_init(fcinfo);
+
 		plv8_proc	   *proc = Compile(fn_oid, fcinfo->flinfo->fn_mcxt,
 									   true, is_trigger);
 		(void) CreateExecEnv(proc->cache->script);
@@ -582,17 +643,6 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 	char			   *argmodes;
 	Oid					rettype;
 	MemoryContext		oldcontext;
-
-	if (plv8_proc_cache_hash == NULL)
-	{
-		HASHCTL    hash_ctl = { 0 };
-
-		hash_ctl.keysize = sizeof(Oid);
-		hash_ctl.entrysize = sizeof(plv8_proc_cache);
-		hash_ctl.hash = oid_hash;
-		plv8_proc_cache_hash = hash_create("PLv8 Procedures", 32,
-									 &hash_ctl, HASH_ELEM | HASH_FUNCTION);
-	}
 
 	procTup = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 	if (!HeapTupleIsValid(procTup))

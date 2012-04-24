@@ -18,8 +18,6 @@ extern "C" {
 #include "executor/spi.h"
 #include "funcapi.h"
 #include "miscadmin.h"
-#include "nodes/makefuncs.h"
-#include "utils/memutils.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
@@ -110,7 +108,7 @@ static plv8_exec_env		   *exec_env_head = NULL;
 static bool plv8_use_separate_context = false;
 
 /*
- * Lower_case_functions are postgres-like C functions.
+ * lower_case_functions are postgres-like C functions.
  * They could raise errors with elog/ereport(ERROR).
  */
 static plv8_proc *plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames) throw();

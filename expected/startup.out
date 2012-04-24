@@ -1,11 +1,11 @@
 set plv8.start_proc = startup;
-do $$ print(NOTICE, 'foo = ' + foo) $$ language plv8;
+do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;
 NOTICE:  foo = 14378
 update    plv8_modules set code = 'foo=98765;' where modname = 'startup';
 -- startup code should not be reloaded
-do $$ print(NOTICE, 'foo = ' + foo) $$ language plv8;
+do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;
 NOTICE:  foo = 14378
-do $$ load_module('testme'); print (NOTICE,'bar = ' + bar);$$ language plv8;
+do $$ load_module('testme'); plv8.elog (NOTICE,'bar = ' + bar);$$ language plv8;
 NOTICE:  loaded module: testme
 NOTICE:  bar = 98765
 CREATE ROLE someone_else;

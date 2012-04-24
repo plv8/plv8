@@ -53,12 +53,13 @@ typedef struct plv8_proc_cache
 {
 	Oid						fn_oid;
 
-	Persistent<Script>		script;
+	Persistent<Function>	function;
 	char					proname[NAMEDATALEN];
 	char				   *prosrc;
 
 	TransactionId			fn_xmin;
 	ItemPointerData			fn_tid;
+	Oid						user_id;
 
 	int						nargs;
 	bool					retset;		/* true if SRF */
@@ -68,7 +69,7 @@ typedef struct plv8_proc_cache
 
 /*
  * The function and context are created at the first invocation.  Their
- * lifetime is same as plv8_poc, but they are not palloc'ed memory,
+ * lifetime is same as plv8_proc, but they are not palloc'ed memory,
  * so we need to clear them at the end of transaction.
  */
 typedef struct plv8_exec_env
@@ -100,12 +101,6 @@ typedef struct plv8_context
 static HTAB *plv8_proc_cache_hash = NULL;
 
 static plv8_exec_env		   *exec_env_head = NULL;
-/*
- * The separate context feature is currently experimental.  One benchmark shows
- * creating a new Context takes 1 ms or so, which may or may not be fine
- * depending on use cases.  It is much, much longer than a typical hash_search.
- */
-static bool plv8_use_separate_context = false;
 
 /*
  * lower_case_functions are postgres-like C functions.
@@ -118,9 +113,9 @@ static void plv8_xact_cb(XactEvent event, void *arg);
  * CamelCaseFunctions are C++ functions.
  * They could raise errors with C++ throw statements, or never throw exceptions.
  */
-static plv8_exec_env *CreateExecEnv(Handle<Script> script);
+static plv8_exec_env *CreateExecEnv(Handle<Function> script);
 static plv8_proc *Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger);
-static Local<Script> CompileScript(const char *proname, int proarglen,
+static Local<Function> CompileFunction(const char *proname, int proarglen,
 					const char *proargs[], const char *prosrc,
 					bool is_trigger, bool retset);
 static Datum CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
@@ -152,18 +147,9 @@ _PG_init(void)
                                PGC_USERSET, 0,
                                NULL, NULL, NULL);
 
-	DefineCustomBoolVariable("plv8.use_separate_context",
-							 gettext_noop("ON to use separate context for each function execution."),
-							 gettext_noop("Enabling this may increase execution overhead."),
-							 &plv8_use_separate_context,
-							 false,
-							 PGC_USERSET,
-							 0,
-							 NULL, NULL, NULL);
 	RegisterXactCallback(plv8_xact_cb, NULL);
 
     EmitWarningsOnPlaceholders("plv8");
-
 }
 
 static void
@@ -177,12 +163,6 @@ plv8_xact_cb(XactEvent event, void *arg)
 		{
 			env->recv.Dispose();
 			env->recv.Clear();
-		}
-		if (!env->context.IsEmpty() &&
-				GetGlobalContext() != env->context)
-		{
-			env->context.Dispose();
-			env->context.Clear();
 		}
 		env = env->next;
 		/*
@@ -225,7 +205,7 @@ plv8_call_handler(PG_FUNCTION_ARGS) throw()
 		{
 			plv8_proc	   *proc = Compile(fn_oid, fcinfo->flinfo->fn_mcxt,
 										   false, is_trigger);
-			proc->xenv = CreateExecEnv(proc->cache->script);
+			proc->xenv = CreateExecEnv(proc->cache->function);
 			fcinfo->flinfo->fn_extra = proc;
 		}
 
@@ -259,9 +239,9 @@ plv8_inline_handler(PG_FUNCTION_ARGS) throw()
 	{
 		HandleScope			handle_scope;
 
-		Handle<Script>		script = CompileScript(NULL, 0, NULL,
+		Handle<Function>	function = CompileFunction(NULL, 0, NULL,
 										codeblock->source_text, false, false);
-		plv8_exec_env	   *xenv = CreateExecEnv(script);
+		plv8_exec_env	   *xenv = CreateExecEnv(function);
 		return CallFunction(fcinfo, xenv, 0, NULL, NULL);
 	}
 	catch (js_error& e)	{ e.rethrow(); }
@@ -587,7 +567,7 @@ plv8_call_validator(PG_FUNCTION_ARGS) throw()
 	{
 		plv8_proc	   *proc = Compile(fn_oid, fcinfo->flinfo->fn_mcxt,
 									   true, is_trigger);
-		(void) CreateExecEnv(proc->cache->script);
+		(void) CreateExecEnv(proc->cache->function);
 		/* the result of a validator is ignored */
 		PG_RETURN_VOID();
 	}
@@ -620,9 +600,10 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 	{
 		bool    uptodate;
 
-		uptodate = (!cache->script.IsEmpty() &&
+		uptodate = (!cache->function.IsEmpty() &&
 			cache->fn_xmin == HeapTupleHeaderGetXmin(procTup->t_data) &&
-			ItemPointerEquals(&cache->fn_tid, &procTup->t_self));
+			ItemPointerEquals(&cache->fn_tid, &procTup->t_self) &&
+			cache->user_id == GetUserId());
 
 		if (!uptodate)
 		{
@@ -631,8 +612,8 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 				pfree(cache->prosrc);
 				cache->prosrc = NULL;
 			}
-			cache->script.Dispose();
-			cache->script.Clear();
+			cache->function.Dispose();
+			cache->function.Clear();
 		}
 		else
 		{
@@ -641,11 +622,11 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 	}
 	else
 	{
-		new(&cache->script) Persistent<Script>();
+		new(&cache->function) Persistent<Function>();
 		cache->prosrc = NULL;
 	}
 
-	if (cache->script.IsEmpty())
+	if (cache->function.IsEmpty())
 	{
 		Form_pg_proc	procStruct;
 
@@ -661,6 +642,7 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 		strlcpy(cache->proname, NameStr(procStruct->proname), NAMEDATALEN);
 		cache->fn_xmin = HeapTupleHeaderGetXmin(procTup->t_data);
 		cache->fn_tid = procTup->t_self;
+		cache->user_id = GetUserId();
 
 		int nargs = get_func_arg_info(procTup, &argtypes, argnames, &argmodes);
 
@@ -719,7 +701,7 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 }
 
 static plv8_exec_env *
-CreateExecEnv(Handle<Script> script)
+CreateExecEnv(Handle<Function> function)
 {
 	plv8_exec_env	   *xenv;
 	HandleScope			handle_scope;
@@ -734,18 +716,8 @@ CreateExecEnv(Handle<Script> script)
 	}
 	PG_END_TRY();
 
-	if (plv8_use_separate_context)
-		xenv->context = Context::New(NULL,
-									 GetGlobalObjectTemplate());
-	else
-		xenv->context = GetGlobalContext();
-
+	xenv->context = GetGlobalContext();
 	Context::Scope		scope(xenv->context);
-	TryCatch			try_catch;
-	Local<v8::Value>	result = script->Run();
-
-	if (result.IsEmpty())
-		throw js_error(try_catch);
 
 	static Persistent<ObjectTemplate> recv_templ;
 	if (recv_templ.IsEmpty())
@@ -755,7 +727,7 @@ CreateExecEnv(Handle<Script> script)
 	}
 	xenv->recv = Persistent<Object>::New(recv_templ->NewInstance());
 
-	xenv->recv->SetInternalField(0, result);
+	xenv->recv->SetInternalField(0, function);
 
 	return xenv;
 }
@@ -779,8 +751,8 @@ Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger)
 	HandleScope		handle_scope;
 	plv8_proc_cache *cache = proc->cache;
 
-	if (cache->script.IsEmpty())
-		cache->script = Persistent<Script>::New(CompileScript(
+	if (cache->function.IsEmpty())
+		cache->function = Persistent<Function>::New(CompileFunction(
 						cache->proname,
 						cache->nargs,
 						(const char **) argnames,
@@ -791,8 +763,8 @@ Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger)
 	return proc;
 }
 
-static Local<Script>
-CompileScript(
+static Local<Function>
+CompileFunction(
 	const char *proname,
 	int proarglen,
 	const char *proargs[],
@@ -858,7 +830,11 @@ CompileScript(
 	if (script.IsEmpty())
 		throw js_error(try_catch);
 
-	return handle_scope.Close(script);
+	Local<v8::Value>	result = script->Run();
+	if (result.IsEmpty())
+		throw js_error(try_catch);
+
+	return handle_scope.Close(Local<Function>::Cast(result));
 }
 
 Local<Function>
@@ -894,15 +870,7 @@ find_js_function(Oid fn_oid)
 
 		TryCatch			try_catch;
 
-		/*
-		 * This code is assumed to be inside of HandleScope and Context.
-		 */
-		Local<v8::Value>	result = proc->cache->script->Run();
-
-		if (result.IsEmpty())
-			throw js_error(try_catch);
-
-		func = Local<Function>::Cast(result);
+		func = Local<Function>::New(proc->cache->function);
 	}
 	catch (js_error& e) { e.rethrow(); }
 	catch (pg_error& e) { e.rethrow(); }

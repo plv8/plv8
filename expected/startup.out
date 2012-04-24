@@ -8,4 +8,12 @@ NOTICE:  foo = 14378
 do $$ load_module('testme'); print (NOTICE,'bar = ' + bar);$$ language plv8;
 NOTICE:  loaded module: testme
 NOTICE:  bar = 98765
-   
+CREATE ROLE someone_else;
+SET ROLE to someone_else;
+reset plv8.start_proc;
+-- should fail because of a reference error
+do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;
+ERROR:  ReferenceError: foo is not defined
+DETAIL:  undefined() LINE 1:  plv8.elog(NOTICE, 'foo = ' + foo) 
+RESET ROLE;
+DROP ROLE someone_else;

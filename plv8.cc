@@ -93,6 +93,12 @@ typedef struct plv8_proc
 	plv8_type				argtypes[FUNC_MAX_ARGS];
 } plv8_proc;
 
+typedef struct plv8_context
+{
+	Persistent<Context>		context;
+	Oid						user_id;
+} plv8_context;
+
 static HTAB *plv8_proc_cache_hash = NULL;
 
 static plv8_exec_env		   *exec_env_head = NULL;
@@ -126,9 +132,8 @@ static Datum CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 static Datum CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv);
 static Persistent<Context> GetGlobalContext() throw();
 static Persistent<ObjectTemplate> GetGlobalObjectTemplate() throw();
-static bool inited = false;
 static char *plv8_start_proc = NULL;
-
+static std::vector<plv8_context *> ContextVector;
 
 void
 _PG_init(void)
@@ -208,33 +213,6 @@ plv8_new_exec_env()
 	return xenv;
 }
 
-
-static void
-plv8_init(FunctionCallInfo fcinfo) throw()
-{
-
-	inited = true;
-
-	if(plv8_start_proc != NULL && strlen(plv8_start_proc) < NAMEDATALEN)
-	{
-		// leverage find_function to find and run the start proc
-
-		char code[1024];
-
-		sprintf(code,"var sproc = plv8.find_function('%s'); sproc();", 
-				plv8_start_proc);
-
-		HandleScope			handle_scope;
-		
-		Handle<Script>		script = CompileScript(NULL, 0, NULL,
-												   code, false, false);
-		plv8_exec_env	   *xenv = CreateExecEnv(script);
-		(void) CallFunction(fcinfo, xenv, 0, NULL, NULL);
-		
-	}
-
-}
-
 Datum
 plv8_call_handler(PG_FUNCTION_ARGS) throw()
 {
@@ -243,9 +221,6 @@ plv8_call_handler(PG_FUNCTION_ARGS) throw()
 
 	try
 	{
-		if (!inited)
-			plv8_init(fcinfo);
-
 		HandleScope	handle_scope;
 
 		if (!fcinfo->flinfo->fn_extra)
@@ -284,10 +259,6 @@ plv8_inline_handler(PG_FUNCTION_ARGS) throw()
 
 	try
 	{
-
-		if (!inited)
-			plv8_init(fcinfo);
-
 		HandleScope			handle_scope;
 
 		Handle<Script>		script = CompileScript(NULL, 0, NULL,
@@ -616,9 +587,6 @@ plv8_call_validator(PG_FUNCTION_ARGS) throw()
 
 	try
 	{
-		if (!inited)
-			plv8_init(fcinfo);
-
 		plv8_proc	   *proc = Compile(fn_oid, fcinfo->flinfo->fn_mcxt,
 									   true, is_trigger);
 		(void) CreateExecEnv(proc->cache->script);
@@ -945,6 +913,28 @@ find_js_function(Oid fn_oid)
 }
 
 /*
+ * The signature can be either of regproc or regprocedure format.
+ */
+Local<Function>
+find_js_function_by_name(const char *signature)
+{
+	Oid					funcoid;
+	Local<Function>		func;
+
+	if (strchr(signature, '(') == NULL)
+		funcoid = DatumGetObjectId(
+				DirectFunctionCall1(regprocin, CStringGetDatum(signature)));
+	else
+		funcoid = DatumGetObjectId(
+				DirectFunctionCall1(regprocedurein, CStringGetDatum(signature)));
+	func = find_js_function(funcoid);
+	if (func.IsEmpty())
+		elog(ERROR, "javascript function is not found for \"%s\"", signature);
+
+	return func;
+}
+
+/*
  * NOTICE: the returned buffer could be an internal static buffer.
  */
 const char *
@@ -995,14 +985,61 @@ ThrowError(const char *message) throw()
 static Persistent<Context>
 GetGlobalContext() throw()
 {
-	static Persistent<Context>	global_context;
+	Oid					user_id = GetUserId();
+	Persistent<Context>	global_context;
+	int					i;
 
+	for (i = 0; i < ContextVector.size(); i++)
+	{
+		if (ContextVector[i]->user_id == user_id)
+		{
+			global_context = ContextVector[i]->context;
+			break;
+		}
+	}
 	if (global_context.IsEmpty())
 	{
 		HandleScope				handle_scope;
 		Handle<ObjectTemplate>	global = GetGlobalObjectTemplate();
+		plv8_context		   *my_context;
 
 		global_context = Context::New(NULL, global);
+		my_context = (plv8_context *) MemoryContextAlloc(TopMemoryContext,
+														 sizeof(plv8_context));
+		my_context->context = global_context;
+		my_context->user_id = user_id;
+
+		/*
+		 * Need to register it before running any code, as the code
+		 * recursively may want to the global context.
+		 */
+		ContextVector.push_back(my_context);
+
+		/*
+		 * Run the start up procedure if configured.
+		 */
+		if (plv8_start_proc != NULL)
+		{
+			Local<Function>		func;
+
+			HandleScope			handle_scope;
+			Context::Scope		context_scope(global_context);
+			TryCatch			try_catch;
+
+			PG_TRY();
+			{
+				func = find_js_function_by_name(plv8_start_proc);
+			}
+			PG_CATCH();
+			{
+				throw pg_error();
+			}
+			PG_END_TRY();
+
+			Handle<v8::Value>	result = DoCall(func, global_context->Global(), 0, NULL);
+			if (result.IsEmpty())
+				throw js_error(try_catch);
+		}
 	}
 
 	return global_context;

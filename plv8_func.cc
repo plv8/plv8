@@ -1081,24 +1081,11 @@ plv8_FindFunction(const Arguments& args)
 	if (args.Length() < 1)
 		return Undefined();
 	CString				signature(args[0]);
-	Oid					funcoid;
 	Local<Function>		func;
 
 	PG_TRY();
 	{
-		if (strchr(signature, '(') == NULL)
-		{
-			funcoid = DatumGetObjectId(
-					DirectFunctionCall1(regprocin, CStringGetDatum(signature.str())));
-		}
-		else
-		{
-			funcoid = DatumGetObjectId(
-					DirectFunctionCall1(regprocedurein, CStringGetDatum(signature.str())));
-		}
-		func = find_js_function(funcoid);
-		if (func.IsEmpty())
-			elog(ERROR, "javascript function is not found for \"%s\"", signature.str());
+		func = find_js_function_by_name(signature.str());
 	}
 	PG_CATCH();
 	{

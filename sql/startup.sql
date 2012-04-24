@@ -1,4 +1,3 @@
-
 set plv8.start_proc = startup;
 
 do $$ print(NOTICE, 'foo = ' + foo) $$ language plv8;
@@ -10,5 +9,12 @@ do $$ print(NOTICE, 'foo = ' + foo) $$ language plv8;
 
 do $$ load_module('testme'); print (NOTICE,'bar = ' + bar);$$ language plv8;
 
+CREATE ROLE someone_else;
+SET ROLE to someone_else;
 
-   
+reset plv8.start_proc;
+-- should fail because of a reference error
+do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;
+
+RESET ROLE;
+DROP ROLE someone_else;

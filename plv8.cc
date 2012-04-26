@@ -92,6 +92,10 @@ typedef struct plv8_proc
 	plv8_type				argtypes[FUNC_MAX_ARGS];
 } plv8_proc;
 
+/*
+ * For the security reasons, the global context is separated
+ * between users and it's associated with user id.
+ */
 typedef struct plv8_context
 {
 	Persistent<Context>		context;
@@ -125,7 +129,13 @@ static Datum CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 static Datum CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv);
 static Persistent<Context> GetGlobalContext() throw();
 static Persistent<ObjectTemplate> GetGlobalObjectTemplate() throw();
+
+/* A GUC to specify a custom start up function to call */
 static char *plv8_start_proc = NULL;
+/*
+ * We use vector instead of hash since the size of this array
+ * is expected to be short in most cases.
+ */
 static std::vector<plv8_context *> ContextVector;
 
 void
@@ -257,14 +267,14 @@ plv8_inline_handler(PG_FUNCTION_ARGS) throw()
  * This function could throw C++ exceptions, but must not throw PG exceptions.
  */
 static Local<v8::Value>
-DoCall(Handle<Function> fn, Handle<Object> context,
+DoCall(Handle<Function> fn, Handle<Object> receiver,
 	int nargs, Handle<v8::Value> args[])
 {
 	TryCatch		try_catch;
 
 	if (SPI_connect() != SPI_OK_CONNECT)
 		throw js_error(_("could not connect to SPI manager"));
-	Local<v8::Value> result = fn->Call(context, nargs, args);
+	Local<v8::Value> result = fn->Call(receiver, nargs, args);
 	int	status = SPI_finish();
 
 	if (result.IsEmpty())
@@ -594,12 +604,19 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 	if (!HeapTupleIsValid(procTup))
 		elog(ERROR, "cache lookup failed for function %u", fn_oid);
 
-	cache = (plv8_proc_cache *) hash_search(plv8_proc_cache_hash, &fn_oid, HASH_ENTER, &found);
+	cache = (plv8_proc_cache *)
+		hash_search(plv8_proc_cache_hash,&fn_oid, HASH_ENTER, &found);
 
 	if (found)
 	{
 		bool    uptodate;
 
+		/*
+		 * We need to check user id and dispose it if it's different from
+		 * the previous cache user id, as the V8 function is associated
+		 * with the context where it was generated.  In most cases,
+		 * we can expect this doesn't affect runtime performance.
+		 */
 		uptodate = (!cache->function.IsEmpty() &&
 			cache->fn_xmin == HeapTupleHeaderGetXmin(procTup->t_data) &&
 			ItemPointerEquals(&cache->fn_tid, &procTup->t_self) &&

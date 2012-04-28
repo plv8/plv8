@@ -120,6 +120,16 @@ $$
 LANGUAGE plv8;
 SELECT * FROM set_of_integers();
 
+CREATE FUNCTION set_of_nest() RETURNS SETOF float AS
+$$
+	plv8.return_next( -0.2 );
+	var rows = plv8.execute( "SELECT set_of_integers() AS i" );
+	plv8.return_next( rows[0].i );
+	return 0.2;
+$$
+LANGUAGE plv8;
+SELECT * FROM set_of_nest();
+
 -- INOUT and OUT parameters
 CREATE FUNCTION one_inout(a integer, INOUT b text) AS
 $$

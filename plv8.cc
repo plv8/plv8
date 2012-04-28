@@ -372,20 +372,36 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Handle<Object>		plv8obj = Handle<Object>::Cast(
 			context->Global()->Get(String::NewSymbol("plv8")));
 
+	/*
+	 * In case this is nested via SPI, stash pre-registered converters
+	 * for the previous SRF.
+	 */
+	Handle<v8::Value>	conv_prev, tupstore_prev;
+	if (!plv8obj->GetInternalField(PLV8_INTNL_CONV).IsEmpty())
+	{
+		conv_prev = plv8obj->GetInternalField(PLV8_INTNL_CONV);
+		tupstore_prev = plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE);
+	}
+	/*
+	 * Setup return_next information
+	 */
+	plv8obj->SetInternalField(PLV8_INTNL_CONV, External::Wrap(&conv));
+	plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, External::Wrap(tupstore));
+
 	for (int i = 0; i < nargs; i++)
 		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
 
-	// Add "yield" function as a hidden argument.
-	// TODO: yield should be passed as a global variable.
-	args[nargs] = CreateYieldFunction(&conv, tupstore);
-
 	Local<Function>		fn =
 		Local<Function>::Cast(xenv->recv->GetInternalField(0));
-	Local<String>		key = String::NewSymbol("return_next");
-	plv8obj->Set(key, args[nargs]);
+
 	Handle<v8::Value> result =
-		DoCall(fn, xenv->recv, nargs + 1, args);
-	plv8obj->Delete(key);
+		DoCall(fn, xenv->recv, nargs, args);
+
+	/*
+	 * Restore old information.
+	 */
+	plv8obj->SetInternalField(PLV8_INTNL_CONV, conv_prev);
+	plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, tupstore_prev);
 
 	if (result->IsUndefined())
 	{
@@ -821,14 +837,6 @@ CompileFunction(
 			else
 				appendStringInfo(&src, "$%d", i + 1);	// unnamed argument to $N
 		}
-
-		// Add "yield" function as a hidden argument.
-		if (retset)
-		{
-			if (proarglen > 0)
-				appendStringInfoChar(&src, ',');
-			appendStringInfoString(&src, "yield");
-		}
 	}
 	appendStringInfo(&src, "){\n%s\n})", prosrc);
 
@@ -1038,9 +1046,7 @@ GetGlobalObjectTemplate() throw()
 		HandleScope				handle_scope;
 
 		global = Persistent<ObjectTemplate>::New(ObjectTemplate::New());
-		// built-in function print(elevel, ...)
-		global->Set(String::NewSymbol("print"),
-					FunctionTemplate::New(Print));
+		// ERROR levels for elog
 		global->Set(String::NewSymbol("DEBUG5"), Int32::New(DEBUG5));
 		global->Set(String::NewSymbol("DEBUG4"), Int32::New(DEBUG4));
 		global->Set(String::NewSymbol("DEBUG3"), Int32::New(DEBUG3));
@@ -1052,34 +1058,6 @@ GetGlobalObjectTemplate() throw()
 		global->Set(String::NewSymbol("NOTICE"), Int32::New(NOTICE));
 		global->Set(String::NewSymbol("WARNING"), Int32::New(WARNING));
 		global->Set(String::NewSymbol("ERROR"), Int32::New(ERROR));
-		// ERROR or higher severity levels are not allowed. Use "throw" instead.
-
-		// built-in SPI access
-
-		global->Set(String::NewSymbol("executeSql"),
-					FunctionTemplate::New(ExecuteSql));
-
-		global->Set(String::NewSymbol("createPlan"),
-					FunctionTemplate::New(CreatePlan));
-		
-		global->Set(String::NewSymbol("executePlan"),
-					FunctionTemplate::New(ExecutePlan));
-		
-		global->Set(String::NewSymbol("freePlan"),
-					FunctionTemplate::New(FreePlan));
-		
-		global->Set(String::NewSymbol("createCursor"),
-					FunctionTemplate::New(CreateCursor));
-		
-		global->Set(String::NewSymbol("fetchCursor"),
-					FunctionTemplate::New(FetchCursor));
-		
-		global->Set(String::NewSymbol("closeCursor"),
-					FunctionTemplate::New(CloseCursor));
-
-		global->Set(String::NewSymbol("subtransaction"),
-					FunctionTemplate::New(Subtransaction));
-
 
 		Handle<ObjectTemplate>	plv8 = ObjectTemplate::New();
 

@@ -19,6 +19,11 @@ extern "C" {
 #define __attribute__(what)
 #endif
 
+/* numbers for plv8 object internal field */
+#define PLV8_INTNL_CONV			1
+#define PLV8_INTNL_TUPSTORE		2
+#define PLV8_INTNL_MAX			3
+
 /* js_error represents exceptions in JavaScript. */
 class js_error
 {
@@ -123,15 +128,6 @@ extern char *ToCString(const v8::String::Utf8Value &value);
 extern char *ToCStringCopy(const v8::String::Utf8Value &value);
 
 // plv8_func.cc
-extern v8::Handle<v8::Value> Print(const v8::Arguments& args) throw();
-extern v8::Handle<v8::Value> ExecuteSql(const v8::Arguments& args) throw();
-extern v8::Handle<v8::Value> CreatePlan(const v8::Arguments& args) throw();
-extern v8::Handle<v8::Value> ExecutePlan(const v8::Arguments& args) throw();
-extern v8::Handle<v8::Value> FreePlan(const v8::Arguments& args) throw();
-extern v8::Handle<v8::Value> CreateCursor(const v8::Arguments& args) throw();
-extern v8::Handle<v8::Value> FetchCursor(const v8::Arguments& args) throw();
-extern v8::Handle<v8::Value> CloseCursor(const v8::Arguments& arg) throw();
-extern v8::Handle<v8::Value> Yield(const v8::Arguments& args) throw();
 extern v8::Handle<v8::Function> CreateYieldFunction(Converter *conv, Tuplestorestate *tupstore);
 extern v8::Handle<v8::Value> Subtransaction(const v8::Arguments& args) throw();
 

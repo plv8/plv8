@@ -346,3 +346,12 @@ SELECT caller(10, 2);
 SELECT caller(10, 3);
 SELECT caller(10, 4);
 SELECT caller(10, 5);
+
+-- quote_*
+CREATE FUNCTION plv8_quotes(s text) RETURNS text AS $$
+  return [plv8.quote_literal(s), plv8.quote_nullable(s), plv8.quote_ident(s)].join(":");
+$$ LANGUAGE plv8 IMMUTABLE;
+
+SELECT plv8_quotes('select');
+SELECT plv8_quotes('kevin''s name');
+SELECT plv8_quotes(NULL);

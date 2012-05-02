@@ -597,3 +597,25 @@ SELECT caller(10, 5);
      10
 (1 row)
 
+-- quote_*
+CREATE FUNCTION plv8_quotes(s text) RETURNS text AS $$
+  return [plv8.quote_literal(s), plv8.quote_nullable(s), plv8.quote_ident(s)].join(":");
+$$ LANGUAGE plv8 IMMUTABLE;
+SELECT plv8_quotes('select');
+        plv8_quotes         
+----------------------------
+ 'select':'select':"select"
+(1 row)
+
+SELECT plv8_quotes('kevin''s name');
+                  plv8_quotes                   
+------------------------------------------------
+ 'kevin''s name':'kevin''s name':"kevin's name"
+(1 row)
+
+SELECT plv8_quotes(NULL);
+    plv8_quotes     
+--------------------
+ 'null':NULL:"null"
+(1 row)
+

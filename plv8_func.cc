@@ -39,6 +39,9 @@ static Handle<v8::Value> plv8_CursorClose(const Arguments& args);
 static Handle<v8::Value> plv8_ReturnNext(const Arguments& args);
 static Handle<v8::Value> plv8_Subtransaction(const Arguments& args);
 static Handle<v8::Value> plv8_FindFunction(const Arguments& args);
+static Handle<v8::Value> plv8_QuoteLiteral(const Arguments& args);
+static Handle<v8::Value> plv8_QuoteNullable(const Arguments& args);
+static Handle<v8::Value> plv8_QuoteIdent(const Arguments& args);
 
 static inline Local<v8::Value>
 WrapCallback(InvocationCallback func)
@@ -157,6 +160,9 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	SetCallback(plv8, "return_next", plv8_ReturnNext, attrFull);
 	SetCallback(plv8, "subtransaction", plv8_Subtransaction, attrFull);
 	SetCallback(plv8, "find_function", plv8_FindFunction, attrFull);
+	SetCallback(plv8, "quote_literal", plv8_QuoteLiteral, attrFull);
+	SetCallback(plv8, "quote_nullable", plv8_QuoteNullable, attrFull);
+	SetCallback(plv8, "quote_ident", plv8_QuoteIdent, attrFull);
 
 	plv8->SetInternalFieldCount(PLV8_INTNL_MAX);
 }
@@ -658,4 +664,70 @@ plv8_FindFunction(const Arguments& args)
 	PG_END_TRY();
 
 	return func;
+}
+
+static Handle<v8::Value>
+plv8_QuoteLiteral(const Arguments& args)
+{
+	if (args.Length() < 1)
+		return Undefined();
+	CString			instr(args[0]);
+	char		   *result;
+
+	PG_TRY();
+	{
+		result = quote_literal_cstr(instr);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return ToString(result);
+}
+
+static Handle<v8::Value>
+plv8_QuoteNullable(const Arguments& args)
+{
+	if (args.Length() < 1)
+		return Undefined();
+	CString			instr(args[0]);
+	char		   *result;
+
+	if (args[0]->IsNull() || args[0]->IsUndefined())
+		return ToString("NULL");
+
+	PG_TRY();
+	{
+		result = quote_literal_cstr(instr);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return ToString(result);
+}
+
+static Handle<v8::Value>
+plv8_QuoteIdent(const Arguments& args)
+{
+	if (args.Length() < 1)
+		return Undefined();
+	CString			instr(args[0]);
+	const char	   *result;
+
+	PG_TRY();
+	{
+		result = quote_identifier(instr);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return ToString(result);
 }

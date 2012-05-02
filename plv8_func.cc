@@ -327,6 +327,13 @@ plv8_Execute(const Arguments &args)
 		Handle<v8::Value>	param = params->Get(i);
 
 		types[i] = InferredDatumType(param);
+		if (types[i] == InvalidOid)
+		{
+			char msg[1024];
+
+			snprintf(msg, 1024, "parameter[%d] cannot translate to a database type", i);
+			throw js_error(msg);
+		}
 		values[i] = ValueGetDatum(param, types[i], &nulls[i]);
 	}
 

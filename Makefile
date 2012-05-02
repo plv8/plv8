@@ -7,7 +7,8 @@ SRCS = plv8.cc plv8_type.cc plv8_func.cc
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8
 EXTENSION = plv8
-DATA = plv8.control plv8--1.0.sql
+EXTVER = 1.1
+DATA = plv8.control plv8--$(EXTVER).sql
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 inline json startup_pre startup
 SHLIB_LINK := $(SHLIB_LINK) -lv8
@@ -18,44 +19,38 @@ CCFLAGS := $(filter-out -Wdeclaration-after-statement, $(CCFLAGS))
 %.o : %.cc
 	g++ $(CCFLAGS) $(CPPFLAGS) -I $(V8DIR)/include -fPIC -c -o $@ $<
 
-ifndef USE_PGXS
-top_builddir = ../..
-makefile_global = $(top_builddir)/src/Makefile.global
-ifeq "$(wildcard $(makefile_global))" ""
-USE_PGXS = 1	# use pgxs if not in contrib directory
-endif
-endif
-
-ifdef USE_PGXS
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
-else
-subdir = contrib/$(MODULE_big)
-include $(makefile_global)
-include $(top_srcdir)/contrib/contrib-global.mk
-endif
 
 ifndef MAJORVERSION
 MAJORVERSION := $(basename $(VERSION))
 endif
 
-# TODO: better idea for "$(MAJORVERSION) >= 9.1" ?
-ifeq (,$(findstring $(MAJORVERSION),9.1 9.2))
-DATA = uninstall_plv8.sql
+
+PG_VERSION_NUM := $(shell perl -ne 'print $$1 if /PG_VERSION_NUM\s+(\d+)/' \
+		< `$(PG_CONFIG) --includedir`/pg_config.h)
+
+# VERSION specific definitions
+ifeq ($(shell test $(PG_VERSION_NUM) -ge 90100 && echo yes), yes)
+plv8.sql:
+DATA_built =
+install: plv8--$(EXTVER).sql
+plv8--$(EXTVER).sql: plv8.sql.c
+	$(CC) -E -P $(CPPFLAGS) $< > $@
+subclean:
+	rm -f plv8--$(EXTVER).sql
+else # 9.1
+ifeq ($(shell test $(PG_VERSION_NUM) -ge 90000 && echo yes), yes)
 REGRESS := init $(filter-out init-extension, $(REGRESS))
+else # 9.0
+REGRESS := init $(filter-out init-extension inline startup, $(REGRESS))
+endif
+DATA = uninstall_plv8.sql
 plv8.sql.in: plv8.sql.c
 	$(CC) -E -P $(CPPFLAGS) $< > $@
 subclean:
 	rm -f plv8.sql.in
-else
-plv8.sql:
-DATA_built =
-install: plv8--1.0.sql
-plv8--1.0.sql: plv8.sql.c
-	$(CC) -E -P $(CPPFLAGS) $< > $@
-subclean:
-	rm -f plv8--1.0.sql
 endif
 
 ifneq ($(basename $(MAJORVERSION)), 9)

@@ -149,13 +149,17 @@ _PG_init(void)
 	plv8_proc_cache_hash = hash_create("PLv8 Procedures", 32,
 									   &hash_ctl, HASH_ELEM | HASH_FUNCTION);
 
-    DefineCustomStringVariable("plv8.start_proc",
-                               gettext_noop("PLV8 function to run once when PLV8 is first used."),
-                               NULL,
-                               &plv8_start_proc,
-                               NULL,
-                               PGC_USERSET, 0,
-                               NULL, NULL, NULL);
+	DefineCustomStringVariable("plv8.start_proc",
+							   gettext_noop("PLV8 function to run once when PLV8 is first used."),
+							   NULL,
+							   &plv8_start_proc,
+							   NULL,
+							   PGC_USERSET, 0,
+#if PG_VERSION_NUM >= 90100
+							   NULL,
+#endif
+							   NULL,
+							   NULL);
 
 	RegisterXactCallback(plv8_xact_cb, NULL);
 
@@ -1117,7 +1121,16 @@ Converter::ToValue(HeapTuple tuple)
 		Datum		datum;
 		bool		isnull;
 
+#if PG_VERSION_NUM >= 90000
 		datum = heap_getattr(tuple, c + 1, m_tupdesc, &isnull);
+#else
+		/*
+		 * Due to the difference between C and C++ rules,
+		 * we cannot call heap_getattr from < 9.0 unfortunately.
+		 */
+		datum = nocachegetattr(tuple, c + 1, m_tupdesc, &isnull);
+#endif
+
 		obj->Set(m_colnames[c], ::ToValue(datum, isnull, &m_coltypes[c]));
 	}
 

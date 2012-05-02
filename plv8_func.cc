@@ -43,6 +43,20 @@ static Handle<v8::Value> plv8_QuoteLiteral(const Arguments& args);
 static Handle<v8::Value> plv8_QuoteNullable(const Arguments& args);
 static Handle<v8::Value> plv8_QuoteIdent(const Arguments& args);
 
+#if PG_VERSION_NUM < 90100
+/*
+ * quote_literal_cstr -
+ *	  returns a properly quoted literal
+ */
+static char *
+quote_literal_cstr(const char *rawstr)
+{
+	return TextDatumGetCString(
+			DirectFunctionCall1(quote_literal, CStringGetTextDatum(rawstr)));
+}
+#endif
+
+
 static inline Local<v8::Value>
 WrapCallback(InvocationCallback func)
 {

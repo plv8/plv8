@@ -127,8 +127,8 @@ static Datum CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 static Datum CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		int nargs, plv8_type argtypes[], plv8_type *rettype);
 static Datum CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv);
-static Persistent<Context> GetGlobalContext() throw();
-static Persistent<ObjectTemplate> GetGlobalObjectTemplate() throw();
+static Persistent<Context> GetGlobalContext();
+static Persistent<ObjectTemplate> GetGlobalObjectTemplate();
 
 /* A GUC to specify a custom start up function to call */
 static char *plv8_start_proc = NULL;
@@ -978,7 +978,7 @@ ThrowError(const char *message) throw()
 }
 
 static Persistent<Context>
-GetGlobalContext() throw()
+GetGlobalContext()
 {
 	Oid					user_id = GetUserId();
 	Persistent<Context>	global_context;
@@ -1041,7 +1041,7 @@ GetGlobalContext() throw()
 }
 
 static Persistent<ObjectTemplate>
-GetGlobalObjectTemplate() throw()
+GetGlobalObjectTemplate()
 {
 	static Persistent<ObjectTemplate>	global;
 

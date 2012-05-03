@@ -3,7 +3,10 @@ V8DIR = ../v8
 # set your custom C++ compler
 CUSTOM_CC = g++
 
-SRCS = plv8.cc plv8_type.cc plv8_func.cc
+JSS  = coffee-script.js
+# .cc created from .js
+JSCS = $(JSS:.js=.cc)
+SRCS = plv8.cc plv8_type.cc plv8_func.cc $(JSCS)
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8
 EXTENSION = plv8
@@ -15,9 +18,24 @@ SHLIB_LINK := $(SHLIB_LINK) -lv8
 
 CCFLAGS := $(filter-out -Wmissing-prototypes, $(CFLAGS))
 CCFLAGS := $(filter-out -Wdeclaration-after-statement, $(CCFLAGS))
+ifdef ENABLE_COFFEE
+	CCFLAGS := -DENABLE_COFFEE $(CCFLAGS)
+	DATA = plcoffee.control plcoffee--0.9.sql
+endif
+
+all:
 
 %.o : %.cc
 	g++ $(CCFLAGS) $(CPPFLAGS) -I $(V8DIR)/include -fPIC -c -o $@ $<
+
+# Convert .js to .cc
+$(filter $(JSCS), $(SRCS)): %.cc: %.js
+	echo "extern const unsigned char $(subst -,_,$(basename $@))_binary_data[] = {" >$@
+ifdef ENABLE_COFFEE
+	(od -txC -v $< | \
+	sed -e "s/^[0-9]*//" -e s"/ \([0-9a-f][0-9a-f]\)/0x\1,/g" -e"\$$d" ) >>$@
+endif
+	echo "0x00};" >>$@
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -39,7 +57,7 @@ install: plv8--$(EXTVER).sql
 plv8--$(EXTVER).sql: plv8.sql.c
 	$(CC) -E -P $(CPPFLAGS) $< > $@
 subclean:
-	rm -f plv8--$(EXTVER).sql
+	rm -f plv8--$(EXTVER).sql $(JSCS)
 else # 9.1
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90000 && echo yes), yes)
 REGRESS := init $(filter-out init-extension, $(REGRESS))
@@ -50,7 +68,7 @@ DATA = uninstall_plv8.sql
 plv8.sql.in: plv8.sql.c
 	$(CC) -E -P $(CPPFLAGS) $< > $@
 subclean:
-	rm -f plv8.sql.in
+	rm -f plv8.sql.in $(JSCS)
 endif
 
 ifneq ($(basename $(MAJORVERSION)), 9)

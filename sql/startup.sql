@@ -1,3 +1,8 @@
+-- test startup failure
+set plv8.start_proc = foo;
+do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;
+
+\c
 set plv8.start_proc = startup;
 
 do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;

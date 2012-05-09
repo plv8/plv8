@@ -1020,6 +1020,7 @@ GetGlobalContext()
 			HandleScope			handle_scope;
 			Context::Scope		context_scope(global_context);
 			TryCatch			try_catch;
+			MemoryContext		ctx = CurrentMemoryContext;
 
 			PG_TRY();
 			{
@@ -1027,13 +1028,23 @@ GetGlobalContext()
 			}
 			PG_CATCH();
 			{
-				throw pg_error();
+				ErrorData	   *edata;
+
+				MemoryContextSwitchTo(ctx);
+				edata = CopyErrorData();
+				elog(WARNING, "failed to find js function %s", edata->message);
+				FlushErrorState();
+				FreeErrorData(edata);
 			}
 			PG_END_TRY();
 
-			Handle<v8::Value>	result = DoCall(func, global_context->Global(), 0, NULL);
-			if (result.IsEmpty())
-				throw js_error(try_catch);
+			if (!func.IsEmpty())
+			{
+				Handle<v8::Value>	result =
+					DoCall(func, global_context->Global(), 0, NULL);
+				if (result.IsEmpty())
+					throw js_error(try_catch);
+			}
 		}
 	}
 

@@ -1,3 +1,10 @@
+-- test startup failure
+set plv8.start_proc = foo;
+do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;
+WARNING:  failed to find js function foo:function "foo" does not exist
+ERROR:  ReferenceError: foo is not defined
+DETAIL:  undefined() LINE 1:  plv8.elog(NOTICE, 'foo = ' + foo) 
+\c
 set plv8.start_proc = startup;
 do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;
 NOTICE:  foo = 14378

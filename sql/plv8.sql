@@ -130,6 +130,14 @@ $$
 LANGUAGE plv8;
 SELECT * FROM set_of_nest();
 
+CREATE FUNCTION set_of_unnamed_records() RETURNS SETOF record AS
+$$
+	return [ { i: true } ];
+$$
+LANGUAGE plv8;
+SELECT set_of_unnamed_records();
+SELECT * FROM set_of_unnamed_records() t (i bool);
+
 -- INOUT and OUT parameters
 CREATE FUNCTION one_inout(a integer, INOUT b text) AS
 $$

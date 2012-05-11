@@ -370,7 +370,7 @@ CreateTupleStore(PG_FUNCTION_ARGS, TupleDesc *tupdesc)
 							"allowed in this context")));
 
 		if (!proc->functypclass)
-			proc->functypclass = get_call_result_type(fcinfo, NULL, NULL);
+			proc->functypclass = get_call_result_type(fcinfo, NULL, tupdesc);
 
 		per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
 		oldcontext = MemoryContextSwitchTo(per_query_ctx);
@@ -379,9 +379,16 @@ CreateTupleStore(PG_FUNCTION_ARGS, TupleDesc *tupdesc)
 		rsinfo->returnMode = SFRM_Materialize;
 		rsinfo->setResult = tupstore;
 		/* Build a tuple descriptor for our result type */
+		if (proc->rettype.typid == RECORDOID)
+		{
+			if (proc->functypclass != TYPEFUNC_COMPOSITE)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("function returning record called in context "
+								"that cannot accept type record")));
+		}
 		if (!rsinfo->setDesc)
-			rsinfo->setDesc = CreateTupleDescCopy(rsinfo->expectedDesc);
-		*tupdesc = rsinfo->setDesc;
+			rsinfo->setDesc = *tupdesc;
 		MemoryContextSwitchTo(oldcontext);
 	}
 	PG_CATCH();

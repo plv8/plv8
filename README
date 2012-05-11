@@ -1,6 +1,67 @@
-plv8 is shared library that provides a PostgreSQL procedual language powered
-by V8 JavaScript Engine. With this program you can write in JavaScript your
+A Procedural Language in JavaScript powered by V8
+=================================================
+
+plv8 is a shared library that provides a PostgreSQL procedural language powered
+by V8 JavaScript Engine.  With this program you can write in JavaScript your
 function that is callable from SQL.
 
-See project wiki page for the detail:
+REQUIREMENT
+-----------
+
+plv8 is tested with:
+
+- PG: version 8.4, 9.0, 9.1 and 9.2dev (maybe older are allowed)
+- V8: version 3.6.2
+- g++: version 4.5.1
+
+Also all tools that PostgreSQL and V8 require to be built are required.
+
+INSTALL
+-------
+
+Make sure V8 include files are in the system include directories, or you can
+place them in $(PLV8DIR)/../v8/include.  Run make
+
+  $ make install
+
+and create language via
+
+  $ psql -c 'CREATE EXTENSION plv8'
+
+in 9.1, or in the prior versions
+
+  $ psql -f plv8.sql
+
+to create database objects.
+
+TEST
+----
+
+plv8 supports installcheck test.  Make sure set custom_variable_classes = 'plv8'
+in your postgresql.conf and
+
+  $ make installcheck
+
+EXAMPLE
+-------
+
+  CREATE OR REPLACE FUNCTION plv8_test(keys text[], vals text[])
+  RETURNS text AS $$
+    var o = {};
+    for(var i=0; i<keys.length; i++){
+      o[keys[i]] = vals[i];
+    }
+    return JSON.stringify(o);
+  $$ LANGUAGE plv8 IMMUTABLE STRICT;
+  
+  SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
+  SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
+           plv8_test        
+  ---------------------------
+   {"name":"Tom","age":"29"}
+  (1 row)
+
+NOTES
+-----
+See project wiki page for more detail:
 http://code.google.com/p/plv8js/wiki/PLV8

@@ -1,0 +1,54 @@
+{
+    "name": "plv8",
+    "abstract": "A procedural language in JavaScript powered by V8",
+    "description": "plv8 is a trusted procedural language that is safe to use, fast to run and easy to develop.",
+    "version": "1.1.0-beta",
+    "maintainer": [
+        "Hitoshi Harada <umi.tanuki@gmail.com>",
+        "Andrew Dunstan <AMDunstan@gmail.com>",
+        "Takahiro Itagaki <itagaki.takahiro@gmail.com>",
+        "Kiswono Prayogo <kiswono@gmail.com>"
+    ],
+    "license": {
+        "PostgreSQL": "http://www.postgresql.org/about/licence"
+    },
+    "release_status": "stable",
+    "prereqs": {
+        "runtime": {
+            "requires": {
+                "v8": "3.6.2",
+                "PostgreSQL": "8.4.0"
+            },
+            "recommends": {
+                "PostgreSQL": "9.1.0"
+            }
+        }
+    },
+    "provides": {
+        "plv8": {
+            "file": "plv8--1.1.0.sql",
+            "docfile": "doc/plv8.md",
+            "version": "1.1.0",
+            "abstract": "A procedural language in JavaScript"
+         }
+    },
+    "resources": {
+        "homepage": "http://code.google.com/p/plv8js/",
+        "bugtracker": {
+            "web": "http://code.google.com/p/plv8js/issues/list"
+        },
+        "repository": {
+            "url":  "https://code.google.com/p/plv8js/",
+            "web":  "http://code.google.com/p/plv8js/source/checkout",
+            "type": "git"
+        }
+    },
+    "meta-spec": {
+       "version": "1.0.0",
+       "url": "http://pgxn.org/meta/spec.txt"
+    },
+    "tags": [
+       "PL",
+       "JavaScript"
+    ]
+}

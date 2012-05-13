@@ -370,7 +370,7 @@ CreateTupleStore(PG_FUNCTION_ARGS, TupleDesc *tupdesc)
 							"allowed in this context")));
 
 		if (!proc->functypclass)
-			proc->functypclass = get_call_result_type(fcinfo, NULL, tupdesc);
+			proc->functypclass = get_call_result_type(fcinfo, NULL, NULL);
 
 		per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
 		oldcontext = MemoryContextSwitchTo(per_query_ctx);
@@ -388,7 +388,13 @@ CreateTupleStore(PG_FUNCTION_ARGS, TupleDesc *tupdesc)
 								"that cannot accept type record")));
 		}
 		if (!rsinfo->setDesc)
+		{
+			*tupdesc = CreateTupleDescCopy(rsinfo->expectedDesc);
 			rsinfo->setDesc = *tupdesc;
+		}
+		else
+			*tupdesc = rsinfo->setDesc;
+
 		MemoryContextSwitchTo(oldcontext);
 	}
 	PG_CATCH();

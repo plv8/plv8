@@ -17,31 +17,13 @@ CREATE FUNCTION plv8_inline_handler(internal) RETURNS void
 CREATE FUNCTION plv8_call_validator(oid) RETURNS void
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 
-DELETE FROM pg_pltemplate WHERE tmplname = 'plv8';
-INSERT INTO pg_pltemplate (
-	tmplname,
-	tmpltrusted,
-	tmpldbacreate,
-	tmplhandler,
+CREATE TRUSTED LANGUAGE plv8
+	HANDLER plv8_call_handler
 #if PG_VERSION_NUM >= 90000
-	tmplinline,
+	INLINE plv8_inline_handler
 #endif
-	tmplvalidator,
-	tmpllibrary)
-SELECT
-	'plv8',
-	true,
-	false,
-	'plv8_call_handler',
-#if PG_VERSION_NUM >= 90000
-	'plv8_inline_handler',
-#endif
-	'plv8_call_validator',
-	'MODULE_PATHNAME'
-;
+	VALIDATOR plv8_call_validator;
 
 #if PG_VERSION_NUM < 90100
 COMMIT;
-#else
-CREATE LANGUAGE plv8;
 #endif

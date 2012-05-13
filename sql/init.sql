@@ -4,5 +4,3 @@ SET client_min_messages = warning;
 \i plv8.sql
 \set ECHO all
 RESET client_min_messages;
-
-CREATE LANGUAGE plv8;

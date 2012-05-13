@@ -10,7 +10,7 @@ SRCS = plv8.cc plv8_type.cc plv8_func.cc $(JSCS)
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8
 EXTENSION = plv8
-EXTVER = 1.1
+EXTVER = 1.1.0
 DATA = plv8.control plv8--$(EXTVER).sql
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 inline json startup_pre startup
@@ -18,9 +18,10 @@ SHLIB_LINK := $(SHLIB_LINK) -lv8
 
 CCFLAGS := $(filter-out -Wmissing-prototypes, $(CFLAGS))
 CCFLAGS := $(filter-out -Wdeclaration-after-statement, $(CCFLAGS))
+# plcoffee is available only when ENABLE_COFFEE is defined.
 ifdef ENABLE_COFFEE
 	CCFLAGS := -DENABLE_COFFEE $(CCFLAGS)
-	DATA = plcoffee.control plcoffee--0.9.sql
+	DATA = plcoffee.control plcoffee--0.9.0.sql
 endif
 
 all:

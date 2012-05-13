@@ -48,9 +48,9 @@ The function will be internally defined such that
        $funcbody$
     })
 
-where $funcbody$ is the script source you specify in CREATE FUNCTION AS clause.
-The argument names are inherited from the CREATE FUNCTION statement, or they will
-be named as $1, $2 if the names are omitted.
+where $funcbody$ is the script source you specify in the CREATE FUNCTION AS
+clause.  The argument names are inherited from the CREATE FUNCTION statement,
+or they will be named as $1, $2 if the names are omitted.
 
 Set returning function calls
 ----------------------------
@@ -80,11 +80,11 @@ PL/v8 supports set returning function calls.
     (4 rows)
 
 If the function is declared as RETURNS SETOF, PL/v8 prepares a tuplestore every
-time called.  You can call plv8.return_next() function to add as many result as
+time called.  You can call plv8.return_next() function to add as many results as
 you like to return rows from this function.  Alternatively, you can just return
 a JS array to add set of records, a JS object to add a record, or a scalar value
 to add a scalar to the tuplestore.  Unlike other PLs, PL/v8 does not support
-per-value return strategy, but it always uses tuplestore strategy.
+the per-value return strategy, but it always uses the tuplestore strategy.
 
 Trigger function calls
 ----------------------
@@ -138,8 +138,8 @@ PL/v8 supports DO block with PostgreSQL 9.0 and above.
 Auto mapping between JS and database built-in types
 ---------------------------------------------------
 
-Between the result type and argument types, database types and JS types are
-mapped automatically.  If the desired database type is one of
+For the result and arguments, database types and JS types are mapped
+automatically.  If the desired database type is one of
 
 - oid
 - bool
@@ -163,11 +163,11 @@ Database access via SPI including prepared statements and cursors
 
 ### plv8.execute( sql [, args] ) ###
 
-Execute SQL statements and retrieve the result. `args` is an optional argument
-that replaces $n placeholders in `sql`.  For SELECT queries, the returned value
-is an array of objects. Each hash represents each record.  Column names are
-mapped to object properties.  For non-SELECT commands, the returned value is
-an integer that represents number of affected rows.
+Executes SQL statements and retrieve the result. The `args` is an optional
+argument that replaces $n placeholders in `sql`.  For SELECT queries, the
+returned value is an array of objects. Each hash represents each record.
+Column names are mapped to object properties.  For non-SELECT commands, the
+returned value is an integer that represents number of affected rows.
 
     var json_result = plv8.execute( 'SELECT * FROM tbl' );
     var num_affected = plv8.execute( 'DELETE FROM tbl WHERE price > $1', [ 1000 ] );
@@ -191,13 +191,13 @@ plan.free() before leaving the function.
 
 ### PreparedPlan.execute( [args] ) ###
 
-Executes the prepared statement.  The args parameter is as plv8.execute(), and
+Executes the prepared statement.  The `args` parameter is as plv8.execute(), and
 can be omitted if the statement does not have parameters at all.  The result
 of this method is also as described in plv8.execute().
 
 ### PreparedPlan.cursor( [args] ) ###
 
-Opens a cursor from the prepared statement. The args parameter is as
+Opens a cursor from the prepared statement. The `args` parameter is as
 plv8.execute(), and can be omitted if the statement does not have parameters
 at all.  The returned object is of Cursor.  This must be closed by Cursor.close()
 before leaving the function.
@@ -231,8 +231,9 @@ Subtransaction
 
 ### plv8.subtransaction( func ) ###
 
-plv8.execute() creates subtransaction every time.  If you need to atomic operation,
-you will need to call plv8.subtransaction() to create a transaction block.
+plv8.execute() creates a subtransaction every time.  If you need to atomic
+operation, you will need to call plv8.subtransaction() to create a subtransaction
+block.
 
     try{
       plv8.subtransaction(function(){
@@ -243,10 +244,10 @@ you will need to call plv8.subtransaction() to create a transaction block.
       ... do fall back plan ...
     }
 
-If one of the SQL execution in the subtransaction block, all of operation within
-the block is rolled back.  If the process in the block throws JS exception,
-it is transported to the outside.  So use try ... catch block to capture it and
-do alternative operations when it happens.
+If one of the SQL execution in the subtransaction block fails, all of operation
+within the block is rolled back.  If the process in the block throws JS
+exception, it is transported to the outside.  So use try ... catch block to
+capture it and do alternative operations when it happens.
 
 Utility functions
 -----------------
@@ -273,7 +274,7 @@ plv8.elog emits message to the client or the log file.  The elevel is one of
 
 See the PostgreSQL manual for each error level.
 
-Each functionality for quote family is identical to the built-in SQLfunction
+Each functionality for quote family is identical to the built-in SQL function
 with the same name.
 
 In addition, PL/v8 provides a function to access other plv8 functions that have
@@ -294,9 +295,9 @@ Runtime environment separation across users in the same session
 ---------------------------------------------------------------
 
 In PL/v8, each session has one global JS runtime context.  This enables function
-invokations at low cost, and sharing common object among the functions.  However,
+invocations at low cost, and sharing common object among the functions.  However,
 for the security reasons, if the user switches to another with SET ROLE command,
-the JS runtime context is initialized and used separately.  This prevents
+a new JS runtime context is initialized and used separately.  This prevents
 unexpected information leak risk.
 
 Each plv8 function is invoked as if the function is the property of other object.
@@ -304,25 +305,24 @@ This means "this" in each function is a JS object that is created every time
 the function is executed in a query.  In other words, the life time and the
 visibility of "this" object in a function is only a series of function calls in
 a query.  If you need to share some value among different functions, keep it in
-plv8 object because each function invocation has different "this" object.
+`plv8` object because each function invocation has different "this" object.
 
 Start-up procedure
 ------------------
 
-PL/v8 provides start up facility, which allows to call initialization plv8
+PL/v8 provides a start up facility, which allows to call initialization plv8
 function specified in the GUC variable.
 
     SET plv8.start_proc = 'plv8_init';
     SELECT plv8_test(10);
 
-If this variable is set when the runtime is initialized, before the function call
-of plv8_test() another plv8 function plv8_init() is invoked.  In such initialization
-function, you can add any property to plv8 object to expose common values or
-assign them to "this" property.  In the initialization function, "this" is specially
-pointing to the global object, not the function receiver, so the variables that is
-assigned to "this" property in this initialization are visible from any subsequent
-function as global variables.
+If this variable is set when the runtime is initialized, before the function
+call of plv8_test() another plv8 function plv8_init() is invoked.  In such
+initialization function, you can add any properties to `plv8` object to expose
+common values or assign them to "this" property.  In the initialization
+function, the receiver "this" is specially pointing to the global object, so
+the variables that is assigned to "this" property in this initialization are
+visible from any subsequent function as global variables.
 
-Remember CREATE FUNCTION also starts plv8 runtime environment, so make sure to SET
-this GUC before any plv8 actions including CREATE FUNCTION.
-
+Remember CREATE FUNCTION also starts the plv8 runtime environment, so make sure
+to SET this GUC before any plv8 actions including CREATE FUNCTION.

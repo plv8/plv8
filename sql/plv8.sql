@@ -172,7 +172,8 @@ SELECT test_elog('ABC');
 CREATE TABLE test_tbl (i integer, s text);
 CREATE FUNCTION test_sql() RETURNS integer AS
 $$
-	var rows = plv8.execute("SELECT i, 's' || i AS s FROM generate_series(1, 4) AS t(i)");
+	// for name[] conversion test, add current_schemas()
+	var rows = plv8.execute("SELECT i, 's' || i AS s, current_schemas(true) AS c FROM generate_series(1, 4) AS t(i)");
 	for (var r = 0; r < rows.length; r++)
 	{
 		var result = plv8.execute("INSERT INTO test_tbl VALUES(" + rows[r].i + ",'" + rows[r].s + "')");

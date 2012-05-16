@@ -313,7 +313,8 @@ DETAIL:  test_elog() LINE 9: 	plv8.elog(21, 'FATAL is not allowed');
 CREATE TABLE test_tbl (i integer, s text);
 CREATE FUNCTION test_sql() RETURNS integer AS
 $$
-	var rows = plv8.execute("SELECT i, 's' || i AS s FROM generate_series(1, 4) AS t(i)");
+	// for name[] conversion test, add current_schemas()
+	var rows = plv8.execute("SELECT i, 's' || i AS s, current_schemas(true) AS c FROM generate_series(1, 4) AS t(i)");
 	for (var r = 0; r < rows.length; r++)
 	{
 		var result = plv8.execute("INSERT INTO test_tbl VALUES(" + rows[r].i + ",'" + rows[r].s + "')");
@@ -323,10 +324,10 @@ $$
 $$
 LANGUAGE plv8;
 SELECT test_sql();
-NOTICE:  {"i":1,"s":"s1"} 1
-NOTICE:  {"i":2,"s":"s2"} 1
-NOTICE:  {"i":3,"s":"s3"} 1
-NOTICE:  {"i":4,"s":"s4"} 1
+NOTICE:  {"i":1,"s":"s1","c":["pg_catalog","public"]} 1
+NOTICE:  {"i":2,"s":"s2","c":["pg_catalog","public"]} 1
+NOTICE:  {"i":3,"s":"s3","c":["pg_catalog","public"]} 1
+NOTICE:  {"i":4,"s":"s4","c":["pg_catalog","public"]} 1
  test_sql 
 ----------
         4

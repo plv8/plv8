@@ -333,7 +333,7 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 						type->typid, type->len, type->byval, type->align,
 						&values, &nulls, &nelems);
 	Local<Array>  result = Array::New(nelems);
-	plv8_type base;
+	plv8_type base = { 0 };
 	bool    ispreferred;
 
 	base.typid = type->typid;

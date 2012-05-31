@@ -6,14 +6,14 @@ CUSTOM_CC = g++
 JSS  = coffee-script.js
 # .cc created from .js
 JSCS = $(JSS:.js=.cc)
-SRCS = plv8.cc plv8_type.cc plv8_func.cc $(JSCS)
+SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc $(JSCS)
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8
 EXTENSION = plv8
 EXTVER = 1.1.0
 DATA = plv8.control plv8--$(EXTVER).sql
 DATA_built = plv8.sql
-REGRESS = init-extension plv8 inline json startup_pre startup
+REGRESS = init-extension plv8 inline json startup_pre startup varparam
 SHLIB_LINK := $(SHLIB_LINK) -lv8
 
 META_VER := $(shell v8 -e 'print(JSON.parse(read("META.json")).version)')
@@ -66,7 +66,7 @@ else # 9.1
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90000 && echo yes), yes)
 REGRESS := init $(filter-out init-extension, $(REGRESS))
 else # 9.0
-REGRESS := init $(filter-out init-extension inline startup, $(REGRESS))
+REGRESS := init $(filter-out init-extension inline startup varparam, $(REGRESS))
 endif
 DATA = uninstall_plv8.sql
 plv8.sql.in: plv8.sql.c

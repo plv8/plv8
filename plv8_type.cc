@@ -66,8 +66,13 @@ plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt)
 	}
 }
 
+/*
+ * Return the database type inferred by the JS value type.
+ * If none looks appropriate, InvalidOid is returned (currently,
+ * objects and arrays are in this case).
+ */
 Oid
-InferredDatumType(Handle<v8::Value> value)
+inferred_datum_type(Handle<v8::Value> value)
 {
 	if (value->IsUndefined() || value->IsNull())
 		return TEXTOID;

@@ -119,7 +119,7 @@ extern v8::Handle<v8::Value> ThrowError(const char *message) throw();
 
 // plv8_type.cc
 extern void plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt = NULL);
-extern Oid InferredDatumType(v8::Handle<v8::Value> value);
+extern Oid inferred_datum_type(v8::Handle<v8::Value> value);
 extern Datum ToDatum(v8::Handle<v8::Value> value, bool *isnull, plv8_type *type);
 extern v8::Local<v8::Value> ToValue(Datum datum, bool isnull, plv8_type *type);
 extern v8::Local<v8::String> ToString(Datum value, plv8_type *type);

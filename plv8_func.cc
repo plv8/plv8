@@ -2,6 +2,7 @@
  * plv8_func.cc : PL/v8 built-in functions.
  */
 #include "plv8.h"
+#include "plv8_param.h"
 #include <sstream>
 
 extern "C" {
@@ -55,7 +56,6 @@ quote_literal_cstr(const char *rawstr)
 			DirectFunctionCall1(quote_literal, CStringGetTextDatum(rawstr)));
 }
 #endif
-
 
 static inline Local<v8::Value>
 WrapCallback(InvocationCallback func)
@@ -280,7 +280,7 @@ plv8_Elog(const Arguments& args)
 }
 
 static Datum
-ValueGetDatum(Handle<v8::Value> value, Oid typid, char *isnull)
+value_get_datum(Handle<v8::Value> value, Oid typid, char *isnull)
 {
 	if (value->IsUndefined() || value->IsNull())
 	{
@@ -294,10 +294,69 @@ ValueGetDatum(Handle<v8::Value> value, Oid typid, char *isnull)
 		Datum		datum;
 
 		plv8_fill_type(&typinfo, typid);
-		datum = ToDatum(value, &IsNull, &typinfo);
+		try
+		{
+			datum = ToDatum(value, &IsNull, &typinfo);
+		}
+		catch (js_error& e){ e.rethrow(); }
 		*isnull = (IsNull ?  'n' : ' ');
 		return datum;
 	}
+}
+
+static int
+plv8_execute_params(const char *sql, Handle<Array> params)
+{
+	Assert(!params.IsEmpty());
+
+	int				status;
+	int				nparam = params->Length();
+	Datum		   *values = (Datum *) palloc(sizeof(Datum) * nparam);
+	char		   *nulls = (char *) palloc(sizeof(char) * nparam);
+/*
+ * Since 9.0, SPI may have the parser deduce the parameter types.  In prior
+ * versions, we infer the types from the input JS values.
+ */
+#if PG_VERSION_NUM >= 90000
+	SPIPlanPtr		plan;
+	plv8_param_state parstate = {0};
+	ParamListInfo	paramLI;
+
+	parstate.memcontext = CurrentMemoryContext;
+	plan = SPI_prepare_params(sql, plv8_variable_param_setup,
+							  &parstate, 0);
+	if (parstate.numParams != nparam)
+		elog(ERROR, "parameter numbers mismatch: %d != %d",
+				parstate.numParams, nparam);
+	for (int i = 0; i < nparam; i++)
+	{
+		Handle<v8::Value>	param = params->Get(i);
+		values[i] = value_get_datum(param,
+								  parstate.paramTypes[i], &nulls[i]);
+	}
+	paramLI = plv8_setup_variable_paramlist(&parstate, values, nulls);
+	status = SPI_execute_plan_with_paramlist(plan, paramLI, false, 0);
+#else
+	Oid			   *types = (Oid *) palloc(sizeof(Oid) * nparam);
+
+	for (int i = 0; i < nparam; i++)
+	{
+		Handle<v8::Value>	param = params->Get(i);
+
+		types[i] = inferred_datum_type(param);
+		if (types[i] == InvalidOid)
+			elog(ERROR, "parameter[%d] cannot translate to a database type", i);
+
+		values[i] = value_get_datum(param, types[i], &nulls[i]);
+	}
+	status = SPI_execute_with_args(sql, nparam, types, values, nulls, false, 0);
+
+	pfree(types);
+#endif
+
+	pfree(values);
+	pfree(nulls);
+	return status;
 }
 
 /*
@@ -318,34 +377,16 @@ plv8_Execute(const Arguments &args)
 		params = Handle<Array>::Cast(args[1]);
 
 	int				nparam = params.IsEmpty() ? 0 : params->Length();
-	Datum		   *values = (Datum *) palloc(sizeof(Datum) * nparam);
-	char		   *nulls = (char *) palloc(sizeof(char) * nparam);
-	Oid			   *types = (Oid *) palloc(sizeof(Oid) * nparam);
 
-	for (int i = 0; i < nparam; i++)
-	{
-		Handle<v8::Value>	param = params->Get(i);
-
-		types[i] = InferredDatumType(param);
-		if (types[i] == InvalidOid)
-		{
-			char msg[1024];
-
-			snprintf(msg, 1024, "parameter[%d] cannot translate to a database type", i);
-			throw js_error(msg);
-		}
-		values[i] = ValueGetDatum(param, types[i], &nulls[i]);
-	}
 
 	SubTranBlock	subtran;
 	PG_TRY();
 	{
 		subtran.enter();
-		if (nparam > 0)
-			status = SPI_execute_with_args(sql, nparam,
-						types, values, nulls, false, 0);
-		else
+		if (nparam == 0)
 			status = SPI_exec(sql, 0);
+		else
+			status = plv8_execute_params(sql, params);
 	}
 	PG_CATCH();
 	{
@@ -370,6 +411,7 @@ plv8_Prepare(const Arguments &args)
 	Handle<Array>	array;
 	int				arraylen = 0;
 	Oid			   *types = NULL;
+	plv8_param_state *parstate = NULL;
 
 	if (args.Length() > 1)
 	{
@@ -388,7 +430,18 @@ plv8_Prepare(const Arguments &args)
 
 	PG_TRY();
 	{
-		initial = SPI_prepare(sql, arraylen, types);
+#if PG_VERSION_NUM >= 90000
+		if (args.Length() == 1)
+		{
+			parstate =
+				(plv8_param_state *) palloc0(sizeof(plv8_param_state));
+			parstate->memcontext = CurrentMemoryContext;
+			initial = SPI_prepare_params(sql, plv8_variable_param_setup,
+										 parstate, 0);
+		}
+		else
+#endif
+			initial = SPI_prepare(sql, arraylen, types);
 		saved = SPI_saveplan(initial);
 		SPI_freeplan(initial);
 	}
@@ -403,7 +456,7 @@ plv8_Prepare(const Arguments &args)
 		Local<FunctionTemplate> base = FunctionTemplate::New();
 		base->SetClassName(String::NewSymbol("PreparedPlan"));
 		Local<ObjectTemplate> templ = base->InstanceTemplate();
-		templ->SetInternalFieldCount(1);
+		templ->SetInternalFieldCount(2);
 		SetCallback(templ, "cursor", plv8_PlanCursor);
 		SetCallback(templ, "execute", plv8_PlanExecute);
 		SetCallback(templ, "free", plv8_PlanFree);
@@ -412,6 +465,10 @@ plv8_Prepare(const Arguments &args)
 
 	Local<v8::Object> result = PlanTemplate->NewInstance();
 	result->SetInternalField(0, External::Wrap(saved));
+#if PG_VERSION_NUM >= 90000
+	if (parstate)
+		result->SetInternalField(1, External::Wrap(parstate));
+#endif
 
 	return result;
 }
@@ -429,8 +486,9 @@ plv8_PlanCursor(const Arguments &args)
 	int					nparam = 0, argcount;
 	Handle<Array>		params;
 	Portal				cursor;
+	plv8_param_state   *parstate = NULL;
 
-	plan = (SPIPlanPtr) External::Unwrap(self->GetInternalField(0));
+	plan = static_cast<SPIPlanPtr>(External::Unwrap(self->GetInternalField(0)));
 	/* XXX: Add plan validation */
 
 	if (args.Length() > 0 && args[0]->IsArray())
@@ -439,7 +497,16 @@ plv8_PlanCursor(const Arguments &args)
 		nparam = params->Length();
 	}
 
-	argcount = SPI_getargcount(plan);
+	/*
+	 * If the plan has the variable param info, use it.
+	 */
+	parstate = static_cast<plv8_param_state *>(
+			External::Unwrap(self->GetInternalField(1)));
+
+	if (parstate)
+		argcount = parstate->numParams;
+	else
+		argcount = SPI_getargcount(plan);
 
 	if (argcount != nparam)
 	{
@@ -460,11 +527,36 @@ plv8_PlanCursor(const Arguments &args)
 	for (int i = 0; i < nparam; i++)
 	{
 		Handle<v8::Value>	param = params->Get(i);
-		Oid					typid = SPI_getargtypeid(plan, i);
+		Oid					typid;
 
-		values[i] = ValueGetDatum(param, typid, &nulls[i]);
+		if (parstate)
+			typid = parstate->paramTypes[i];
+		else
+			typid = SPI_getargtypeid(plan, i);
+
+		values[i] = value_get_datum(param, typid, &nulls[i]);
 	}
-	cursor = SPI_cursor_open(NULL, plan, values, nulls, false);
+
+	PG_TRY();
+	{
+#if PG_VERSION_NUM >= 90000
+		if (parstate)
+		{
+			ParamListInfo	paramLI;
+
+			paramLI = plv8_setup_variable_paramlist(parstate, values, nulls);
+			cursor = SPI_cursor_open_with_paramlist(NULL, plan, paramLI, false);
+		}
+		else
+#endif
+			cursor = SPI_cursor_open(NULL, plan, values, nulls, false);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
 	Handle<String> cname = ToString(cursor->name, strlen(cursor->name));
 
 	/*
@@ -501,6 +593,7 @@ plv8_PlanExecute(const Arguments &args)
 	Handle<Array>		params;
 	SubTranBlock		subtran;
 	int					status;
+	plv8_param_state   *parstate = NULL;
 
 	plan = static_cast<SPIPlanPtr>(External::Unwrap(self->GetInternalField(0)));
 	/* XXX: Add plan validation */
@@ -511,7 +604,16 @@ plv8_PlanExecute(const Arguments &args)
 		nparam = params->Length();
 	}
 
-	argcount = SPI_getargcount(plan);
+	/*
+	 * If the plan has the variable param info, use it.
+	 */
+	parstate = static_cast<plv8_param_state *> (
+			External::Unwrap(self->GetInternalField(1)));
+
+	if (parstate)
+		argcount = parstate->numParams;
+	else
+		argcount = SPI_getargcount(plan);
 
 	if (argcount != nparam)
 	{
@@ -532,15 +634,30 @@ plv8_PlanExecute(const Arguments &args)
 	for (int i = 0; i < nparam; i++)
 	{
 		Handle<v8::Value>	param = params->Get(i);
-		Oid					typid = SPI_getargtypeid(plan, i);
+		Oid					typid;
 
-		values[i] = ValueGetDatum(param, typid, &nulls[i]);
+		if (parstate)
+			typid = parstate->paramTypes[i];
+		else
+			typid = SPI_getargtypeid(plan, i);
+
+		values[i] = value_get_datum(param, typid, &nulls[i]);
 	}
 
 	PG_TRY();
 	{
 		subtran.enter();
-		status = SPI_execute_plan(plan, values, nulls, false, 0);
+#if PG_VERSION_NUM >= 90000
+		if (parstate)
+		{
+			ParamListInfo	paramLI;
+
+			paramLI = plv8_setup_variable_paramlist(parstate, values, nulls);
+			status = SPI_execute_plan_with_paramlist(plan, paramLI, false, 0);
+		}
+		else
+#endif
+			status = SPI_execute_plan(plan, values, nulls, false, 0);
 	}
 	PG_CATCH();
 	{
@@ -562,6 +679,7 @@ plv8_PlanFree(const Arguments &args)
 {
 	Handle<v8::Object>	self = args.This();
 	SPIPlanPtr			plan;
+	plv8_param_state   *parstate;
 	int					status = 0;
 
 	plan = static_cast<SPIPlanPtr>(External::Unwrap(self->GetInternalField(0)));
@@ -570,6 +688,13 @@ plv8_PlanFree(const Arguments &args)
 		status = SPI_freeplan(plan);
 
 	self->SetInternalField(0, External::Wrap(0));
+
+	parstate = static_cast<plv8_param_state *> (
+			External::Unwrap(self->GetInternalField(1)));
+
+	if (parstate)
+		pfree(parstate);
+	self->SetInternalField(1, External::Wrap(0));
 
 	return Int32::New(status);
 }

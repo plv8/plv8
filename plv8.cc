@@ -1214,6 +1214,7 @@ GetGlobalObjectTemplate()
 		Handle<ObjectTemplate>	plv8 = ObjectTemplate::New();
 
 		SetupPlv8Functions(plv8);
+		plv8->Set(String::NewSymbol("version"), String::New(PLV8_VERSION));
 
 		global->Set(String::NewSymbol("plv8"), plv8);
 	}

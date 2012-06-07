@@ -16,8 +16,11 @@ DATA_built = plv8.sql
 REGRESS = init-extension plv8 inline json startup_pre startup
 SHLIB_LINK := $(SHLIB_LINK) -lv8
 
+META_VER := $(shell v8 -e 'print(JSON.parse(read("META.json")).version)')
 CCFLAGS := $(filter-out -Wmissing-prototypes, $(CFLAGS))
 CCFLAGS := $(filter-out -Wdeclaration-after-statement, $(CCFLAGS))
+CCFLAGS := -DPLV8_VERSION='"$(META_VER)"' $(CCFLAGS)
+
 # plcoffee is available only when ENABLE_COFFEE is defined.
 ifdef ENABLE_COFFEE
 	CCFLAGS := -DENABLE_COFFEE $(CCFLAGS)

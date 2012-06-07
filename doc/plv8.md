@@ -291,6 +291,9 @@ not the plv8 function, it errors out.  The function signature parameter to
 plv8.find_function() is either of regproc (function name only) or regprocedure
 (function name with argument types).
 
+The plv8 object provides version string as `plv8.version`.  This string
+corresponds to plv8 module version.  Note this is not the extension version.
+
 Runtime environment separation across users in the same session
 ---------------------------------------------------------------
 

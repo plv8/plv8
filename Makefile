@@ -17,6 +17,9 @@ REGRESS = init-extension plv8 inline json startup_pre startup varparam
 SHLIB_LINK := $(SHLIB_LINK) -lv8
 
 META_VER := $(shell v8 -e 'print(JSON.parse(read("META.json")).version)')
+ifndef META_VER
+META_VER := $(shell d8 -e 'print(JSON.parse(read("META.json")).version)')
+endif
 CCFLAGS := $(filter-out -Wmissing-prototypes, $(CFLAGS))
 CCFLAGS := $(filter-out -Wdeclaration-after-statement, $(CCFLAGS))
 CCFLAGS := -DPLV8_VERSION='"$(META_VER)"' $(CCFLAGS)

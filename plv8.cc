@@ -1309,6 +1309,28 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 	Datum  *values = (Datum *) palloc(sizeof(Datum) * m_tupdesc->natts);
 	bool   *nulls = (bool *) palloc(sizeof(bool) * m_tupdesc->natts);
 
+	if (!m_is_scalar)
+	{
+		Handle<Array> names = obj->GetPropertyNames();
+		if (names->Length() != m_tupdesc->natts)
+			throw js_error("expected fields != property names");
+
+		for (int c = 0; c < m_tupdesc->natts; c++)
+		{
+			bool found = false;
+			for (int d = 0; d < m_tupdesc->natts; d++)
+			{
+				if (/*** XXX  test name equality here */ true)
+				{
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+				throw js_error("field name / property mismatch");
+		}
+	}
+
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
 		Handle<v8::Value> attr = m_is_scalar ? value : obj->Get(m_colnames[c]);

@@ -1313,21 +1313,23 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 	{
 		Handle<Array> names = obj->GetPropertyNames();
 		if (names->Length() != m_tupdesc->natts)
-			throw js_error("expected fields != property names");
+			throw js_error("expected fields and property names have different cardinality");
 
 		for (int c = 0; c < m_tupdesc->natts; c++)
 		{
 			bool found = false;
+			CString  colname(m_colnames[c]);
 			for (int d = 0; d < m_tupdesc->natts; d++)
 			{
-				if (/*** XXX  test name equality here */ true)
+				CString fname(names->Get(d));
+				if (strcmp(colname, fname) == 0)
 				{
 					found = true;
 					break;
 				}
 			}
 			if (!found)
-				throw js_error("field name / property mismatch");
+				throw js_error("field name / property name mismatch");
 		}
 	}
 

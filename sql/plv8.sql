@@ -138,6 +138,19 @@ LANGUAGE plv8;
 SELECT set_of_unnamed_records();
 SELECT * FROM set_of_unnamed_records() t (i bool);
 
+CREATE OR REPLACE FUNCTION set_of_unnamed_records() RETURNS SETOF record AS
+$$
+    plv8.return_next({"a": 1, "b": 2}); 
+    return; 
+$$ LANGUAGE plv8;
+
+-- not enough fields specified
+SELECT * FROM set_of_unnamed_records() AS x(a int);
+-- field names mismatch
+SELECT * FROM set_of_unnamed_records() AS x(a int, c int);
+-- name counts and values match
+SELECT * FROM set_of_unnamed_records() AS x(a int, b int);
+
 -- INOUT and OUT parameters
 CREATE FUNCTION one_inout(a integer, INOUT b text) AS
 $$

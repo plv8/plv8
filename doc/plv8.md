@@ -85,6 +85,8 @@ you like to return rows from this function.  Alternatively, you can just return
 a JS array to add set of records, a JS object to add a record, or a scalar value
 to add a scalar to the tuplestore.  Unlike other PLs, PL/v8 does not support
 the per-value return strategy, but it always uses the tuplestore strategy.
+If the argument object has extra properties that are not defined by the argument,
+return_next raises an error.
 
 Trigger function calls
 ----------------------
@@ -231,7 +233,7 @@ Subtransaction
 
 ### plv8.subtransaction( func ) ###
 
-plv8.execute() creates a subtransaction every time.  If you need to atomic
+plv8.execute() creates a subtransaction every time.  If you need an atomic
 operation, you will need to call plv8.subtransaction() to create a subtransaction
 block.
 

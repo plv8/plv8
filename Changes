@@ -1,5 +1,10 @@
 Revision history for plv8
 
+1.2.0       2012-07-20
+            - Check the field names match for SRFs.
+            - Fix EpochToDate to handle non integer timestamp case.
+            - Let parser deduce parameter types in SPI queries.
+
 1.1.0       2012-06-07
             - Add plv8.version string.
             - Fix a bug around name[] conversion from/to SQL.

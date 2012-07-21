@@ -63,5 +63,8 @@ EXAMPLE
 
 NOTES
 -----
-See project wiki page for more detail:
-http://code.google.com/p/plv8js/wiki/PLV8
+plv8 is hosted at Google Project Hosting
+http://code.google.com/p/plv8js/
+
+and distributed by PGXN.  For more detail, see
+http://pgxn.org/dist/plv8/doc/plv8.html

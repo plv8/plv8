@@ -33,7 +33,7 @@ endif
 all:
 
 %.o : %.cc
-	g++ $(CCFLAGS) $(CPPFLAGS) -I $(V8DIR)/include -fPIC -c -o $@ $<
+	$(CUSTOM_CC) $(CCFLAGS) $(CPPFLAGS) -I $(V8DIR)/include -fPIC -c -o $@ $<
 
 # Convert .js to .cc
 $(filter $(JSCS), $(SRCS)): %.cc: %.js

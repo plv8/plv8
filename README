@@ -20,13 +20,17 @@ INSTALL
 -------
 
 Make sure V8 include files are in the system include directories, or you can
-place them in $(PLV8DIR)/../v8/include.  Run make
+place them in $(PLV8DIR)/../v8/include.  Run make:
 
-  $ make install
+  # Build with CoffeeScript and LiveScript
+  $ make ENABLE_COFFEE=1 ENABLE_LIVESCRIPT=1
+  $ sudo make install ENABLE_COFFEE=1 ENABLE_LIVESCRIPT=1
 
 and create language via
 
   $ psql -c 'CREATE EXTENSION plv8'
+  $ psql -c 'CREATE EXTENSION plls'
+  $ psql -c 'CREATE EXTENSION plcoffee'
 
 in 9.1, or in the prior versions
 
@@ -42,8 +46,22 @@ in your postgresql.conf and
 
   $ make installcheck
 
-EXAMPLE
--------
+EXAMPLE (LIVESCRIPT)
+--------------------
+
+  CREATE OR REPLACE FUNCTION plls_test(keys text[], vals text[])
+  RETURNS text AS $$
+    return JSON.stringify { [key, vals[idx]] for key, idx in keys }
+  $$ LANGUAGE plls IMMUTABLE STRICT;
+  
+  SELECT plls_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
+           plls_test        
+  ---------------------------
+   {"name":"Tom","age":"29"}
+  (1 row)
+
+EXAMPLE (JAVASCRIPT)
+--------------------
 
   CREATE OR REPLACE FUNCTION plv8_test(keys text[], vals text[])
   RETURNS text AS $$
@@ -54,7 +72,6 @@ EXAMPLE
     return JSON.stringify(o);
   $$ LANGUAGE plv8 IMMUTABLE STRICT;
   
-  SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
   SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
            plv8_test        
   ---------------------------

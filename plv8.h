@@ -24,6 +24,8 @@ extern "C" {
 #define PLV8_INTNL_TUPSTORE		2
 #define PLV8_INTNL_MAX			3
 
+enum Dialect{ PLV8_DIALECT_NONE, PLV8_DIALECT_COFFEE, PLV8_DIALECT_LIVESCRIPT };
+
 /* js_error represents exceptions in JavaScript. */
 class js_error
 {

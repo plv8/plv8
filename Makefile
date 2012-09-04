@@ -3,7 +3,7 @@ V8DIR = ../v8
 # set your custom C++ compler
 CUSTOM_CC = g++
 
-JSS  = coffee-script.js
+JSS  = coffee-script.js livescript.js
 # .cc created from .js
 JSCS = $(JSS:.js=.cc)
 SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc $(JSCS)
@@ -26,8 +26,19 @@ CCFLAGS := -DPLV8_VERSION='"$(META_VER)"' $(CCFLAGS)
 
 # plcoffee is available only when ENABLE_COFFEE is defined.
 ifdef ENABLE_COFFEE
+ifdef ENABLE_LIVESCRIPT
+	CCFLAGS := -DENABLE_COFFEE -DENABLE_LIVESCRIPT $(CCFLAGS)
+	DATA = plcoffee.control plcoffee--0.9.0.sql plls.control plls--0.9.0.sql
+else
 	CCFLAGS := -DENABLE_COFFEE $(CCFLAGS)
 	DATA = plcoffee.control plcoffee--0.9.0.sql
+endif
+else
+# plls is available only when ENABLE_LIVESCRIPT is defined.
+ifdef ENABLE_LIVESCRIPT
+	CCFLAGS := -DENABLE_LIVESCRIPT $(CCFLAGS)
+	DATA = plls.control plls--0.9.0.sql
+endif
 endif
 
 all:
@@ -41,6 +52,11 @@ $(filter $(JSCS), $(SRCS)): %.cc: %.js
 ifdef ENABLE_COFFEE
 	(od -txC -v $< | \
 	sed -e "s/^[0-9]*//" -e s"/ \([0-9a-f][0-9a-f]\)/0x\1,/g" -e"\$$d" ) >>$@
+else
+ifdef ENABLE_LIVESCRIPT
+	(od -txC -v $< | \
+	sed -e "s/^[0-9]*//" -e s"/ \([0-9a-f][0-9a-f]\)/0x\1,/g" -e"\$$d" ) >>$@
+endif
 endif
 	echo "0x00};" >>$@
 
@@ -52,9 +68,8 @@ ifndef MAJORVERSION
 MAJORVERSION := $(basename $(VERSION))
 endif
 
-
-PG_VERSION_NUM := $(shell perl -ne 'print $$1 if /PG_VERSION_NUM\s+(\d+)/' \
-		< `$(PG_CONFIG) --includedir`/pg_config.h)
+PG_VERSION_NUM := $(shell cat `$(PG_CONFIG) --includedir`/pg_config*.h \
+		   | perl -ne 'print $$1 and exit if /PG_VERSION_NUM\s+(\d+)/')
 
 # VERSION specific definitions
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90100 && echo yes), yes)

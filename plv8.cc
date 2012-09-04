@@ -37,19 +37,25 @@ PG_FUNCTION_INFO_V1(plv8_call_handler);
 PG_FUNCTION_INFO_V1(plv8_call_validator);
 PG_FUNCTION_INFO_V1(plcoffee_call_handler);
 PG_FUNCTION_INFO_V1(plcoffee_call_validator);
+PG_FUNCTION_INFO_V1(plls_call_handler);
+PG_FUNCTION_INFO_V1(plls_call_validator);
 
 Datum	plv8_call_handler(PG_FUNCTION_ARGS) throw();
 Datum	plv8_call_validator(PG_FUNCTION_ARGS) throw();
 Datum	plcoffee_call_handler(PG_FUNCTION_ARGS) throw();
 Datum	plcoffee_call_validator(PG_FUNCTION_ARGS) throw();
+Datum	plls_call_handler(PG_FUNCTION_ARGS) throw();
+Datum	plls_call_validator(PG_FUNCTION_ARGS) throw();
 
 void _PG_init(void);
 
 #if PG_VERSION_NUM >= 90000
 PG_FUNCTION_INFO_V1(plv8_inline_handler);
 PG_FUNCTION_INFO_V1(plcoffee_inline_handler);
+PG_FUNCTION_INFO_V1(plls_inline_handler);
 Datum	plv8_inline_handler(PG_FUNCTION_ARGS) throw();
 Datum	plcoffee_inline_handler(PG_FUNCTION_ARGS) throw();
+Datum	plls_inline_handler(PG_FUNCTION_ARGS) throw();
 #endif
 } // extern "C"
 
@@ -113,6 +119,7 @@ static HTAB *plv8_proc_cache_hash = NULL;
 static plv8_exec_env		   *exec_env_head = NULL;
 
 extern const unsigned char coffee_script_binary_data[];
+extern const unsigned char livescript_binary_data[];
 
 /*
  * lower_case_functions are postgres-like C functions.
@@ -127,10 +134,10 @@ static void plv8_xact_cb(XactEvent event, void *arg);
  */
 static plv8_exec_env *CreateExecEnv(Handle<Function> script);
 static plv8_proc *Compile(Oid fn_oid, MemoryContext fn_mcxt,
-					bool validate, bool is_trigger, bool is_coffee);
+					bool validate, bool is_trigger, Dialect dialect);
 static Local<Function> CompileFunction(const char *proname, int proarglen,
 					const char *proargs[], const char *prosrc,
-					bool is_trigger, bool retset, bool is_coffee);
+					bool is_trigger, bool retset, Dialect dialect);
 static Datum CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		int nargs, plv8_type argtypes[], plv8_type *rettype);
 static Datum CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
@@ -172,7 +179,7 @@ _PG_init(void)
 
 	RegisterXactCallback(plv8_xact_cb, NULL);
 
-    EmitWarningsOnPlaceholders("plv8");
+	EmitWarningsOnPlaceholders("plv8");
 }
 
 static void
@@ -215,7 +222,7 @@ plv8_new_exec_env()
 }
 
 static Datum
-common_pl_call_handler(PG_FUNCTION_ARGS, bool is_coffee) throw()
+common_pl_call_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 {
 	Oid		fn_oid = fcinfo->flinfo->fn_oid;
 	bool	is_trigger = CALLED_AS_TRIGGER(fcinfo);
@@ -227,7 +234,7 @@ common_pl_call_handler(PG_FUNCTION_ARGS, bool is_coffee) throw()
 		if (!fcinfo->flinfo->fn_extra)
 		{
 			plv8_proc	   *proc = Compile(fn_oid, fcinfo->flinfo->fn_mcxt,
-										   false, is_trigger, is_coffee);
+										   false, is_trigger, dialect);
 			proc->xenv = CreateExecEnv(proc->cache->function);
 			fcinfo->flinfo->fn_extra = proc;
 		}
@@ -253,18 +260,24 @@ common_pl_call_handler(PG_FUNCTION_ARGS, bool is_coffee) throw()
 Datum
 plv8_call_handler(PG_FUNCTION_ARGS) throw()
 {
-	return common_pl_call_handler(fcinfo, false);
+	return common_pl_call_handler(fcinfo, PLV8_DIALECT_NONE);
 }
 
 Datum
 plcoffee_call_handler(PG_FUNCTION_ARGS) throw()
 {
-	return common_pl_call_handler(fcinfo, true);
+	return common_pl_call_handler(fcinfo, PLV8_DIALECT_COFFEE);
+}
+
+Datum
+plls_call_handler(PG_FUNCTION_ARGS) throw()
+{
+	return common_pl_call_handler(fcinfo, PLV8_DIALECT_LIVESCRIPT);
 }
 
 #if PG_VERSION_NUM >= 90000
 static Datum
-common_pl_inline_handler(PG_FUNCTION_ARGS, bool is_coffee) throw()
+common_pl_inline_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 {
 	InlineCodeBlock *codeblock = (InlineCodeBlock *) DatumGetPointer(PG_GETARG_DATUM(0));
 
@@ -276,7 +289,7 @@ common_pl_inline_handler(PG_FUNCTION_ARGS, bool is_coffee) throw()
 		char			   *source_text = codeblock->source_text;
 
 		Handle<Function>	function = CompileFunction(NULL, 0, NULL,
-										source_text, false, false, is_coffee);
+										source_text, false, false, dialect);
 		plv8_exec_env	   *xenv = CreateExecEnv(function);
 		return CallFunction(fcinfo, xenv, 0, NULL, NULL);
 	}
@@ -289,13 +302,19 @@ common_pl_inline_handler(PG_FUNCTION_ARGS, bool is_coffee) throw()
 Datum
 plv8_inline_handler(PG_FUNCTION_ARGS) throw()
 {
-	return common_pl_inline_handler(fcinfo, false);
+	return common_pl_inline_handler(fcinfo, PLV8_DIALECT_NONE);
 }
 
 Datum
 plcoffee_inline_handler(PG_FUNCTION_ARGS) throw()
 {
-	return common_pl_inline_handler(fcinfo, true);
+	return common_pl_inline_handler(fcinfo, PLV8_DIALECT_COFFEE);
+}
+
+Datum
+plls_inline_handler(PG_FUNCTION_ARGS) throw()
+{
+	return common_pl_inline_handler(fcinfo, PLV8_DIALECT_LIVESCRIPT);
 }
 #endif
 
@@ -606,7 +625,7 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 }
 
 static Datum
-common_pl_call_validator(PG_FUNCTION_ARGS, bool is_coffee) throw()
+common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 {
 	Oid				fn_oid = PG_GETARG_OID(0);
 	HeapTuple		tuple;
@@ -643,7 +662,7 @@ common_pl_call_validator(PG_FUNCTION_ARGS, bool is_coffee) throw()
 	try
 	{
 		plv8_proc	   *proc = Compile(fn_oid, fcinfo->flinfo->fn_mcxt,
-									   true, is_trigger, is_coffee);
+									   true, is_trigger, dialect);
 		(void) CreateExecEnv(proc->cache->function);
 		/* the result of a validator is ignored */
 		PG_RETURN_VOID();
@@ -657,13 +676,19 @@ common_pl_call_validator(PG_FUNCTION_ARGS, bool is_coffee) throw()
 Datum
 plv8_call_validator(PG_FUNCTION_ARGS) throw()
 {
-	return common_pl_call_validator(fcinfo, false);
+	return common_pl_call_validator(fcinfo, PLV8_DIALECT_NONE);
 }
 
 Datum
 plcoffee_call_validator(PG_FUNCTION_ARGS) throw()
 {
-	return common_pl_call_validator(fcinfo, true);
+	return common_pl_call_validator(fcinfo, PLV8_DIALECT_COFFEE);
+}
+
+Datum
+plls_call_validator(PG_FUNCTION_ARGS) throw()
+{
+	return common_pl_call_validator(fcinfo, PLV8_DIALECT_LIVESCRIPT);
 }
 
 static plv8_proc *
@@ -688,7 +713,7 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 
 	if (found)
 	{
-		bool    uptodate;
+		bool	uptodate;
 
 		/*
 		 * We need to check user id and dispose it if it's different from
@@ -828,27 +853,43 @@ CreateExecEnv(Handle<Function> function)
 	return xenv;
 }
 
-/* Source transformation from coffee to js */
+/* Source transformation from a dialect (coffee or ls) to js */
 static char *
-CompileCoffee(const char *src)
+CompileDialect(const char *src, Dialect dialect)
 {
 	HandleScope		handle_scope;
 	static Persistent<Context>	context = Context::New(NULL);
 	Context::Scope	context_scope(context);
 	TryCatch		try_catch;
-	Local<String>	key = String::NewSymbol("CoffeeScript");
+	Local<String>	key;
 	char		   *cresult;
+	const char	   *dialect_binary_data;
 
+	switch (dialect)
+	{
+		case PLV8_DIALECT_COFFEE:
 #ifndef ENABLE_COFFEE
-	throw js_error("coffee script is not enabled");
+			throw js_error("CoffeeScript is not enabled");
 #endif
+			key = String::NewSymbol("CoffeeScript");
+			dialect_binary_data = (const char *) coffee_script_binary_data;
+			break;
+		case PLV8_DIALECT_LIVESCRIPT:
+#ifndef ENABLE_LIVESCRIPT
+			throw js_error("LiveScript is not enabled");
+#endif
+			key = String::NewSymbol("LiveScript");
+			dialect_binary_data = (const char *) livescript_binary_data;
+			break;
+		default:
+			throw js_error("Unknown Dialect");
+        }
 
 	if (context->Global()->Get(key)->IsUndefined())
 	{
 		HandleScope		handle_scope;
 		Local<Script>	script =
-			Script::New(ToString((const char *) coffee_script_binary_data),
-						ToString("coffee"));
+			Script::New(ToString(dialect_binary_data), key);
 		if (script.IsEmpty())
 			throw js_error(try_catch);
 		Local<v8::Value>	result = script->Run();
@@ -885,7 +926,7 @@ CompileCoffee(const char *src)
 }
 
 static plv8_proc *
-Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger, bool is_coffee)
+Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger, Dialect dialect)
 {
 	plv8_proc  *proc;
 	char	  **argnames;
@@ -911,7 +952,7 @@ Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger, bool 
 						cache->prosrc,
 						is_trigger,
 						cache->retset,
-						is_coffee));
+						dialect));
 
 	return proc;
 }
@@ -924,16 +965,16 @@ CompileFunction(
 	const char *prosrc,
 	bool is_trigger,
 	bool retset,
-	bool is_coffee)
+	Dialect dialect)
 {
 	HandleScope		handle_scope;
-	StringInfoData  src;
+	StringInfoData	src;
 	Handle<Context>	global_context = GetGlobalContext();
 
 	initStringInfo(&src);
 
-	if (is_coffee)
-		prosrc = CompileCoffee(prosrc);
+	if (dialect != PLV8_DIALECT_NONE)
+		prosrc = CompileDialect(prosrc, dialect);
 	/*
 	 *  (function (<arg1, ...>){
 	 *    <prosrc>
@@ -961,7 +1002,7 @@ CompileFunction(
 				appendStringInfo(&src, "$%d", i + 1);	// unnamed argument to $N
 		}
 	}
-	if (is_coffee)
+	if (dialect)
 		appendStringInfo(&src, "){\nreturn %s\n})", prosrc);
 	else
 		appendStringInfo(&src, "){\n%s\n})", prosrc);
@@ -993,9 +1034,10 @@ find_js_function(Oid fn_oid)
 {
 	HeapTuple		tuple;
 	Form_pg_proc	proc;
-	Oid				prolang, v8langtupoid, coffeelangtupoid;
+	Oid				prolang, v8langtupoid, coffeelangtupoid, lslangtupoid;
 	NameData		v8langname = { "plv8" },
-					coffeelangname = { "plcoffee" };
+					coffeelangname = { "plcoffee" },
+					lslangname = { "plls" };
 
 	tuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 	if (!HeapTupleIsValid(tuple))
@@ -1022,17 +1064,29 @@ find_js_function(Oid fn_oid)
 		ReleaseSysCache(tuple);
 	}
 
+	tuple = SearchSysCache(LANGNAME, NameGetDatum(&lslangname), 0, 0, 0);
+	if (!HeapTupleIsValid(tuple))
+		lslangtupoid = InvalidOid;
+	else
+	{
+		lslangtupoid = HeapTupleGetOid(tuple);
+		ReleaseSysCache(tuple);
+	}
+
 	Local<Function> func;
 
 	/* Non-JS function */
 	if (prolang == InvalidOid ||
-		(v8langtupoid != prolang && coffeelangtupoid != prolang))
+		(v8langtupoid != prolang && coffeelangtupoid != prolang && lslangtupoid != prolang))
 		return func;
 
 	try
 	{
 		plv8_proc		   *proc = Compile(fn_oid,CurrentMemoryContext,
-										   true, false, coffeelangtupoid == prolang);
+										   true, false,
+										   ( (coffeelangtupoid == prolang) ? PLV8_DIALECT_COFFEE
+										   : (lslangtupoid == prolang) ? PLV8_DIALECT_LIVESCRIPT
+										   : PLV8_DIALECT_NONE ));
 
 		TryCatch			try_catch;
 

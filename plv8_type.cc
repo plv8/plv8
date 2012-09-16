@@ -216,7 +216,7 @@ ToArrayDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	}
 
 	Handle<Array> array(Handle<Array>::Cast(value));
-	if (array.IsEmpty())
+	if (array.IsEmpty() || !array->IsArray())
 		throw js_error("value is not an Array");
 
 	length = array->Length();

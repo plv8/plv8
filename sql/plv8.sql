@@ -151,6 +151,13 @@ SELECT * FROM set_of_unnamed_records() AS x(a int, c int);
 -- name counts and values match
 SELECT * FROM set_of_unnamed_records() AS x(a int, b int);
 
+-- return type check
+CREATE OR REPLACE FUNCTION bogus_return_type() RETURNS int[] AS
+$$
+    return 1;
+$$ LANGUAGE plv8;
+SELECT bogus_return_type();
+
 -- INOUT and OUT parameters
 CREATE FUNCTION one_inout(a integer, INOUT b text) AS
 $$

@@ -114,7 +114,7 @@ SPIResultToValue(int status)
 		Converter		conv(SPI_tuptable->tupdesc);
 		Local<Array>	rows = Array::New(nrows);
 
-		for (uint32 r = 0; r < nrows; r++)
+		for (int r = 0; r < nrows; r++)
 			rows->Set(r, conv.ToValue(SPI_tuptable->vals[r]));
 
 		result = rows;

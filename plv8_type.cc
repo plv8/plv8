@@ -175,7 +175,6 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	}
 
 	/* Use lexical cast for non-numeric types. */
-	int			encoding = GetDatabaseEncoding();
 	CString		str(value);
 	Datum		result;
 

@@ -701,7 +701,6 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 	Datum				prosrc;
 	Oid				   *argtypes;
 	char			   *argmodes;
-	Oid					rettype;
 	MemoryContext		oldcontext;
 
 	procTup = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
@@ -1173,7 +1172,7 @@ GetGlobalContext()
 {
 	Oid					user_id = GetUserId();
 	Persistent<Context>	global_context;
-	int					i;
+	unsigned int		i;
 
 	for (i = 0; i < ContextVector.size(); i++)
 	{
@@ -1366,7 +1365,7 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 	if (!m_is_scalar)
 	{
 		Handle<Array> names = obj->GetPropertyNames();
-		if (names->Length() != m_tupdesc->natts)
+		if ((int) names->Length() != m_tupdesc->natts)
 			throw js_error("expected fields and property names have different cardinality");
 
 		for (int c = 0; c < m_tupdesc->natts; c++)

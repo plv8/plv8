@@ -50,7 +50,7 @@ plv8_variable_paramref_hook(ParseState *pstate, ParamRef *pref)
 	Param	   *param;
 
 	/* Check parameter number is in range */
-	if (paramno <= 0 || paramno > INT_MAX / sizeof(Oid))
+	if (paramno <= 0 || paramno > (int) (INT_MAX / sizeof(Oid)))
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_PARAMETER),
 				 errmsg("there is no parameter $%d", paramno),

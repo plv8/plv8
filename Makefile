@@ -20,8 +20,10 @@ META_VER := $(shell v8 -e 'print(JSON.parse(read("META.json")).version)' 2>/dev/
 ifndef META_VER
 META_VER := $(shell d8 -e 'print(JSON.parse(read("META.json")).version)')
 endif
-CCFLAGS = -DPLV8_VERSION='"$(META_VER)"' \
-			$(filter-out -Wmissing-prototypes -Wdeclaration-after-statement, $(CFLAGS))
+
+PLV8_VERSION = -DPLV8_VERSION='"$(META_VER)"'
+OPTFLAGS = -O2
+CCFLAGS = -Wall $(OPTFLAGS)
 
 # plcoffee is available only when ENABLE_COFFEE is defined.
 ifdef ENABLE_COFFEE
@@ -43,7 +45,7 @@ endif
 all:
 
 %.o : %.cc
-	$(CUSTOM_CC) $(CCFLAGS) $(CPPFLAGS) -I $(V8DIR)/include -fPIC -c -o $@ $<
+	$(CUSTOM_CC) $(CCFLAGS) $(PLV8_VERSION) $(CPPFLAGS) -I $(V8DIR)/include -fPIC -c -o $@ $<
 
 # Convert .js to .cc
 $(filter $(JSCS), $(SRCS)): %.cc: %.js

@@ -1,6 +1,7 @@
 #ifndef _PLV8_
 #define _PLV8_
 
+#include "plv8_config.h"
 #include <v8.h>
 #include <vector>
 

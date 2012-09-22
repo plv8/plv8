@@ -16,12 +16,7 @@ DATA_built = plv8.sql
 REGRESS = init-extension plv8 inline json startup_pre startup varparam
 SHLIB_LINK := $(SHLIB_LINK) -lv8
 
-META_VER := $(shell v8 -e 'print(JSON.parse(read("META.json")).version)' 2>/dev/null)
-ifndef META_VER
-META_VER := $(shell d8 -e 'print(JSON.parse(read("META.json")).version)')
-endif
-
-PLV8_VERSION = -DPLV8_VERSION='"$(META_VER)"'
+PLV8_VERSION = 1.2.0
 OPTFLAGS = -O2
 CCFLAGS = -Wall $(OPTFLAGS)
 
@@ -44,8 +39,11 @@ endif
 
 all:
 
-%.o : %.cc
-	$(CUSTOM_CC) $(CCFLAGS) $(PLV8_VERSION) $(CPPFLAGS) -I $(V8DIR)/include -fPIC -c -o $@ $<
+plv8_config.h: plv8_config.h.in Makefile
+	cat $< | sed -e 's/^#undef PLV8_VERSION/#define PLV8_VERSION "$(PLV8_VERSION)"/' > $@
+
+%.o : %.cc plv8_config.h
+	$(CUSTOM_CC) $(CCFLAGS) $(CPPFLAGS) -I $(V8DIR)/include -fPIC -c -o $@ $<
 
 # Convert .js to .cc
 $(filter $(JSCS), $(SRCS)): %.cc: %.js
@@ -80,7 +78,7 @@ install: plv8--$(EXTVER).sql
 plv8--$(EXTVER).sql: plv8.sql.c
 	$(CC) -E -P $(CPPFLAGS) $< > $@
 subclean:
-	rm -f plv8--$(EXTVER).sql $(JSCS)
+	rm -f plv8_config.h plv8--$(EXTVER).sql $(JSCS)
 else # 9.1
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90000 && echo yes), yes)
 REGRESS := init $(filter-out init-extension, $(REGRESS))
@@ -104,3 +102,23 @@ LIBS := $(filter-out -lxslt, $(LIBS))
 
 .PHONY: subclean
 clean: subclean
+
+installcheck: integritycheck
+
+# Check if META.json.version and PLV8_VERSION is equal.
+# Ideally we want to have only one place for this number, but parsing META.json
+# is a bit challenging; at one time we had v8/d8 parsing META.json to pass
+# this value to source file, but it turned out those utilities may not be
+# available everywhere.  Since this integrity matters only developers,
+# we just check it if they are available.  We may come up with a better
+# solution to have it in one place in the future.
+META_VER := $(shell v8 -e 'print(JSON.parse(read("META.json")).version)' 2>/dev/null)
+ifndef META_VER
+META_VER := $(shell d8 -e 'print(JSON.parse(read("META.json")).version)' 2>/dev/null)
+endif
+
+integritycheck:
+ifneq ($(META_VER),)
+	test "$(META_VER)" = "$(PLV8_VERSION)"
+endif
+

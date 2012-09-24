@@ -1,5 +1,22 @@
-V8DIR = ../v8
-
+#-----------------------------------------------------------------------------#
+#
+# Makefile for plv8
+#
+# @param V8_SRCDIR path to V8 source directory, used for include files
+# @param V8_OUTDIR path to V8 output directory, used for library files
+# @param V8_STATIC_SNAPSHOT if defined, statically link to v8 with snapshot
+# @param V8_STATIC_NOSNAPSHOT if defined, statically link to v8 w/o snapshot
+# @param ENABLE_COFFEE if defined, build plcoffee
+# @param ENABLE_LIVESCRIPT if defined, build plls
+#
+# There are three ways to build plv8.
+# 1. Dynamic link to v8 (default)
+# 2. Static link to v8 with snapshot, if V8_STATIC_SNAPSHOT is defined
+# 3. Static link to v8 w/o snapshot, if V8_STATIC_NOSNAPSHOT is defined
+# In either case, V8_OUTDIR should point to the v8 output directory (such as
+# $(HOME)/v8/out/native) if linker doesn't find it automatically.
+#
+#-----------------------------------------------------------------------------#
 # set your custom C++ compler
 CUSTOM_CC = g++
 
@@ -14,11 +31,37 @@ EXTVER = 1.1.0
 DATA = plv8.control plv8--$(EXTVER).sql
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 inline json startup_pre startup varparam
-SHLIB_LINK := $(SHLIB_LINK) -lv8
+
+# V8 build options.  See the top comment.
+V8_STATIC_SNAPSHOT_LIBS = libv8_base.a libv8_snapshot.a
+V8_STATIC_NOSNAPSHOT_LIBS = libv8_base.a libv8_nosnapshot.a
+ifdef V8_STATIC_SNAPSHOT
+  ifdef V8_OUTDIR
+SHLIB_LINK += $(addprefix $(V8_OUTDIR)/, $(V8_STATIC_SNAPSHOT_LIBS))
+  else
+SHLIB_LINK += $(V8_STATIC_SNAPSHOT_LIBS)
+  endif
+else
+  ifdef V8_STATIC_NOSNAPSHOT
+    ifdef V8_OUTDIR
+SHLIB_LINK += $(addprefix $(V8_OUTDIR)/, $(V8_STATIC_NOSNAPSHOT_LIBS))
+    else
+SHLIB_LINK += $(V8_STATIC_NOSNAPSHOT_LIBS)
+    endif
+  else
+SHLIB_LINK += -lv8
+    ifdef V8_OUTDIR
+SHLIB_LINK += -L$(V8_OUTDIR)
+    endif
+  endif
+endif
 
 PLV8_VERSION = 1.2.0
 OPTFLAGS = -O2
 CCFLAGS = -Wall $(OPTFLAGS)
+ifdef V8_SRCDIR
+override CPPFLAGS += -I$(V8_SRCDIR)/include
+endif
 
 # plcoffee is available only when ENABLE_COFFEE is defined.
 ifdef ENABLE_COFFEE
@@ -43,7 +86,7 @@ plv8_config.h: plv8_config.h.in Makefile
 	cat $< | sed -e 's/^#undef PLV8_VERSION/#define PLV8_VERSION "$(PLV8_VERSION)"/' > $@
 
 %.o : %.cc plv8_config.h
-	$(CUSTOM_CC) $(CCFLAGS) $(CPPFLAGS) -I $(V8DIR)/include -fPIC -c -o $@ $<
+	$(CUSTOM_CC) $(CCFLAGS) $(CPPFLAGS) -fPIC -c -o $@ $<
 
 # Convert .js to .cc
 $(filter $(JSCS), $(SRCS)): %.cc: %.js

@@ -17,7 +17,7 @@
 # $(HOME)/v8/out/native) if linker doesn't find it automatically.
 #
 #-----------------------------------------------------------------------------#
-PLV8_VERSION = 1.2.0
+PLV8_VERSION = 1.3.0devel
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -34,8 +34,7 @@ SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc $(JSCS)
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8
 EXTENSION = plv8
-EXTVER = 1.1.0
-DATA = plv8.control plv8--$(EXTVER).sql
+DATA = plv8.control plv8--$(PLV8_VERSION).sql
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 inline json startup_pre startup varparam
 
@@ -112,11 +111,11 @@ endif
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90100 && echo yes), yes)
 plv8.sql:
 DATA_built =
-install: plv8--$(EXTVER).sql
-plv8--$(EXTVER).sql: plv8.sql.c
+install: plv8--$(PLV8_VERSION).sql
+plv8--$(PLV8_VERSION).sql: plv8.sql.c
 	$(CC) -E -P $(CPPFLAGS) $< > $@
 subclean:
-	rm -f plv8_config.h plv8--$(EXTVER).sql $(JSCS)
+	rm -f plv8_config.h plv8--$(PLV8_VERSION).sql $(JSCS)
 
 else # < 9.1
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90000 && echo yes), yes)

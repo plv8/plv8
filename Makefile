@@ -17,9 +17,16 @@
 # $(HOME)/v8/out/native) if linker doesn't find it automatically.
 #
 #-----------------------------------------------------------------------------#
+PLV8_VERSION = 1.2.0
+
+PG_CONFIG = pg_config
+PGXS := $(shell $(PG_CONFIG) --pgxs)
+
+PG_VERSION_NUM := $(shell cat `$(PG_CONFIG) --includedir`/pg_config*.h \
+		   | perl -ne 'print $$1 and exit if /PG_VERSION_NUM\s+(\d+)/')
+
 # set your custom C++ compler
 CUSTOM_CC = g++
-
 JSS  = coffee-script.js livescript.js
 # .cc created from .js
 JSCS = $(JSS:.js=.cc)
@@ -56,7 +63,6 @@ SHLIB_LINK += -L$(V8_OUTDIR)
   endif
 endif
 
-PLV8_VERSION = 1.2.0
 OPTFLAGS = -O2
 CCFLAGS = -Wall $(OPTFLAGS)
 ifdef V8_SRCDIR
@@ -83,13 +89,13 @@ endif
 all:
 
 plv8_config.h: plv8_config.h.in Makefile
-	cat $< | sed -e 's/^#undef PLV8_VERSION/#define PLV8_VERSION "$(PLV8_VERSION)"/' > $@
+	sed -e 's/^#undef PLV8_VERSION/#define PLV8_VERSION "$(PLV8_VERSION)"/' $< > $@
 
 %.o : %.cc plv8_config.h
 	$(CUSTOM_CC) $(CCFLAGS) $(CPPFLAGS) -fPIC -c -o $@ $<
 
 # Convert .js to .cc
-$(filter $(JSCS), $(SRCS)): %.cc: %.js
+$(JSCS): %.cc: %.js
 	echo "extern const unsigned char $(subst -,_,$(basename $@))_binary_data[] = {" >$@
 ifdef ENABLE_COFFEE
 	(od -txC -v $< | \
@@ -102,17 +108,6 @@ endif
 endif
 	echo "0x00};" >>$@
 
-PG_CONFIG = pg_config
-PGXS := $(shell $(PG_CONFIG) --pgxs)
-include $(PGXS)
-
-ifndef MAJORVERSION
-MAJORVERSION := $(basename $(VERSION))
-endif
-
-PG_VERSION_NUM := $(shell cat `$(PG_CONFIG) --includedir`/pg_config*.h \
-		   | perl -ne 'print $$1 and exit if /PG_VERSION_NUM\s+(\d+)/')
-
 # VERSION specific definitions
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90100 && echo yes), yes)
 plv8.sql:
@@ -122,31 +117,27 @@ plv8--$(EXTVER).sql: plv8.sql.c
 	$(CC) -E -P $(CPPFLAGS) $< > $@
 subclean:
 	rm -f plv8_config.h plv8--$(EXTVER).sql $(JSCS)
-else # 9.1
+
+else # < 9.1
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90000 && echo yes), yes)
+
 REGRESS := init $(filter-out init-extension, $(REGRESS))
-else # 9.0
+
+else # < 9.0
+
 REGRESS := init $(filter-out init-extension inline startup varparam, $(REGRESS))
+
 endif
+
 DATA = uninstall_plv8.sql
 plv8.sql.in: plv8.sql.c
 	$(CC) -E -P $(CPPFLAGS) $< > $@
 subclean:
-	rm -f plv8.sql.in $(JSCS)
+	rm -f plv8_config.h plv8.sql.in $(JSCS)
+
 endif
 
-ifneq ($(basename $(MAJORVERSION)), 9)
-REGRESS := $(filter-out inline, $(REGRESS))
-endif
-
-# remove dependency to libxml2 and libxslt
-LIBS := $(filter-out -lxml2, $(LIBS))
-LIBS := $(filter-out -lxslt, $(LIBS))
-
-.PHONY: subclean
 clean: subclean
-
-installcheck: integritycheck
 
 # Check if META.json.version and PLV8_VERSION is equal.
 # Ideally we want to have only one place for this number, but parsing META.json
@@ -165,3 +156,11 @@ ifneq ($(META_VER),)
 	test "$(META_VER)" = "$(PLV8_VERSION)"
 endif
 
+installcheck: integritycheck
+
+.PHONY: subclean integritycheck
+include $(PGXS)
+
+# remove dependency to libxml2 and libxslt (should be after include PGXS)
+LIBS := $(filter-out -lxml2, $(LIBS))
+LIBS := $(filter-out -lxslt, $(LIBS))

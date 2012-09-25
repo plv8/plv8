@@ -867,22 +867,20 @@ CompileDialect(const char *src, Dialect dialect)
 	switch (dialect)
 	{
 		case PLV8_DIALECT_COFFEE:
-#ifndef ENABLE_COFFEE
-			throw js_error("CoffeeScript is not enabled");
-#endif
+			if (coffee_script_binary_data[0] == '\0')
+				throw js_error("CoffeeScript is not enabled");
 			key = String::NewSymbol("CoffeeScript");
 			dialect_binary_data = (const char *) coffee_script_binary_data;
 			break;
 		case PLV8_DIALECT_LIVESCRIPT:
-#ifndef ENABLE_LIVESCRIPT
-			throw js_error("LiveScript is not enabled");
-#endif
+			if (livescript_binary_data[0] == '\0')
+				throw js_error("LiveScript is not enabled");
 			key = String::NewSymbol("LiveScript");
 			dialect_binary_data = (const char *) livescript_binary_data;
 			break;
 		default:
 			throw js_error("Unknown Dialect");
-        }
+	}
 
 	if (context->Global()->Get(key)->IsUndefined())
 	{
@@ -1033,10 +1031,12 @@ find_js_function(Oid fn_oid)
 {
 	HeapTuple		tuple;
 	Form_pg_proc	proc;
-	Oid				prolang, v8langtupoid, coffeelangtupoid, lslangtupoid;
-	NameData		v8langname = { "plv8" },
-					coffeelangname = { "plcoffee" },
-					lslangname = { "plls" };
+	Oid				prolang;
+	NameData		langnames[] = { {"plv8"}, {"plcoffee"}, {"plls"} };
+	int				langno;
+	int				langlen = sizeof(langnames) / sizeof(NameData);
+	Local<Function> func;
+
 
 	tuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 	if (!HeapTupleIsValid(tuple))
@@ -1045,47 +1045,32 @@ find_js_function(Oid fn_oid)
 	prolang = proc->prolang;
 	ReleaseSysCache(tuple);
 
-	tuple = SearchSysCache(LANGNAME, NameGetDatum(&v8langname), 0, 0, 0);
-	if (!HeapTupleIsValid(tuple))
-		v8langtupoid = InvalidOid;
-	else
+	/* Should not happen? */
+	if (!OidIsValid(prolang))
+		return func;
+
+	/* See if the function language is a compatible one */
+	for (langno = 0; langno < langlen; langno++)
 	{
-		v8langtupoid = HeapTupleGetOid(tuple);
-		ReleaseSysCache(tuple);
+		tuple = SearchSysCache(LANGNAME, NameGetDatum(&langnames[langno]), 0, 0, 0);
+		if (HeapTupleIsValid(tuple))
+		{
+			Oid langtupoid = HeapTupleGetOid(tuple);
+			ReleaseSysCache(tuple);
+			if (langtupoid == prolang)
+				break;
+		}
 	}
 
-	tuple = SearchSysCache(LANGNAME, NameGetDatum(&coffeelangname), 0, 0, 0);
-	if (!HeapTupleIsValid(tuple))
-		coffeelangtupoid = InvalidOid;
-	else
-	{
-		coffeelangtupoid = HeapTupleGetOid(tuple);
-		ReleaseSysCache(tuple);
-	}
-
-	tuple = SearchSysCache(LANGNAME, NameGetDatum(&lslangname), 0, 0, 0);
-	if (!HeapTupleIsValid(tuple))
-		lslangtupoid = InvalidOid;
-	else
-	{
-		lslangtupoid = HeapTupleGetOid(tuple);
-		ReleaseSysCache(tuple);
-	}
-
-	Local<Function> func;
-
-	/* Non-JS function */
-	if (prolang == InvalidOid ||
-		(v8langtupoid != prolang && coffeelangtupoid != prolang && lslangtupoid != prolang))
+	/* Not found or non-JS function */
+	if (langno >= langlen)
 		return func;
 
 	try
 	{
 		plv8_proc		   *proc = Compile(fn_oid,CurrentMemoryContext,
 										   true, false,
-										   ( (coffeelangtupoid == prolang) ? PLV8_DIALECT_COFFEE
-										   : (lslangtupoid == prolang) ? PLV8_DIALECT_LIVESCRIPT
-										   : PLV8_DIALECT_NONE ));
+										   (Dialect) (PLV8_DIALECT_NONE + langno));
 
 		TryCatch			try_catch;
 

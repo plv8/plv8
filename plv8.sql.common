@@ -6,23 +6,23 @@ SET search_path = public;
 BEGIN;
 #endif
 
-CREATE FUNCTION plv8_call_handler() RETURNS language_handler
+CREATE FUNCTION @LANG_NAME@_call_handler() RETURNS language_handler
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 
 #if PG_VERSION_NUM >= 90000
-CREATE FUNCTION plv8_inline_handler(internal) RETURNS void
+CREATE FUNCTION @LANG_NAME@_inline_handler(internal) RETURNS void
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 #endif
 
-CREATE FUNCTION plv8_call_validator(oid) RETURNS void
+CREATE FUNCTION @LANG_NAME@_call_validator(oid) RETURNS void
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 
-CREATE TRUSTED LANGUAGE plv8
-	HANDLER plv8_call_handler
+CREATE TRUSTED LANGUAGE @LANG_NAME@
+	HANDLER @LANG_NAME@_call_handler
 #if PG_VERSION_NUM >= 90000
-	INLINE plv8_inline_handler
+	INLINE @LANG_NAME@_inline_handler
 #endif
-	VALIDATOR plv8_call_validator;
+	VALIDATOR @LANG_NAME@_call_validator;
 
 #if PG_VERSION_NUM < 90100
 COMMIT;

@@ -6,8 +6,7 @@
 # @param V8_OUTDIR path to V8 output directory, used for library files
 # @param V8_STATIC_SNAPSHOT if defined, statically link to v8 with snapshot
 # @param V8_STATIC_NOSNAPSHOT if defined, statically link to v8 w/o snapshot
-# @param ENABLE_COFFEE if defined, build plcoffee
-# @param ENABLE_LIVESCRIPT if defined, build plls
+# @param DISABLE_DIALECT if defined, not build dialects (i.e. plcoffee, etc)
 #
 # There are three ways to build plv8.
 # 1. Dynamic link to v8 (default)
@@ -34,9 +33,17 @@ SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc $(JSCS)
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8
 EXTENSION = plv8
-DATA = plv8.control plv8--$(PLV8_VERSION).sql
+PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql
+DATA = $(PLV8_DATA)
+ifndef DISABLE_DIALECT
+DATA += plcoffee.control plcoffee--$(PLV8_VERSION).sql \
+		plls.control plls--$(PLV8_VERSION).sql
+endif
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 inline json startup_pre startup varparam
+ifndef DISABLE_DIALECT
+REGRESS += dialect
+endif
 
 # V8 build options.  See the top comment.
 V8_STATIC_SNAPSHOT_LIBS = libv8_base.a libv8_snapshot.a
@@ -68,23 +75,6 @@ ifdef V8_SRCDIR
 override CPPFLAGS += -I$(V8_SRCDIR)/include
 endif
 
-# plcoffee is available only when ENABLE_COFFEE is defined.
-ifdef ENABLE_COFFEE
-ifdef ENABLE_LIVESCRIPT
-	CCFLAGS := -DENABLE_COFFEE -DENABLE_LIVESCRIPT $(CCFLAGS)
-	DATA = plcoffee.control plcoffee--0.9.0.sql plls.control plls--0.9.0.sql
-else
-	CCFLAGS := -DENABLE_COFFEE $(CCFLAGS)
-	DATA = plcoffee.control plcoffee--0.9.0.sql
-endif
-else
-# plls is available only when ENABLE_LIVESCRIPT is defined.
-ifdef ENABLE_LIVESCRIPT
-	CCFLAGS := -DENABLE_LIVESCRIPT $(CCFLAGS)
-	DATA = plls.control plls--0.9.0.sql
-endif
-endif
-
 all:
 
 plv8_config.h: plv8_config.h.in Makefile
@@ -96,43 +86,40 @@ plv8_config.h: plv8_config.h.in Makefile
 # Convert .js to .cc
 $(JSCS): %.cc: %.js
 	echo "extern const unsigned char $(subst -,_,$(basename $@))_binary_data[] = {" >$@
-ifdef ENABLE_COFFEE
+ifndef DISABLE_DIALECT
 	(od -txC -v $< | \
 	sed -e "s/^[0-9]*//" -e s"/ \([0-9a-f][0-9a-f]\)/0x\1,/g" -e"\$$d" ) >>$@
-else
-ifdef ENABLE_LIVESCRIPT
-	(od -txC -v $< | \
-	sed -e "s/^[0-9]*//" -e s"/ \([0-9a-f][0-9a-f]\)/0x\1,/g" -e"\$$d" ) >>$@
-endif
 endif
 	echo "0x00};" >>$@
 
 # VERSION specific definitions
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90100 && echo yes), yes)
-plv8.sql:
+
 DATA_built =
-install: plv8--$(PLV8_VERSION).sql
-plv8--$(PLV8_VERSION).sql: plv8.sql.c
-	$(CC) -E -P $(CPPFLAGS) $< > $@
+all: $(DATA)
+%--$(PLV8_VERSION).sql: plv8.sql.common
+	sed -e 's/@LANG_NAME@/$*/g' $< | $(CC) -E -P $(CPPFLAGS) - > $@
+%.control: plv8.control.common
+	sed -e 's/@PLV8_VERSION@/$(PLV8_VERSION)/g' $< | $(CC) -E -P -DLANG_$* - > $@
 subclean:
-	rm -f plv8_config.h plv8--$(PLV8_VERSION).sql $(JSCS)
+	rm -f plv8_config.h $(DATA) $(JSCS)
 
 else # < 9.1
-ifeq ($(shell test $(PG_VERSION_NUM) -ge 90000 && echo yes), yes)
 
-REGRESS := init $(filter-out init-extension, $(REGRESS))
+ifeq ($(shell test $(PG_VERSION_NUM) -ge 90000 && echo yes), yes)
+REGRESS := init $(filter-out init-extension dialect, $(REGRESS))
 
 else # < 9.0
 
-REGRESS := init $(filter-out init-extension inline startup varparam, $(REGRESS))
+REGRESS := init $(filter-out init-extension inline startup varparam dialect, $(REGRESS))
 
 endif
 
 DATA = uninstall_plv8.sql
-plv8.sql.in: plv8.sql.c
-	$(CC) -E -P $(CPPFLAGS) $< > $@
+%.sql.in: plv8.sql.common
+	sed -e 's/@LANG_NAME@/$*/g' $< | $(CC) -E -P $(CPPFLAGS) - > $@
 subclean:
-	rm -f plv8_config.h plv8.sql.in $(JSCS)
+	rm -f plv8_config.h *.sql.in $(JSCS)
 
 endif
 

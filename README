@@ -19,14 +19,18 @@ Also all tools that PostgreSQL and V8 require to be built are required.
 INSTALL
 -------
 
-Make sure V8 include files are in the system include directories, or you can
-place them in $(PLV8DIR)/../v8/include.  Run make:
+If you use pgxn client, you don't have to worry much.  It does everything.
+If you are building plv8 from source, make sure V8 include files are in the
+system include directories, or you can pass V8 source path via V8_SRCDIR, and
+if so, you'll probably need V8_OUTDIR pointing where libv8 is located.
+Run make:
 
-  # Build with CoffeeScript and LiveScript
-  $ make ENABLE_COFFEE=1 ENABLE_LIVESCRIPT=1
-  $ sudo make install ENABLE_COFFEE=1 ENABLE_LIVESCRIPT=1
+  $ make V8_SRCDIR=/path/to/v8 V8_OUTDIR=/path/to/v8/out/native install
 
-and create language via
+If you prefer to build plv8 statically linking with v8, try V8_STATIC_SNAPSHOT
+or V8_STATIC_NOSNAPSHOT.  Consult Makefile for more detail.
+
+Once you installed plv8 into your dabase, create language via
 
   $ psql -c 'CREATE EXTENSION plv8'
   $ psql -c 'CREATE EXTENSION plls'
@@ -46,20 +50,6 @@ in your postgresql.conf and
 
   $ make installcheck
 
-EXAMPLE (LIVESCRIPT)
---------------------
-
-  CREATE OR REPLACE FUNCTION plls_test(keys text[], vals text[])
-  RETURNS text AS $$
-    return JSON.stringify { [key, vals[idx]] for key, idx in keys }
-  $$ LANGUAGE plls IMMUTABLE STRICT;
-  
-  SELECT plls_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-           plls_test        
-  ---------------------------
-   {"name":"Tom","age":"29"}
-  (1 row)
-
 EXAMPLE (JAVASCRIPT)
 --------------------
 
@@ -74,6 +64,20 @@ EXAMPLE (JAVASCRIPT)
   
   SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
            plv8_test        
+  ---------------------------
+   {"name":"Tom","age":"29"}
+  (1 row)
+
+EXAMPLE (LIVESCRIPT)
+--------------------
+
+  CREATE OR REPLACE FUNCTION plls_test(keys text[], vals text[])
+  RETURNS text AS $$
+    return JSON.stringify { [key, vals[idx]] for key, idx in keys }
+  $$ LANGUAGE plls IMMUTABLE STRICT;
+  
+  SELECT plls_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
+           plls_test        
   ---------------------------
    {"name":"Tom","age":"29"}
   (1 row)

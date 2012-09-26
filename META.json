@@ -20,7 +20,7 @@
                 "PostgreSQL": "8.4.0"
             },
             "recommends": {
-                "PostgreSQL": "9.1.0"
+                "PostgreSQL": "9.2.0"
             }
         }
     },
@@ -30,6 +30,18 @@
             "docfile": "doc/plv8.md",
             "version": "1.3.0devel",
             "abstract": "A procedural language in JavaScript"
+         },
+        "plcoffee": {
+            "file": "plcoffee--1.3.0devel.sql",
+            "docfile": "doc/plv8.md",
+            "version": "1.3.0devel",
+            "abstract": "A procedural language in CoffeeScript"
+         },
+        "plls": {
+            "file": "plls--1.3.0devel.sql",
+            "docfile": "doc/plv8.md",
+            "version": "1.3.0devel",
+            "abstract": "A procedural language in LiveScript"
          }
     },
     "resources": {

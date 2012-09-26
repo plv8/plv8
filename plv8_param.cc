@@ -1,5 +1,9 @@
-/*
+/*-------------------------------------------------------------------------
+ *
  * plv8_param.cc : PL/v8 parameter handling.
+ *
+ * Copyright (c) 2009-2012, the PLV8JS Development Group.
+ *-------------------------------------------------------------------------
  */
 #include "plv8_param.h"
 #include <limits.h>

@@ -1,8 +1,8 @@
+SET client_min_messages = ERROR;
 CREATE TABLE public.plv8_modules (
    modname name primary key,
    code    text not null
 );
-NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "plv8_modules_pkey" for table "plv8_modules"
 insert into plv8_modules values ('testme','bar=98765;');
 create function startup()
    returns void

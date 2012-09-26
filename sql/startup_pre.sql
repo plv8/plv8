@@ -1,3 +1,4 @@
+SET client_min_messages = ERROR;
 CREATE TABLE public.plv8_modules (
    modname name primary key,
    code    text not null

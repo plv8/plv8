@@ -521,6 +521,64 @@ SELECT * FROM test_tbl;
  4 | s4
 (3 rows)
 
+-- One more trigger
+CREATE FUNCTION test_trigger2() RETURNS trigger AS
+$$
+	var tuple;
+	switch (TG_OP) {
+	case "INSERT":
+		tuple = NEW;
+		break;
+	case "UPDATE":
+		tuple = OLD;
+		break;
+	case "DELETE":
+		tuple = OLD;
+		break;
+	default:
+		return;
+	}
+	if (tuple.subject == "skip") {
+		return null;
+	}
+	if (tuple.subject == "modify" && NEW) {
+		NEW.val = tuple.val * 2;
+		return NEW;
+	}
+$$
+LANGUAGE "plv8";
+CREATE TABLE trig_table (subject text, val int);
+INSERT INTO trig_table VALUES('skip', 1);
+CREATE TRIGGER test_trigger2
+  BEFORE INSERT OR UPDATE OR DELETE
+  ON trig_table FOR EACH ROW
+  EXECUTE PROCEDURE test_trigger2();
+INSERT INTO trig_table VALUES
+  ('skip', 1), ('modify', 2), ('noop', 3);
+SELECT * FROM trig_table;
+ subject | val 
+---------+-----
+ skip    |   1
+ modify  |   4
+ noop    |   3
+(3 rows)
+
+UPDATE trig_table SET val = 10;
+SELECT * FROM trig_table;
+ subject | val 
+---------+-----
+ skip    |   1
+ modify  |   8
+ noop    |  10
+(3 rows)
+
+DELETE FROM trig_table;
+SELECT * FROM trig_table;
+ subject | val 
+---------+-----
+ skip    |   1
+(1 row)
+
 -- ERRORS
 CREATE FUNCTION syntax_error() RETURNS text AS '@' LANGUAGE plv8;
 ERROR:  SyntaxError: Unexpected token ILLEGAL

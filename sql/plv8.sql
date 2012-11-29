@@ -295,6 +295,48 @@ UPDATE test_tbl SET i = 101, s = 'DEF' WHERE i = 1;
 DELETE FROM test_tbl WHERE i >= 100;
 SELECT * FROM test_tbl;
 
+-- One more trigger
+CREATE FUNCTION test_trigger2() RETURNS trigger AS
+$$
+	var tuple;
+	switch (TG_OP) {
+	case "INSERT":
+		tuple = NEW;
+		break;
+	case "UPDATE":
+		tuple = OLD;
+		break;
+	case "DELETE":
+		tuple = OLD;
+		break;
+	default:
+		return;
+	}
+	if (tuple.subject == "skip") {
+		return null;
+	}
+	if (tuple.subject == "modify" && NEW) {
+		NEW.val = tuple.val * 2;
+		return NEW;
+	}
+$$
+LANGUAGE "plv8";
+
+CREATE TABLE trig_table (subject text, val int);
+INSERT INTO trig_table VALUES('skip', 1);
+CREATE TRIGGER test_trigger2
+  BEFORE INSERT OR UPDATE OR DELETE
+  ON trig_table FOR EACH ROW
+  EXECUTE PROCEDURE test_trigger2();
+
+INSERT INTO trig_table VALUES
+  ('skip', 1), ('modify', 2), ('noop', 3);
+SELECT * FROM trig_table;
+UPDATE trig_table SET val = 10;
+SELECT * FROM trig_table;
+DELETE FROM trig_table;
+SELECT * FROM trig_table;
+
 -- ERRORS
 CREATE FUNCTION syntax_error() RETURNS text AS '@' LANGUAGE plv8;
 

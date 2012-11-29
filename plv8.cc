@@ -615,8 +615,16 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	if (newtup.IsEmpty())
 		throw js_error(try_catch);
 
-	if (TRIGGER_FIRED_BY_UPDATE(event) &&
-			!(newtup->IsUndefined() || newtup->IsNull()))
+	/*
+	 * If the function specifically returned null, return NULL to
+	 * tell executor to skip the operation.  Otherwise, the function
+	 * result is the tuple to be returned.
+	 */
+	if (newtup->IsNull() || !TRIGGER_FIRED_FOR_ROW(event))
+	{
+		result = PointerGetDatum(NULL);
+	}
+	else if (!newtup->IsUndefined())
 	{
 		TupleDesc		tupdesc = RelationGetDescr(rel);
 		Converter		conv(tupdesc);

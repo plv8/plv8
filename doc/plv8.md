@@ -154,6 +154,7 @@ automatically.  If the desired database type is one of
 - date
 - timestamp
 - timestamptz
+- json (>= 9.2)
 
 and the JS value looks compatible, then the conversion succeeds.  Otherwise,
 PL/v8 tries to convert them via cstring representation.  An array type is

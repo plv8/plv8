@@ -35,7 +35,7 @@ DATA += plcoffee.control plcoffee--$(PLV8_VERSION).sql \
 		plls.control plls--$(PLV8_VERSION).sql
 endif
 DATA_built = plv8.sql
-REGRESS = init-extension plv8 inline json startup_pre startup varparam
+REGRESS = init-extension plv8 inline json startup_pre startup varparam json_conv
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif
@@ -73,14 +73,19 @@ all: $(DATA)
 subclean:
 	rm -f plv8_config.h $(DATA) $(JSCS)
 
+ifeq ($(shell test $(PG_VERSION_NUM) -lt 90200 && echo yes), yes)
+REGRESS := $(filter-out json_conv, $(REGRESS))
+endif
+
 else # < 9.1
 
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90000 && echo yes), yes)
-REGRESS := init $(filter-out init-extension dialect, $(REGRESS))
+REGRESS := init $(filter-out init-extension dialect json_conv, $(REGRESS))
 
 else # < 9.0
 
-REGRESS := init $(filter-out init-extension inline startup varparam dialect, $(REGRESS))
+REGRESS := init $(filter-out init-extension inline startup \
+					varparam dialect json_conv, $(REGRESS))
 
 endif
 

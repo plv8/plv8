@@ -179,6 +179,26 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 		if (value->IsDate())
 			return EpochToTimestampTz(value->NumberValue());
 		break;
+#if PG_VERSION_NUM >= 90200
+	case JSONOID:
+		if (value->IsObject() || value->IsArray())
+		{
+			HandleScope scope;
+
+			Handle<Context> context = Context::GetCurrent();
+			Handle<Object> global = context->Global();
+
+			Handle<Object> JSON = global->Get(String::NewSymbol("JSON"))->ToObject();
+			Handle<Function> JSON_stringify =
+				Handle<Function>::Cast(JSON->Get(String::NewSymbol("stringify")));
+
+			Handle<v8::Value> result = JSON_stringify->Call(JSON, 1, &value);
+			CString str(result);
+
+			return CStringGetTextDatum(str);
+		}
+		break;
+#endif
 	}
 
 	/* Use lexical cast for non-numeric types. */
@@ -328,6 +348,28 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 			pfree(p);	// free if detoasted
 		return result;
 	}
+#if PG_VERSION_NUM >= 90200
+	case JSONOID:
+	{
+		void	   *p = PG_DETOAST_DATUM_PACKED(datum);
+		const char *str = VARDATA_ANY(p);
+		int			len = VARSIZE_ANY_EXHDR(p);
+
+		Local<v8::Value>	jsonString = ToString(str, len);
+
+		HandleScope scope;
+
+		Handle<Context> context = Context::GetCurrent();
+		Handle<Object> global = context->Global();
+
+		Handle<Object> JSON = global->Get(String::NewSymbol("JSON"))->ToObject();
+		Handle<Function> JSON_parse =
+			Handle<Function>::Cast(JSON->Get(String::NewSymbol("parse")));
+
+		// return JSON.parse.apply(JSON, jsonString);
+		return scope.Close(JSON_parse->Call(JSON, 1, &jsonString));
+	}
+#endif
 	default:
 		return ToString(datum, type);
 	}

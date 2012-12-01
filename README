@@ -10,8 +10,8 @@ REQUIREMENT
 
 plv8 is tested with:
 
-- PG: version 8.4, 9.0, 9.1 and 9.2dev (maybe older are allowed)
-- V8: version 3.6.2
+- PG: version 8.4, 9.0, 9.1, 9.2 and 9.3dev (maybe older are allowed)
+- V8: version 3.14.5
 - g++: version 4.5.1
 
 Also all tools that PostgreSQL and V8 require to be built are required.
@@ -19,16 +19,11 @@ Also all tools that PostgreSQL and V8 require to be built are required.
 INSTALL
 -------
 
-If you use pgxn client, you don't have to worry much.  It does everything.
-If you are building plv8 from source, make sure V8 include files are in the
-system include directories, or you can pass V8 source path via V8_SRCDIR, and
-if so, you'll probably need V8_OUTDIR pointing where libv8 is located.
-Run make:
-
-  $ make V8_SRCDIR=/path/to/v8 V8_OUTDIR=/path/to/v8/out/native install
-
-If you prefer to build plv8 statically linking with v8, try V8_STATIC_SNAPSHOT
-or V8_STATIC_NOSNAPSHOT.  Consult Makefile for more detail.
+There are two ways to build plv8.  The first is default `make`, which depends
+on system-installed libv8 and plv8 will be dynamically link to it.  The second
+is `make static`, which will download v8 soure at a specific version and build
+it, and statically link plv8 to it.  PGXN install will use the former, while
+you can do the latter manually if you have not installed v8 yet.
 
 Once you installed plv8 into your dabase, create language via
 
@@ -36,7 +31,7 @@ Once you installed plv8 into your dabase, create language via
   $ psql -c 'CREATE EXTENSION plls'
   $ psql -c 'CREATE EXTENSION plcoffee'
 
-in 9.1, or in the prior versions
+in 9.1 or later, or in the prior versions
 
   $ psql -f plv8.sql
 
@@ -46,7 +41,7 @@ TEST
 ----
 
 plv8 supports installcheck test.  Make sure set custom_variable_classes = 'plv8'
-in your postgresql.conf and
+in your postgresql.conf (before 9.2) and run
 
   $ make installcheck
 

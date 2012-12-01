@@ -1,0 +1,36 @@
+#-----------------------------------------------------------------------------#
+#
+# Makefile for v8 static link
+#
+# 'make static' will download the v8 source and build it, then build plv8
+# with statically link to v8 with snapshot.  This assumes certain directory
+# structure in v8 which may be different from version to another, but user
+# can specify the v8 version by AUTOV8_VERSION, too.
+#-----------------------------------------------------------------------------#
+AUTOV8_VERSION = 3.14.5
+AUTOV8_DIR = build/v8-$(AUTOV8_VERSION)
+AUTOV8_OUT = build/v8-$(AUTOV8_VERSION)/out/native
+AUTOV8_LIB = $(AUTOV8_OUT)/libv8_snapshot.a
+AUTOV8_STATIC_LIBS = libv8_base.a libv8_snapshot.a
+
+SHLIB_LINK += $(addprefix $(AUTOV8_OUT)/, $(AUTOV8_STATIC_LIBS))
+
+all: $(AUTOV8_LIB)
+
+# For some reason, this solves parallel make dependency.
+plv8_config.h: $(AUTOV8_LIB)
+
+$(AUTOV8_DIR):
+	mkdir -p build
+	curl -L 'https://github.com/v8/v8/archive/$(AUTOV8_VERSION).tar.gz' \
+		| tar zxf - -C build
+
+$(AUTOV8_LIB): $(AUTOV8_DIR)
+	$(MAKE) -C build/v8-$(AUTOV8_VERSION) dependencies
+	$(MAKE) -C build/v8-$(AUTOV8_VERSION) native
+
+include Makefile
+
+CCFLAGS += -I$(AUTOV8_DIR)/include
+# We're gonna build static link.  Rip it out after include Makefile
+SHLIB_LINK := $(filter-out -lv8, $(SHLIB_LINK))

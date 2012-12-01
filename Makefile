@@ -2,18 +2,13 @@
 #
 # Makefile for plv8
 #
-# @param V8_SRCDIR path to V8 source directory, used for include files
-# @param V8_OUTDIR path to V8 output directory, used for library files
-# @param V8_STATIC_SNAPSHOT if defined, statically link to v8 with snapshot
-# @param V8_STATIC_NOSNAPSHOT if defined, statically link to v8 w/o snapshot
 # @param DISABLE_DIALECT if defined, not build dialects (i.e. plcoffee, etc)
 #
-# There are three ways to build plv8.
+# There are two ways to build plv8.
 # 1. Dynamic link to v8 (default)
-# 2. Static link to v8 with snapshot, if V8_STATIC_SNAPSHOT is defined
-# 3. Static link to v8 w/o snapshot, if V8_STATIC_NOSNAPSHOT is defined
-# In either case, V8_OUTDIR should point to the v8 output directory (such as
-# $(HOME)/v8/out/native) if linker doesn't find it automatically.
+#   You need to have libv8.so and header file installed.
+# 2. Static link to v8 with snapshot
+#   'make static' will download v8 and build, then statically link to it.
 #
 #-----------------------------------------------------------------------------#
 PLV8_VERSION = 1.3.0devel
@@ -44,36 +39,10 @@ REGRESS = init-extension plv8 inline json startup_pre startup varparam
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif
-
-# V8 build options.  See the top comment.
-V8_STATIC_SNAPSHOT_LIBS = libv8_base.a libv8_snapshot.a
-V8_STATIC_NOSNAPSHOT_LIBS = libv8_base.a libv8_nosnapshot.a
-ifdef V8_STATIC_SNAPSHOT
-  ifdef V8_OUTDIR
-SHLIB_LINK += $(addprefix $(V8_OUTDIR)/, $(V8_STATIC_SNAPSHOT_LIBS))
-  else
-SHLIB_LINK += $(V8_STATIC_SNAPSHOT_LIBS)
-  endif
-else
-  ifdef V8_STATIC_NOSNAPSHOT
-    ifdef V8_OUTDIR
-SHLIB_LINK += $(addprefix $(V8_OUTDIR)/, $(V8_STATIC_NOSNAPSHOT_LIBS))
-    else
-SHLIB_LINK += $(V8_STATIC_NOSNAPSHOT_LIBS)
-    endif
-  else
 SHLIB_LINK += -lv8
-    ifdef V8_OUTDIR
-SHLIB_LINK += -L$(V8_OUTDIR)
-    endif
-  endif
-endif
 
 OPTFLAGS = -O2
 CCFLAGS = -Wall $(OPTFLAGS)
-ifdef V8_SRCDIR
-override CPPFLAGS += -I$(V8_SRCDIR)/include
-endif
 
 all:
 
@@ -124,6 +93,13 @@ subclean:
 endif
 
 clean: subclean
+
+# build will be created by Makefile.v8
+distclean:
+	rm -rf build
+
+static:
+	$(MAKE) -f Makefile.v8
 
 # Check if META.json.version and PLV8_VERSION is equal.
 # Ideally we want to have only one place for this number, but parsing META.json

@@ -10,6 +10,9 @@
 
 #include "plv8_config.h"
 #include <v8.h>
+#ifdef ENABLE_DEBUGGER_SUPPORT
+#include <v8-debug.h>
+#endif  // ENABLE_DEBUGGER_SUPPORT
 #include <vector>
 
 extern "C" {

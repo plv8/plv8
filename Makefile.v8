@@ -14,6 +14,8 @@ AUTOV8_LIB = $(AUTOV8_OUT)/libv8_snapshot.a
 AUTOV8_STATIC_LIBS = libv8_base.a libv8_snapshot.a
 
 SHLIB_LINK += $(addprefix $(AUTOV8_OUT)/, $(AUTOV8_STATIC_LIBS))
+# We are sure the static buid can support debugger
+ENABLE_DEBUGGER_SUPPORT=1
 
 all: $(AUTOV8_LIB)
 

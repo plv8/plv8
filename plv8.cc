@@ -155,11 +155,35 @@ static Persistent<ObjectTemplate> GetGlobalObjectTemplate();
 
 /* A GUC to specify a custom start up function to call */
 static char *plv8_start_proc = NULL;
+
+/* A GUC to specify the remote debugger port */
+static int plv8_debugger_port;
 /*
  * We use vector instead of hash since the size of this array
  * is expected to be short in most cases.
  */
 static std::vector<plv8_context *> ContextVector;
+
+#ifdef ENABLE_DEBUGGER_SUPPORT
+v8::Persistent<v8::Context> debug_message_context;
+
+void DispatchDebugMessages() {
+  // We are in some random thread. We should already have v8::Locker acquired
+  // (we requested this when registered this callback). We was called
+  // because new debug messages arrived; they may have already been processed,
+  // but we shouldn't worry about this.
+  //
+  // All we have to do is to set context and call ProcessDebugMessages.
+  //
+  // We should decide which V8 context to use here. This is important for
+  // "evaluate" command, because it must be executed some context.
+  // In our sample we have only one context, so there is nothing really to
+  // think about.
+  v8::Context::Scope scope(debug_message_context);
+
+  v8::Debug::ProcessDebugMessages();
+}
+#endif  // ENABLE_DEBUGGER_SUPPORT
 
 void
 _PG_init(void)
@@ -183,6 +207,19 @@ _PG_init(void)
 #endif
 							   NULL,
 							   NULL);
+
+	DefineCustomIntVariable("plv8.debugger_port",
+							gettext_noop("V8 remote debug port."),
+							gettext_noop("The default value is 35432.  "
+										 "This is effective only if PLV8 is built with ENABLE_DEBUGGER_SUPPORT."),
+							&plv8_debugger_port,
+							35432, 0, 65536,
+							PGC_USERSET, 0,
+#if PG_VERSION_NUM >= 90100
+							NULL,
+#endif
+							NULL,
+							NULL);
 
 	RegisterXactCallback(plv8_xact_cb, NULL);
 
@@ -236,6 +273,9 @@ common_pl_call_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 
 	try
 	{
+#ifdef ENABLE_DEBUGGER_SUPPORT
+		Locker				lock;
+#endif  // ENABLE_DEBUGGER_SUPPORT
 		HandleScope	handle_scope;
 
 		if (!fcinfo->flinfo->fn_extra)
@@ -292,6 +332,9 @@ common_pl_inline_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 
 	try
 	{
+#ifdef ENABLE_DEBUGGER_SUPPORT
+		Locker				lock;
+#endif  // ENABLE_DEBUGGER_SUPPORT
 		HandleScope			handle_scope;
 		char			   *source_text = codeblock->source_text;
 
@@ -676,6 +719,9 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 
 	try
 	{
+#ifdef ENABLE_DEBUGGER_SUPPORT
+		Locker				lock;
+#endif  // ENABLE_DEBUGGER_SUPPORT
 		plv8_proc	   *proc = Compile(fn_oid, fcinfo->flinfo->fn_mcxt,
 									   true, is_trigger, dialect);
 		(void) CreateExecEnv(proc->cache->function);
@@ -1236,6 +1282,16 @@ GetGlobalContext()
 					throw js_error(try_catch);
 			}
 		}
+
+#ifdef ENABLE_DEBUGGER_SUPPORT
+		debug_message_context = v8::Persistent<v8::Context>::New(global_context);
+
+		v8::Locker locker;
+
+		v8::Debug::SetDebugMessageDispatchHandler(DispatchDebugMessages, true);
+
+		v8::Debug::EnableAgent("plv8", plv8_debugger_port, false);
+#endif  // ENABLE_DEBUGGER_SUPPORT
 	}
 
 	return global_context;

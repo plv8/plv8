@@ -3,6 +3,7 @@
 # Makefile for plv8
 #
 # @param DISABLE_DIALECT if defined, not build dialects (i.e. plcoffee, etc)
+# @param ENABLE_DEBUGGER_SUPPORT enables v8 deubbger agent
 #
 # There are two ways to build plv8.
 # 1. Dynamic link to v8 (default)
@@ -41,8 +42,13 @@ REGRESS += dialect
 endif
 SHLIB_LINK += -lv8
 
+# v8's remote debugger is optional at the moment, since we don't know
+# how much of the v8 installation is built with debugger enabled.
+ifdef ENABLE_DEBUGGER_SUPPORT
+OPT_ENABLE_DEBUGGER_SUPPORT = -DENABLE_DEBUGGER_SUPPORT=1
+endif
 OPTFLAGS = -O2
-CCFLAGS = -Wall $(OPTFLAGS)
+CCFLAGS = -Wall $(OPTFLAGS) $(OPT_ENABLE_DEBUGGER_SUPPORT)
 
 all:
 

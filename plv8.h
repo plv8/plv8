@@ -77,6 +77,7 @@ typedef struct plv8_type
 	char		category;
 	FmgrInfo	fn_input;
 	FmgrInfo	fn_output;
+	v8::ExternalArrayType ext_array;
 } plv8_type;
 
 /*

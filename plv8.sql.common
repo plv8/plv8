@@ -24,6 +24,13 @@ CREATE TRUSTED LANGUAGE @LANG_NAME@
 #endif
 	VALIDATOR @LANG_NAME@_call_validator;
 
+#ifdef LANG_plv8
+CREATE DOMAIN plv8_int2array AS int2[];
+CREATE DOMAIN plv8_int4array AS int4[];
+CREATE DOMAIN plv8_float4array AS float4[];
+CREATE DOMAIN plv8_float8array AS float8[];
+#endif
+
 #if PG_VERSION_NUM < 90100
 COMMIT;
 #endif

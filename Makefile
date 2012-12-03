@@ -73,7 +73,7 @@ ifeq ($(shell test $(PG_VERSION_NUM) -ge 90100 && echo yes), yes)
 DATA_built =
 all: $(DATA)
 %--$(PLV8_VERSION).sql: plv8.sql.common
-	sed -e 's/@LANG_NAME@/$*/g' $< | $(CC) -E -P $(CPPFLAGS) - > $@
+	sed -e 's/@LANG_NAME@/$*/g' $< | $(CC) -E -P $(CPPFLAGS) -DLANG_$* - > $@
 %.control: plv8.control.common
 	sed -e 's/@PLV8_VERSION@/$(PLV8_VERSION)/g' $< | $(CC) -E -P -DLANG_$* - > $@
 subclean:
@@ -97,7 +97,7 @@ endif
 
 DATA = uninstall_plv8.sql
 %.sql.in: plv8.sql.common
-	sed -e 's/@LANG_NAME@/$*/g' $< | $(CC) -E -P $(CPPFLAGS) - > $@
+	sed -e 's/@LANG_NAME@/$*/g' $< | $(CC) -E -P $(CPPFLAGS) -DLANG_$* - > $@
 subclean:
 	rm -f plv8_config.h *.sql.in $(JSCS)
 

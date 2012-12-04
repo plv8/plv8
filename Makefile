@@ -132,6 +132,15 @@ META_VER := $(shell v8 -e 'print(JSON.parse(read("META.json")).version)' 2>/dev/
 ifndef META_VER
 META_VER := $(shell d8 -e 'print(JSON.parse(read("META.json")).version)' 2>/dev/null)
 endif
+ifndef META_VER
+META_VER := $(shell lsc -e 'console.log(JSON.parse(require("fs").readFileSync("META.json")).version)' 2>/dev/null)
+endif
+ifndef META_VER
+META_VER := $(shell coffee -e 'console.log(JSON.parse(require("fs").readFileSync("META.json")).version)' 2>/dev/null)
+endif
+ifndef META_VER
+META_VER := $(shell node -e 'console.log(JSON.parse(require("fs").readFileSync("META.json")).version)')
+endif
 
 integritycheck:
 ifneq ($(META_VER),)

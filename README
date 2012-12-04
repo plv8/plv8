@@ -37,6 +37,14 @@ in 9.1 or later, or in the prior versions
 
 to create database objects.
 
+In mingw64, you may have difficulty in building plv8.  If so, try to make
+the following changes in Makefile.
+
+  CUSTOM_CC = gcc
+  SHLIB_LINK := $(SHLIB_LINK) -lv8 -Wl,-Bstatic -lstdc++ -Wl,-Bdynamic -lm
+
+For more detail, please refer to http://code.google.com/p/plv8js/issues/detail?id=29
+
 TEST
 ----
 
@@ -59,6 +67,21 @@ EXAMPLE (JAVASCRIPT)
   
   SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
            plv8_test        
+  ---------------------------
+   {"name":"Tom","age":"29"}
+  (1 row)
+
+EXAMPLE (COFFEESCRIPT)
+----------------------
+
+  CREATE OR REPLACE FUNCTION plcoffee_test(keys text[], vals text[])
+  RETURNS text AS $$
+    return JSON.stringify(keys.reduce(((o, key, idx) ->
+      o[key] = vals[idx]; return o), {}), {})
+  $$ LANGUAGE plcoffee IMMUTABLE STRICT;
+  
+  SELECT plcoffee_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
+         plcoffee_test       
   ---------------------------
    {"name":"Tom","age":"29"}
   (1 row)

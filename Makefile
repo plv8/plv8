@@ -36,7 +36,8 @@ DATA += plcoffee.control plcoffee--$(PLV8_VERSION).sql \
 		plls.control plls--$(PLV8_VERSION).sql
 endif
 DATA_built = plv8.sql
-REGRESS = init-extension plv8 inline json startup_pre startup varparam json_conv
+REGRESS = init-extension plv8 inline json startup_pre startup varparam json_conv \
+		  window
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif
@@ -55,7 +56,7 @@ all:
 plv8_config.h: plv8_config.h.in Makefile
 	sed -e 's/^#undef PLV8_VERSION/#define PLV8_VERSION "$(PLV8_VERSION)"/' $< > $@
 
-%.o : %.cc plv8_config.h
+%.o : %.cc plv8_config.h plv8.h
 	$(CUSTOM_CC) $(CCFLAGS) $(CPPFLAGS) -fPIC -c -o $@ $<
 
 # Convert .js to .cc
@@ -91,7 +92,7 @@ REGRESS := init $(filter-out init-extension dialect json_conv, $(REGRESS))
 else # < 9.0
 
 REGRESS := init $(filter-out init-extension inline startup \
-					varparam dialect json_conv, $(REGRESS))
+					varparam dialect json_conv window, $(REGRESS))
 
 endif
 

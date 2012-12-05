@@ -302,16 +302,9 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	case JSONOID:
 		if (value->IsObject() || value->IsArray())
 		{
-			HandleScope scope;
+			JSONObject JSON;
 
-			Handle<Context> context = Context::GetCurrent();
-			Handle<Object> global = context->Global();
-
-			Handle<Object> JSON = global->Get(String::NewSymbol("JSON"))->ToObject();
-			Handle<Function> JSON_stringify =
-				Handle<Function>::Cast(JSON->Get(String::NewSymbol("stringify")));
-
-			Handle<v8::Value> result = JSON_stringify->Call(JSON, 1, &value);
+			Handle<v8::Value> result = JSON.Stringify(value);
 			CString str(result);
 
 			return CStringGetTextDatum(str);
@@ -491,18 +484,8 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 		int			len = VARSIZE_ANY_EXHDR(p);
 
 		Local<v8::Value>	jsonString = ToString(str, len);
-
-		HandleScope scope;
-
-		Handle<Context> context = Context::GetCurrent();
-		Handle<Object> global = context->Global();
-
-		Handle<Object> JSON = global->Get(String::NewSymbol("JSON"))->ToObject();
-		Handle<Function> JSON_parse =
-			Handle<Function>::Cast(JSON->Get(String::NewSymbol("parse")));
-
-		// return JSON.parse.apply(JSON, jsonString);
-		Local<v8::Value> result = scope.Close(JSON_parse->Call(JSON, 1, &jsonString));
+		JSONObject JSON;
+		Local<v8::Value> result = Local<v8::Value>::New(JSON.Parse(jsonString));
 
 		if (p != DatumGetPointer(datum))
 			pfree(p);	// free if detoasted

@@ -17,6 +17,7 @@ Implemented features are as follows.
 - Database access via SPI including prepared statements and cursors
 - Subtransaction
 - Utility functions
+- Window function API
 - Runtime environment separation across users in the same session
 - Start-up procedure
 
@@ -296,6 +297,68 @@ plv8.find_function() is either of regproc (function name only) or regprocedure
 
 The plv8 object provides version string as `plv8.version`.  This string
 corresponds to plv8 module version.  Note this is not the extension version.
+
+Window function API
+-------------------
+
+You can define user-defined window functions with PL/v8.  It wraps C-level
+window function API to support full functionality.  To create one, first
+obtain window object by plv8.get_window_object(), which provides interfaces
+as follows.
+
+### WindowObject.get_current_position() ###
+
+Returns the current position in the partition, starting from 0.
+
+### WindowObject.get_partition_row_count() ###
+
+Returns the number of rows in the partition.
+
+### WindowObject.set_mark_position( pos ) ###
+
+Set mark at the specified row.  Rows above this position will be gone and
+not be accessible later.
+
+### WindowObject.rows_are_peers( pos1, pos2 ) ###
+
+Returns true if the rows at `pos1` and `pos2` are peers.
+
+### WindowObject.get_func_arg_in_partition( argno, relpos, seektype, mark_pos ) ###
+
+### WindowObject.get_func_arg_in_frame( argno, relpos, seektype, mark_pos ) ###
+
+Returns the value of the argument in `argno` (starting from 0) to this
+function at the `relpos` row from `seektype` in the current partition or
+frame.  `seektype` can be either of WindowObject.SEEK_HEAD,
+WindowObject.SEEK_CURRENT, or WindowObject.SEEK_TAIL.  If `mark_pos` is true,
+the row the argument is fetched from is marked.  If the specified row is
+out of the partition/frame, the returned value will be `undefined`.
+
+### WindowObject.get_func_arg_in_current( argno ) ###
+
+Returns the value of the argument in `argno` (starting from 0) to this
+function at the current row.  Note that the returned value will be the
+same as the argument variable of the function.
+
+### WindowObject.get_partition_local( [size] ) ###
+
+Returns partition-local value, which is released at the end of the current
+partition.  If nothing is stored, `undefined` is returned.  `size` argument
+(default 1000) is the byte size of the allocated memory in the first call.
+Once the memory allocated, the size will not change.
+
+### WindowObject.set_partition_local( obj ) ###
+
+Stores the partition-local value, which you can retrieve later by
+get_partition_local().  This function internally uses JSON.stringify to
+serialize the object, so if you pass value that is not able to be serialized
+may end up being unexpected value.  If the size of serialized value is
+more than the allocated memory, it will throw an exception.
+
+You can also learn more on how to use these API in sql/window.sql regression
+test, which implements most of the native window functions.  For the general
+information of the user-defined window function, see the CREATE FUNCTION
+page of the PostgreSQL manual.
 
 Runtime environment separation across users in the same session
 ---------------------------------------------------------------

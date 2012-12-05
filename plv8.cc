@@ -401,9 +401,29 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Handle<Context>		context = xenv->context;
 	Context::Scope		context_scope(context);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS];
+	Handle<Object>		plv8obj;
 
-	for (int i = 0; i < nargs; i++)
-		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
+	WindowFunctionSupport support(context, fcinfo);
+
+	/*
+	 * In window function case, we cannot see the argument datum
+	 * in fcinfo.  Instead, get them by WinGetFuncArgCurrent().
+	 */
+	if (support.IsWindowCall())
+	{
+		WindowObject winobj = support.GetWindowObject();
+		for (int i = 0; i < nargs; i++)
+		{
+			bool isnull;
+			Datum arg = WinGetFuncArgCurrent(winobj, i, &isnull);
+			args[i] = ToValue(arg, isnull, &argtypes[i]);
+		}
+	}
+	else
+	{
+		for (int i = 0; i < nargs; i++)
+			args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
+	}
 
 	Local<Function>		fn =
 		Local<Function>::Cast(xenv->recv->GetInternalField(0));
@@ -490,24 +510,12 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Context::Scope		context_scope(context);
 	Converter			conv(tupdesc, proc->functypclass == TYPEFUNC_SCALAR);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS + 1];
-	Handle<Object>		plv8obj = Handle<Object>::Cast(
-			context->Global()->Get(String::NewSymbol("plv8")));
 
 	/*
 	 * In case this is nested via SPI, stash pre-registered converters
 	 * for the previous SRF.
 	 */
-	Handle<v8::Value>	conv_prev, tupstore_prev;
-	if (!plv8obj->GetInternalField(PLV8_INTNL_CONV).IsEmpty())
-	{
-		conv_prev = plv8obj->GetInternalField(PLV8_INTNL_CONV);
-		tupstore_prev = plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE);
-	}
-	/*
-	 * Setup return_next information
-	 */
-	plv8obj->SetInternalField(PLV8_INTNL_CONV, External::Wrap(&conv));
-	plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, External::Wrap(tupstore));
+	SRFSupport support(context, &conv, tupstore);
 
 	for (int i = 0; i < nargs; i++)
 		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
@@ -515,14 +523,7 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Local<Function>		fn =
 		Local<Function>::Cast(xenv->recv->GetInternalField(0));
 
-	Handle<v8::Value> result =
-		DoCall(fn, xenv->recv, nargs, args);
-
-	/*
-	 * Restore old information.
-	 */
-	plv8obj->SetInternalField(PLV8_INTNL_CONV, conv_prev);
-	plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, tupstore_prev);
+	Handle<v8::Value> result = DoCall(fn, xenv->recv, nargs, args);
 
 	if (result->IsUndefined())
 	{
@@ -1359,6 +1360,16 @@ GetGlobalObjectTemplate()
 	}
 
 	return global;
+}
+
+/*
+ * Accessor to plv8_type stored in fcinfo.
+ */
+plv8_type *
+get_plv8_type(PG_FUNCTION_ARGS, int argno)
+{
+	plv8_proc *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
+	return &proc->argtypes[argno];
 }
 
 Converter::Converter(TupleDesc tupdesc) :

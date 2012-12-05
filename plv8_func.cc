@@ -44,9 +44,33 @@ static Handle<v8::Value> plv8_CursorClose(const Arguments& args);
 static Handle<v8::Value> plv8_ReturnNext(const Arguments& args);
 static Handle<v8::Value> plv8_Subtransaction(const Arguments& args);
 static Handle<v8::Value> plv8_FindFunction(const Arguments& args);
+static Handle<v8::Value> plv8_GetWindowObject(const Arguments& args);
+static Handle<v8::Value> plv8_WinGetPartitionLocal(const Arguments& args);
+static Handle<v8::Value> plv8_WinSetPartitionLocal(const Arguments& args);
+static Handle<v8::Value> plv8_WinGetCurrentPosition(const Arguments& args);
+static Handle<v8::Value> plv8_WinGetPartitionRowCount(const Arguments& args);
+static Handle<v8::Value> plv8_WinSetMarkPosition(const Arguments& args);
+static Handle<v8::Value> plv8_WinRowsArePeers(const Arguments& args);
+static Handle<v8::Value> plv8_WinGetFuncArgInPartition(const Arguments& args);
+static Handle<v8::Value> plv8_WinGetFuncArgInFrame(const Arguments& args);
+static Handle<v8::Value> plv8_WinGetFuncArgCurrent(const Arguments& args);
 static Handle<v8::Value> plv8_QuoteLiteral(const Arguments& args);
 static Handle<v8::Value> plv8_QuoteNullable(const Arguments& args);
 static Handle<v8::Value> plv8_QuoteIdent(const Arguments& args);
+
+/*
+ * Window function API allows to store partition-local memory, but
+ * the allocation is only once per partition.  maxlen represents
+ * the allocated size for this partition (if it's zero, the allocation
+ * has just happened).  Also v8 doesn't provide vaule serialization,
+ * so currently the object is JSON-ized and stored as a string.
+ */
+typedef struct window_storage
+{
+	size_t		maxlen;			/* allocated memory */
+	size_t		len;			/* the byte size of data */
+	char		data[1];		/* actual string (without null-termination */
+} window_storage;
 
 #if PG_VERSION_NUM < 90100
 /*
@@ -98,6 +122,7 @@ public:
 
 Persistent<ObjectTemplate> PlanTemplate;
 Persistent<ObjectTemplate> CursorTemplate;
+Persistent<ObjectTemplate> WindowObjectTemplate;
 
 static Handle<v8::Value>
 SPIResultToValue(int status)
@@ -166,6 +191,45 @@ SubTranBlock::exit(bool success)
 	SPI_restore_connection();
 }
 
+JSONObject::JSONObject()
+{
+	Handle<Context> context = Context::GetCurrent();
+	Handle<Object> global = context->Global();
+	m_json = global->Get(String::NewSymbol("JSON"))->ToObject();
+	if (m_json.IsEmpty())
+		throw js_error("JSON not found");
+}
+
+/*
+ * Call JSON.parse().  Currently this supports only one argument.
+ */
+Handle<v8::Value>
+JSONObject::Parse(Handle<v8::Value> str)
+{
+	Handle<Function> parse_func =
+		Handle<Function>::Cast(m_json->Get(String::NewSymbol("parse")));
+
+	if (parse_func.IsEmpty())
+		throw js_error("JSON.parse() not found");
+
+	return parse_func->Call(m_json, 1, &str);
+}
+
+/*
+ * Call JSON.stringify().  Currently this supports only one argument.
+ */
+Handle<v8::Value>
+JSONObject::Stringify(Handle<v8::Value> val)
+{
+	Handle<Function> stringify_func =
+		Handle<Function>::Cast(m_json->Get(String::NewSymbol("stringify")));
+
+	if (stringify_func.IsEmpty())
+		throw js_error("JSON.stringify() not found");
+
+	return stringify_func->Call(m_json, 1, &val);
+}
+
 void
 SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 {
@@ -178,6 +242,7 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	SetCallback(plv8, "return_next", plv8_ReturnNext, attrFull);
 	SetCallback(plv8, "subtransaction", plv8_Subtransaction, attrFull);
 	SetCallback(plv8, "find_function", plv8_FindFunction, attrFull);
+	SetCallback(plv8, "get_window_object", plv8_GetWindowObject, attrFull);
 	SetCallback(plv8, "quote_literal", plv8_QuoteLiteral, attrFull);
 	SetCallback(plv8, "quote_nullable", plv8_QuoteNullable, attrFull);
 	SetCallback(plv8, "quote_ident", plv8_QuoteIdent, attrFull);
@@ -816,6 +881,400 @@ plv8_FindFunction(const Arguments& args)
 	return func;
 }
 
+/*
+ * plv8.get_window_object()
+ * Returns window object in window functions, which provides window function API.
+ */
+static Handle<v8::Value>
+plv8_GetWindowObject(const Arguments& args)
+{
+	Handle<v8::Object>	self = args.This();
+	Handle<v8::Value>	fcinfo_value =
+			self->GetInternalField(PLV8_INTNL_FCINFO);
+
+	if (External::Unwrap(fcinfo_value) == NULL)
+		throw js_error("get_window_object called in wrong context");
+
+	if (WindowObjectTemplate.IsEmpty())
+	{
+		/* Initialize it if we haven't yet. */
+		Local<FunctionTemplate> base = FunctionTemplate::New();
+		base->SetClassName(String::NewSymbol("WindowObject"));
+		Local<ObjectTemplate> templ = base->InstanceTemplate();
+
+		/* We store fcinfo here. */
+		templ->SetInternalFieldCount(1);
+
+		/* Functions. */
+		SetCallback(templ, "get_partition_local", plv8_WinGetPartitionLocal);
+		SetCallback(templ, "set_partition_local", plv8_WinSetPartitionLocal);
+		SetCallback(templ, "get_current_position", plv8_WinGetCurrentPosition);
+		SetCallback(templ, "get_partition_row_count", plv8_WinGetPartitionRowCount);
+		SetCallback(templ, "set_mark_position", plv8_WinSetMarkPosition);
+		SetCallback(templ, "rows_are_peers", plv8_WinRowsArePeers);
+		SetCallback(templ, "get_func_arg_in_partition", plv8_WinGetFuncArgInPartition);
+		SetCallback(templ, "get_func_arg_in_frame", plv8_WinGetFuncArgInFrame);
+		SetCallback(templ, "get_func_arg_current", plv8_WinGetFuncArgCurrent);
+
+		/* Constants for get_func_in_XXX() */
+		templ->Set(String::NewSymbol("SEEK_CURRENT"), Int32::New(WINDOW_SEEK_CURRENT));
+		templ->Set(String::NewSymbol("SEEK_HEAD"), Int32::New(WINDOW_SEEK_HEAD));
+		templ->Set(String::NewSymbol("SEEK_TAIL"), Int32::New(WINDOW_SEEK_TAIL));
+
+		WindowObjectTemplate = Persistent<ObjectTemplate>::New(templ);
+	}
+
+	Local<v8::Object> js_winobj = WindowObjectTemplate->NewInstance();
+	js_winobj->SetInternalField(0, fcinfo_value);
+
+	return js_winobj;
+}
+
+/*
+ * Short-cut routine for window function API
+ */
+static inline WindowObject
+plv8_MyWindowObject(const Arguments& args)
+{
+	Handle<v8::Object>	self = args.This();
+	/* fcinfo is embedded in the internal field.  See plv8_GetWindowObject() */
+	Handle<v8::Value>	fcinfo_value = self->GetInternalField(0);
+
+	if (fcinfo_value.IsEmpty())
+		throw js_error("window function api called with wrong object");
+
+	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
+			External::Unwrap(fcinfo_value));
+	WindowObject winobj = PG_WINDOW_OBJECT();
+
+	if (!winobj)
+		throw js_error("window function api called with wrong object");
+	return winobj;
+}
+
+/*
+ * Short-cut routine for window function API
+ * Unfortunately, in the JS functino level we don't know the plv8 function
+ * argument information enough.  Thus, we obtain it from function expression.
+ */
+static inline plv8_type *
+plv8_MyArgType(const Arguments& args, int argno)
+{
+	Handle<v8::Object>	self = args.This();
+	Handle<v8::Value>	fcinfo_value = self->GetInternalField(0);
+
+	if (fcinfo_value.IsEmpty())
+		throw js_error("window function api called with wrong object");
+
+	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
+			External::Unwrap(fcinfo_value));
+
+	/* This is safe to call in C++ context (without PG_TRY). */
+	return get_plv8_type(fcinfo, argno);
+}
+
+/*
+ * winobj.get_partition_local([size])
+ * The default allocation size is 1K, but the caller can override this value
+ * by the argument at the first call.
+ */
+static Handle<v8::Value>
+plv8_WinGetPartitionLocal(const Arguments& args)
+{
+	WindowObject	winobj = plv8_MyWindowObject(args);
+	size_t			size;
+	window_storage *storage;
+
+	if (args.Length() < 1)
+		size = 1000; /* default 1K */
+	else
+		size = args[0]->Int32Value();
+
+	size += sizeof(size_t) * 2;
+
+	PG_TRY();
+	{
+		storage = (window_storage *) WinGetPartitionLocalMemory(winobj, size);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	/* If it's new, store the maximum size. */
+	if (storage->maxlen == 0)
+		storage->maxlen = size;
+
+	/* If nothing is stored, undefined is returned. */
+	if (storage->len == 0)
+		return Undefined();
+
+	/*
+	 * Currently we support only serializable JSON object to be stored.
+	 */
+	JSONObject JSON;
+	Handle<v8::Value> value = ToString(storage->data, storage->len);
+
+	return JSON.Parse(value);
+}
+
+/*
+ * winobj.set_partition_local(obj)
+ * If the storage has not been allocated, it's allocated based on the
+ * size of JSON-ized input string.
+ */
+static Handle<v8::Value>
+plv8_WinSetPartitionLocal(const Arguments& args)
+{
+	WindowObject	winobj = plv8_MyWindowObject(args);
+
+	if (args.Length() < 1)
+		return Undefined();
+
+	JSONObject JSON;
+	Handle<v8::Value> value = JSON.Stringify(args[0]);
+	CString str(value);
+	size_t str_size = strlen(str);
+	size_t size = str_size + sizeof(size_t) * 2;
+	window_storage *storage;
+
+	PG_TRY();
+	{
+		storage = (window_storage *) WinGetPartitionLocalMemory(winobj, size);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	if (storage->maxlen != 0 && storage->maxlen < size)
+	{
+		throw js_error("window local memory overflow");
+	}
+	else if (storage->maxlen == 0)
+	{
+		/* new allocation */
+		storage->maxlen = size;
+	}
+	storage->len = str_size;
+	memcpy(storage->data, str, str_size);
+
+	return Undefined();
+}
+
+/*
+ * winobj.get_current_position()
+ */
+static Handle<v8::Value>
+plv8_WinGetCurrentPosition(const Arguments& args)
+{
+	WindowObject	winobj = plv8_MyWindowObject(args);
+	int64			pos = 0;
+
+	PG_TRY();
+	{
+		pos = WinGetCurrentPosition(winobj);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return Integer::New(pos);
+}
+
+/*
+ * winobj.get_partition_row_count()
+ */
+static Handle<v8::Value>
+plv8_WinGetPartitionRowCount(const Arguments& args)
+{
+	WindowObject	winobj = plv8_MyWindowObject(args);
+	int64			pos = 0;
+
+	PG_TRY();
+	{
+		pos = WinGetPartitionRowCount(winobj);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return Integer::New(pos);
+}
+
+/*
+ * winobj.set_mark_pos(pos)
+ */
+static Handle<v8::Value>
+plv8_WinSetMarkPosition(const Arguments& args)
+{
+	WindowObject	winobj = plv8_MyWindowObject(args);
+	if (args.Length() < 1)
+		return Undefined();
+	int64		markpos = args[0]->IntegerValue();
+
+	PG_TRY();
+	{
+		WinSetMarkPosition(winobj, markpos);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return Undefined();
+}
+
+/*
+ * winobj.rows_are_peers(pos1, pos2)
+ */
+static Handle<v8::Value>
+plv8_WinRowsArePeers(const Arguments& args)
+{
+	WindowObject	winobj = plv8_MyWindowObject(args);
+	if (args.Length() < 2)
+		return Undefined();
+	int64		pos1 = args[0]->IntegerValue();
+	int64		pos2 = args[1]->IntegerValue();
+	bool		res = false;
+
+	PG_TRY();
+	{
+		res = WinRowsArePeers(winobj, pos1, pos2);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return Boolean::New(res);
+}
+
+/*
+ * winobj.get_func_arg_in_partition(argno, relpos, seektype, set_mark)
+ */
+static Handle<v8::Value>
+plv8_WinGetFuncArgInPartition(const Arguments& args)
+{
+	WindowObject	winobj = plv8_MyWindowObject(args);
+	/* Since we return undefined in "isout" case, throw if arg isn't enough. */
+	if (args.Length() < 4)
+		throw js_error("argument not enough");
+	int			argno = args[0]->Int32Value();
+	int			relpos = args[1]->Int32Value();
+	int			seektype = args[2]->Int32Value();
+	bool		set_mark = args[3]->BooleanValue();
+	bool		isnull, isout;
+	Datum		res;
+
+	PG_TRY();
+	{
+		res = WinGetFuncArgInPartition(winobj,
+									   argno,
+									   relpos,
+									   seektype,
+									   set_mark,
+									   &isnull,
+									   &isout);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	/* Return undefined to tell it's out of partition. */
+	if (isout)
+		return Undefined();
+
+	plv8_type *type = plv8_MyArgType(args, argno);
+
+	return ToValue(res, isnull, type);
+}
+
+/*
+ * winobj.get_func_arg_in_frame(argno, relpos, seektype, set_mark)
+ */
+static Handle<v8::Value>
+plv8_WinGetFuncArgInFrame(const Arguments& args)
+{
+	WindowObject	winobj = plv8_MyWindowObject(args);
+	/* Since we return undefined in "isout" case, throw if arg isn't enough. */
+	if (args.Length() < 4)
+		throw js_error("argument not enough");
+	int			argno = args[0]->Int32Value();
+	int			relpos = args[1]->Int32Value();
+	int			seektype = args[2]->Int32Value();
+	bool		set_mark = args[3]->BooleanValue();
+	bool		isnull, isout;
+	Datum		res;
+
+	PG_TRY();
+	{
+		res = WinGetFuncArgInFrame(winobj,
+								   argno,
+								   relpos,
+								   seektype,
+								   set_mark,
+								   &isnull,
+								   &isout);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	/* Return undefined to tell it's out of frame. */
+	if (isout)
+		return Undefined();
+
+	plv8_type *type = plv8_MyArgType(args, argno);
+
+	return ToValue(res, isnull, type);
+}
+
+/*
+ * winobj.get_func_arg_current(argno)
+ */
+static Handle<v8::Value>
+plv8_WinGetFuncArgCurrent(const Arguments& args)
+{
+	WindowObject	winobj = plv8_MyWindowObject(args);
+	if (args.Length() < 1)
+		return Undefined();
+	int			argno = args[0]->Int32Value();
+	bool		isnull;
+	Datum		res;
+
+	PG_TRY();
+	{
+		res = WinGetFuncArgCurrent(winobj,
+								   argno,
+								   &isnull);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	plv8_type *type = plv8_MyArgType(args, argno);
+
+	return ToValue(res, isnull, type);
+}
+
+/*
+ * plv8.quote_literal(str)
+ */
 static Handle<v8::Value>
 plv8_QuoteLiteral(const Arguments& args)
 {
@@ -837,6 +1296,9 @@ plv8_QuoteLiteral(const Arguments& args)
 	return ToString(result);
 }
 
+/*
+ * plv8.quote_nullable(str)
+ */
 static Handle<v8::Value>
 plv8_QuoteNullable(const Arguments& args)
 {
@@ -861,6 +1323,9 @@ plv8_QuoteNullable(const Arguments& args)
 	return ToString(result);
 }
 
+/*
+ * plv8.quote_ident(str)
+ */
 static Handle<v8::Value>
 plv8_QuoteIdent(const Arguments& args)
 {

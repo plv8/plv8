@@ -22,6 +22,7 @@ extern "C" {
 #include "fmgr.h"
 #include "mb/pg_wchar.h"
 #include "utils/tuplestore.h"
+#include "windowapi.h"
 }
 
 #ifdef _MSC_VER
@@ -31,9 +32,13 @@ extern "C" {
 #endif
 
 /* numbers for plv8 object internal field */
+/* Converter for SRF */
 #define PLV8_INTNL_CONV			1
+/* Tuplestore for SRF */
 #define PLV8_INTNL_TUPSTORE		2
-#define PLV8_INTNL_MAX			3
+/* FunctionCallInfo for window functions */
+#define PLV8_INTNL_FCINFO		3
+#define PLV8_INTNL_MAX			4
 
 enum Dialect{ PLV8_DIALECT_NONE, PLV8_DIALECT_COFFEE, PLV8_DIALECT_LIVESCRIPT };
 
@@ -126,10 +131,102 @@ private:
 	void	Init();
 };
 
+/*
+ * Provide JavaScript JSON object functionality.
+ */
+class JSONObject
+{
+private:
+	v8::Handle<v8::Object> m_json;
+
+public:
+	JSONObject();
+	v8::Handle<v8::Value> Parse(v8::Handle<v8::Value> str);
+	v8::Handle<v8::Value> Stringify(v8::Handle<v8::Value> val);
+};
+
+/*
+ * Check if this is a window function call.  If so, we store fcinfo
+ * in plv8 object for API to use it.  It would be possible to do it
+ * in the normal function cases, but currently nobody is using it
+ * and probably adds overhead.  We need a class because the destructor
+ * makes sure the restore happens.
+ */
+class WindowFunctionSupport
+{
+private:
+	WindowObject			m_winobj;
+	v8::Handle<v8::Object>	m_plv8obj;
+	v8::Handle<v8::Value>	m_prev_fcinfo;
+
+public:
+	WindowFunctionSupport(v8::Handle<v8::Context> context,
+						FunctionCallInfo fcinfo)
+	{
+		m_winobj = PG_WINDOW_OBJECT();
+		if (WindowObjectIsValid(m_winobj))
+		{
+			m_plv8obj = v8::Handle<v8::Object>::Cast(
+					context->Global()->Get(v8::String::NewSymbol("plv8")));
+			if (m_plv8obj.IsEmpty())
+				throw js_error("plv8 object not found");
+			/* Stash the current item, just in case of nested call */
+			m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO);
+			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO,
+					v8::External::Wrap(fcinfo));
+		}
+	}
+	bool IsWindowCall() { return WindowObjectIsValid(m_winobj); }
+	WindowObject GetWindowObject() { return m_winobj; }
+	~WindowFunctionSupport()
+	{
+		/* Restore the previous fcinfo if we saved. */
+		if (WindowObjectIsValid(m_winobj))
+		{
+			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO, m_prev_fcinfo);
+		}
+	}
+};
+
+/*
+ * In case this is nested via SPI, stash pre-registered converters
+ * for the previous SRF.  We need a class because the destructor makes
+ * sure the restore happens.
+ */
+class SRFSupport
+{
+private:
+	v8::Handle<v8::Object> m_plv8obj;
+	v8::Handle<v8::Value> m_prev_conv, m_prev_tupstore;
+
+public:
+	SRFSupport(v8::Handle<v8::Context> context,
+			   Converter *conv, Tuplestorestate *tupstore)
+	{
+		m_plv8obj = v8::Handle<v8::Object>::Cast(
+				context->Global()->Get(v8::String::NewSymbol("plv8")));
+		if (m_plv8obj.IsEmpty())
+			throw js_error("plv8 object not found");
+		m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV);
+		m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE);
+		m_plv8obj->SetInternalField(PLV8_INTNL_CONV,
+									v8::External::Wrap(conv));
+		m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE,
+									v8::External::Wrap(tupstore));
+	}
+	~SRFSupport()
+	{
+		/* Restore the previous items. */
+		m_plv8obj->SetInternalField(PLV8_INTNL_CONV, m_prev_conv);
+		m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, m_prev_tupstore);
+	}
+};
+
 extern v8::Local<v8::Function> find_js_function(Oid fn_oid);
 extern v8::Local<v8::Function> find_js_function_by_name(const char *signature);
 extern const char *FormatSPIStatus(int status) throw();
 extern v8::Handle<v8::Value> ThrowError(const char *message) throw();
+extern plv8_type *get_plv8_type(PG_FUNCTION_ARGS, int argno);
 
 // plv8_type.cc
 extern void plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt = NULL);

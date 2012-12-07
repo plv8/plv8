@@ -701,7 +701,7 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 	functyptype = get_typtype(proc->prorettype);
 
 	/* Disallow pseudotype result */
-	/* except for TRIGGER, RECORD, VOID or polymorphic types */
+	/* except for TRIGGER, RECORD, INTERNAL, VOID or polymorphic types */
 	if (functyptype == TYPTYPE_PSEUDO)
 	{
 		/* we assume OPAQUE with no arguments means a trigger */
@@ -710,6 +710,7 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 			is_trigger = true;
 		else if (proc->prorettype != RECORDOID &&
 			proc->prorettype != VOIDOID &&
+			proc->prorettype != INTERNALOID &&
 			!IsPolymorphicType(proc->prorettype))
 			ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -834,11 +835,13 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 		{
 			/*
 			 * Disallow non-polymorphic pseudotypes in arguments
-			 * (either IN or OUT)
+			 * (either IN or OUT).  Internal type is used to declare
+			 * js functions for find_function().
 			 */
 			for (int i = 0; i < nargs; i++)
 			{
 				if (get_typtype(argtypes[i]) == TYPTYPE_PSEUDO &&
+						argtypes[i] != INTERNALOID &&
 						!IsPolymorphicType(argtypes[i]))
 					ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

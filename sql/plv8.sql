@@ -173,6 +173,14 @@ $$
 LANGUAGE plv8;
 SELECT one_out(123);
 
+-- polymorphic types
+CREATE FUNCTION polymorphic(poly anyarray) returns anyelement AS
+$$
+    return poly[0];
+$$
+LANGUAGE plv8;
+SELECT polymorphic(ARRAY[10, 11]), polymorphic(ARRAY['foo', 'bar']);
+
 -- elog()
 CREATE FUNCTION test_elog(arg text) RETURNS void AS
 $$

@@ -132,7 +132,8 @@ extern const unsigned char livescript_binary_data[];
  * lower_case_functions are postgres-like C functions.
  * They could raise errors with elog/ereport(ERROR).
  */
-static plv8_proc *plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames) throw();
+static plv8_proc *plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo,
+		bool validate, char ***argnames) throw();
 static void plv8_xact_cb(XactEvent event, void *arg);
 
 /*
@@ -140,7 +141,7 @@ static void plv8_xact_cb(XactEvent event, void *arg);
  * They could raise errors with C++ throw statements, or never throw exceptions.
  */
 static plv8_exec_env *CreateExecEnv(Handle<Function> script);
-static plv8_proc *Compile(Oid fn_oid, MemoryContext fn_mcxt,
+static plv8_proc *Compile(Oid fn_oid, FunctionCallInfo fcinfo,
 					bool validate, bool is_trigger, Dialect dialect);
 static Local<Function> CompileFunction(const char *proname, int proarglen,
 					const char *proargs[], const char *prosrc,
@@ -280,7 +281,7 @@ common_pl_call_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 
 		if (!fcinfo->flinfo->fn_extra)
 		{
-			plv8_proc	   *proc = Compile(fn_oid, fcinfo->flinfo->fn_mcxt,
+			plv8_proc	   *proc = Compile(fn_oid, fcinfo,
 										   false, is_trigger, dialect);
 			proc->xenv = CreateExecEnv(proc->cache->function);
 			fcinfo->flinfo->fn_extra = proc;
@@ -700,7 +701,7 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 	functyptype = get_typtype(proc->prorettype);
 
 	/* Disallow pseudotype result */
-	/* except for TRIGGER, RECORD, or VOID */
+	/* except for TRIGGER, RECORD, VOID or polymorphic types */
 	if (functyptype == TYPTYPE_PSEUDO)
 	{
 		/* we assume OPAQUE with no arguments means a trigger */
@@ -708,7 +709,8 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 			(proc->prorettype == OPAQUEOID && proc->pronargs == 0))
 			is_trigger = true;
 		else if (proc->prorettype != RECORDOID &&
-			proc->prorettype != VOIDOID)
+			proc->prorettype != VOIDOID &&
+			!IsPolymorphicType(proc->prorettype))
 			ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("PL/v8 functions cannot return type %s",
@@ -722,7 +724,8 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 #ifdef ENABLE_DEBUGGER_SUPPORT
 		Locker				lock;
 #endif  // ENABLE_DEBUGGER_SUPPORT
-		plv8_proc	   *proc = Compile(fn_oid, fcinfo->flinfo->fn_mcxt,
+		/* Don't use validator's fcinfo */
+		plv8_proc	   *proc = Compile(fn_oid, NULL,
 									   true, is_trigger, dialect);
 		(void) CreateExecEnv(proc->cache->function);
 		/* the result of a validator is ignored */
@@ -753,7 +756,7 @@ plls_call_validator(PG_FUNCTION_ARGS) throw()
 }
 
 static plv8_proc *
-plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames) throw()
+plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnames) throw()
 {
 	HeapTuple			procTup;
 	plv8_proc_cache	   *cache;
@@ -829,10 +832,14 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 
 		if (validate)
 		{
-			/* Disallow pseudotypes in arguments (either IN or OUT) */
+			/*
+			 * Disallow non-polymorphic pseudotypes in arguments
+			 * (either IN or OUT)
+			 */
 			for (int i = 0; i < nargs; i++)
 			{
-				if (get_typtype(argtypes[i]) == TYPTYPE_PSEUDO)
+				if (get_typtype(argtypes[i]) == TYPTYPE_PSEUDO &&
+						!IsPolymorphicType(argtypes[i]))
 					ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("PL/v8 functions cannot accept type %s",
@@ -870,13 +877,28 @@ plv8_get_proc(Oid fn_oid, MemoryContext fn_mcxt, bool validate, char ***argnames
 		cache->nargs = inargs;
 	}
 
-	plv8_proc *proc = (plv8_proc *) MemoryContextAllocZero(fn_mcxt,
+	MemoryContext mcxt = CurrentMemoryContext;
+	if (fcinfo)
+		mcxt = fcinfo->flinfo->fn_mcxt;
+
+	plv8_proc *proc = (plv8_proc *) MemoryContextAllocZero(mcxt,
 		offsetof(plv8_proc, argtypes) + sizeof(plv8_type) * cache->nargs);
 
 	proc->cache = cache;
 	for (int i = 0; i < cache->nargs; i++)
-		plv8_fill_type(&proc->argtypes[i], cache->argtypes[i], fn_mcxt);
-	plv8_fill_type(&proc->rettype, cache->rettype, fn_mcxt);
+	{
+		Oid		argtype = cache->argtypes[i];
+		/* Resolve polymorphic types, if this is an actual call context. */
+		if (fcinfo && IsPolymorphicType(argtype))
+			argtype = get_fn_expr_argtype(fcinfo->flinfo, i);
+		plv8_fill_type(&proc->argtypes[i], argtype, mcxt);
+	}
+
+	Oid		rettype = cache->rettype;
+	/* Resolve polymorphic return type if this is an actual call context. */
+	if (fcinfo && IsPolymorphicType(rettype))
+		rettype = get_fn_expr_rettype(fcinfo->flinfo);
+	plv8_fill_type(&proc->rettype, rettype, mcxt);
 
 	return proc;
 }
@@ -983,15 +1005,20 @@ CompileDialect(const char *src, Dialect dialect)
 	return cresult;
 }
 
+/*
+ * fcinfo should be passed if this is an actual function call context, where
+ * we can resolve polymorphic types and use function's memory context.
+ */
 static plv8_proc *
-Compile(Oid fn_oid, MemoryContext fn_mcxt, bool validate, bool is_trigger, Dialect dialect)
+Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger,
+		Dialect dialect)
 {
 	plv8_proc  *proc;
 	char	  **argnames;
 
 	PG_TRY();
 	{
-		proc = plv8_get_proc(fn_oid, fn_mcxt, validate, &argnames);
+		proc = plv8_get_proc(fn_oid, fcinfo, validate, &argnames);
 	}
 	PG_CATCH();
 	{
@@ -1129,7 +1156,7 @@ find_js_function(Oid fn_oid)
 
 	try
 	{
-		plv8_proc		   *proc = Compile(fn_oid,CurrentMemoryContext,
+		plv8_proc		   *proc = Compile(fn_oid, NULL,
 										   true, false,
 										   (Dialect) (PLV8_DIALECT_NONE + langno));
 

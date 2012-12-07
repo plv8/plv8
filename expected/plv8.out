@@ -317,6 +317,18 @@ SELECT one_out(123);
  ABC123
 (1 row)
 
+-- polymorphic types
+CREATE FUNCTION polymorphic(poly anyarray) returns anyelement AS
+$$
+    return poly[0];
+$$
+LANGUAGE plv8;
+SELECT polymorphic(ARRAY[10, 11]), polymorphic(ARRAY['foo', 'bar']);
+ polymorphic | polymorphic 
+-------------+-------------
+          10 | foo
+(1 row)
+
 -- elog()
 CREATE FUNCTION test_elog(arg text) RETURNS void AS
 $$

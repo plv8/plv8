@@ -18,8 +18,11 @@ Implemented features are as follows.
 - Subtransaction
 - Utility functions
 - Window function API
+- Typed array
+- Remote debugger
 - Runtime environment separation across users in the same session
 - Start-up procedure
+- Dialects
 
 Scalar function calls
 ---------------------
@@ -155,12 +158,15 @@ automatically.  If the desired database type is one of
 - date
 - timestamp
 - timestamptz
+- bytea
 - json (>= 9.2)
 
 and the JS value looks compatible, then the conversion succeeds.  Otherwise,
 PL/v8 tries to convert them via cstring representation.  An array type is
 supported only if the dimention is one.  A JS object will be mapped to
-a tuple when applicable.
+a tuple when applicable.  In addition to these types, PL/v8 supports
+polymorphic types such like anyelement and anyarray.  Conversion of bytea is
+a little different story.  See TypedArray section.
 
 Database access via SPI including prepared statements and cursors
 -----------------------------------------------------------------
@@ -293,7 +299,9 @@ been registered in the database.
 With plv8.find_function(), you can look up other plv8 functions.  If they are
 not the plv8 function, it errors out.  The function signature parameter to
 plv8.find_function() is either of regproc (function name only) or regprocedure
-(function name with argument types).
+(function name with argument types).  You can make use of internal type for
+arguments and void type for return type for the pure JavaScript function to
+make sure any invocation from SQL statement should not happen.
 
 The plv8 object provides version string as `plv8.version`.  This string
 corresponds to plv8 module version.  Note this is not the extension version.
@@ -360,6 +368,54 @@ test, which implements most of the native window functions.  For the general
 information of the user-defined window function, see the CREATE FUNCTION
 page of the PostgreSQL manual.
 
+Typed array
+-----------
+
+The typed array is something v8 provides to allow fast access to native memory,
+mainly for the purpose of their canvas support in browsers.  PL/v8 uses this
+to map bytea and various array types to JavaScript array.  In case of bytea,
+you can access each byte as an array of unsigned bytes.  For
+int2/int4/float4/float8 array type, PL/v8 provides direct access to each
+element by using PL/v8 domain types.
+
+- plv8_int2array maps int2[]
+- plv8_int4array maps int4[]
+- plv8_float4array maps float4[]
+- plv8_float8array maps float8[]
+
+These are only annotations that tell PL/v8 to use fast access method instead of
+regular one.  For these typed arrays, only 1-dimensional array without NULL
+element.  Also, there is currently no way to create such typed array inside
+PL/v8 functions.  Only arguments can be typed array.  You can modify the element
+and return the value.  An example for these types are as follows.
+
+  CREATE FUNCTION int4sum(ary plv8_int4array) RETURNS int8 AS $$
+    var sum = 0;
+    for (var i = 0; i < ary.length; i++) {
+      sum += ary[i];
+    }
+    return sum;
+  $$ LANGUAGE plv8 IMMUTABLE STRICT;
+  
+  SELECT int4sum(ARRAY[1, 2, 3, 4, 5]);
+   int4sum 
+  ---------
+        15
+  (1 row)
+
+Remote debugger
+---------------
+
+PL/v8 supports v8 remote debugger.  You need to enable it at the compile time
+to pass ENABLE_DEBUGGER_SUPPORT to `make`.  `make static` will automatically
+turns it on.  If enabled, and once PL/v8 module is loaded (and the execution
+engine is initialized, PL/v8 accepts a remote debugger connection.  If you
+have `d8` from v8 package, run with `--remote-debug --debug-port=35432` to
+attach the functions.  If you want to change the remote debugger port, there
+is a GUC `plv8.debugger_port` to set the port number. You can also try
+`debugger` statement inside functions to set a breakpoint.  For more details
+of v8 remote debugger, see v8 documentation.
+
 Runtime environment separation across users in the same session
 ---------------------------------------------------------------
 
@@ -395,3 +451,15 @@ visible from any subsequent function as global variables.
 
 Remember CREATE FUNCTION also starts the plv8 runtime environment, so make sure
 to SET this GUC before any plv8 actions including CREATE FUNCTION.
+
+Dialects
+--------
+
+This module also contains some dialect supports.  Currently, we have two dialects
+are supported.
+
+- CoffeeScript (plcoffee)
+- LiveScript (plls)
+
+With PostgreSQL 9.1 or above, you are able to load tohse dialects via CREATE
+EXTENSION command.

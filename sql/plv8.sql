@@ -181,6 +181,19 @@ $$
 LANGUAGE plv8;
 SELECT polymorphic(ARRAY[10, 11]), polymorphic(ARRAY['foo', 'bar']);
 
+-- typed array
+CREATE FUNCTION fastsum(ary plv8_int4array) RETURNS int8 AS
+$$
+    sum = 0;
+    for (var i = 0; i < ary.length; i++) {
+      sum += ary[i];
+    }
+    return sum;
+$$
+LANGUAGE plv8 IMMUTABLE STRICT;
+SELECT fastsum(ARRAY[1, 2, 3, 4, 5]);
+SELECT fastsum(ARRAY[NULL, 2]);
+
 -- elog()
 CREATE FUNCTION test_elog(arg text) RETURNS void AS
 $$

@@ -61,59 +61,61 @@ plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt)
 	get_type_category_preferred(typid, &type->category, &ispreferred);
 	get_typlenbyvalalign(typid, &type->len, &type->byval, &type->align);
 
+	if (get_typtype(typid) == TYPTYPE_DOMAIN)
+	{
+		HeapTuple	tp;
+		Form_pg_type typtup;
+
+#if PG_VERSION_NUM < 90100
+		tp = SearchSysCache(TYPEOID, ObjectIdGetDatum(typid), 0, 0, 0);
+#else
+		tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
+#endif
+		if (HeapTupleIsValid(tp))
+		{
+			/*
+			 * Check if the type is the external array types.
+			 */
+			typtup = (Form_pg_type) GETSTRUCT(tp);
+			if (strcmp(NameStr(typtup->typname),
+						"plv8_int2array") == 0)
+			{
+				type->ext_array = kExternalShortArray;
+			}
+			else if (strcmp(NameStr(typtup->typname),
+						"plv8_int4array") == 0)
+			{
+				type->ext_array = kExternalIntArray;
+			}
+			else if (strcmp(NameStr(typtup->typname),
+						"plv8_float4array") == 0)
+			{
+				type->ext_array = kExternalFloatArray;
+			}
+			else if (strcmp(NameStr(typtup->typname),
+						"plv8_float8array") == 0)
+			{
+				type->ext_array = kExternalDoubleArray;
+			}
+
+			ReleaseSysCache(tp);
+		}
+		else
+			elog(ERROR, "cache lookup failed for type %d", typid);
+
+		if (type->ext_array)
+			return;
+
+		/* If not, do as usual. */
+	}
+
 	if (type->category == TYPCATEGORY_ARRAY)
 	{
 		Oid      elemid = get_element_type(typid);
 
 		if (elemid == InvalidOid)
-		{
-			HeapTuple	tp;
-			Form_pg_type typtup;
-
-#if PG_VERSION_NUM < 90100
-			tp = SearchSysCache(TYPEOID, ObjectIdGetDatum(typid), 0, 0, 0);
-#else
-			tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
-#endif
-			if (HeapTupleIsValid(tp))
-			{
-				/*
-				 * Check if the type is the external array types.
-				 */
-				typtup = (Form_pg_type) GETSTRUCT(tp);
-				if (strcmp(NameStr(typtup->typname),
-							"plv8_int2array") == 0)
-				{
-					type->ext_array = kExternalShortArray;
-				}
-				else if (strcmp(NameStr(typtup->typname),
-							"plv8_int4array") == 0)
-				{
-					type->ext_array = kExternalIntArray;
-				}
-				else if (strcmp(NameStr(typtup->typname),
-							"plv8_float4array") == 0)
-				{
-					type->ext_array = kExternalFloatArray;
-				}
-				else if (strcmp(NameStr(typtup->typname),
-							"plv8_float8array") == 0)
-				{
-					type->ext_array = kExternalDoubleArray;
-				}
-
-				ReleaseSysCache(tp);
-			}
-
-			if (type->ext_array)
-				return;
-
-			/*
-			 * Otherwise, we don't know how to handle it.
-			 */
 			ereport(ERROR,
 				(errmsg("cannot determine element type of array: %u", typid)));
-		}
 
 		type->typid = elemid;
 		get_typlenbyvalalign(type->typid, &type->len, &type->byval, &type->align);

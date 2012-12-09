@@ -1,5 +1,9 @@
 Revision history for plv8
 
+1.2.1       2012-12-08
+            - Fix a crash in returning array value from array-return function.
+            - Fix trigger so that returned NULL can be handled correctly.
+
 1.2.0       2012-07-20
             - Check the field names match for SRFs.
             - Fix EpochToDate to handle non integer timestamp case.

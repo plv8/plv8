@@ -1,5 +1,19 @@
 Revision history for plv8
 
+1.3.0       2012-12-08
+            - Make two dialects (plcoffee, plls) official sub-extensions.
+            - Implement builtin json type conversion.
+            - Static build and automatic v8 build via 'static' target.
+            - Implement v8's remote debugger if enabled.
+            - Implement bytea type conversion and typed array.
+            - Allow polymorphic and internal types in argument and return types.
+            - Support user defined window functions.
+            - Potential bug fixes.
+
+1.2.1       2012-12-08
+            - Fix a crash in returning array value from array-return function.
+            - Fix trigger so that returned NULL can be handled correctly.
+
 1.2.0       2012-07-20
             - Check the field names match for SRFs.
             - Fix EpochToDate to handle non integer timestamp case.

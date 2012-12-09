@@ -2,7 +2,7 @@
     "name": "plv8",
     "abstract": "A procedural language in JavaScript powered by V8",
     "description": "plv8 is a trusted procedural language that is safe to use, fast to run and easy to develop.",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "maintainer": [
         "Hitoshi Harada <umi.tanuki@gmail.com>",
         "Andrew Dunstan <AMDunstan@gmail.com>",

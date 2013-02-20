@@ -41,7 +41,11 @@ REGRESS = init-extension plv8 inline json startup_pre startup varparam json_conv
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif
+
 SHLIB_LINK += -lv8
+ifdef V8_OUTDIR
+SHLIB_LINK += -L$(V8_OUTDIR)
+endif
 
 # v8's remote debugger is optional at the moment, since we don't know
 # how much of the v8 installation is built with debugger enabled.
@@ -50,6 +54,10 @@ OPT_ENABLE_DEBUGGER_SUPPORT = -DENABLE_DEBUGGER_SUPPORT
 endif
 OPTFLAGS = -O2
 CCFLAGS = -Wall $(OPTFLAGS) $(OPT_ENABLE_DEBUGGER_SUPPORT)
+
+ifdef V8_SRCDIR
+override CPPFLAGS += -I$(V8_SRCDIR)/include
+endif
 
 all:
 

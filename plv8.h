@@ -173,7 +173,7 @@ public:
 			/* Stash the current item, just in case of nested call */
 			m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO);
 			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO,
-					v8::External::Wrap(fcinfo));
+					v8::External::New(fcinfo));
 		}
 	}
 	bool IsWindowCall() { return WindowObjectIsValid(m_winobj); }
@@ -210,9 +210,9 @@ public:
 		m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV);
 		m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE);
 		m_plv8obj->SetInternalField(PLV8_INTNL_CONV,
-									v8::External::Wrap(conv));
+									v8::External::New(conv));
 		m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE,
-									v8::External::Wrap(tupstore));
+									v8::External::New(tupstore));
 	}
 	~SRFSupport()
 	{

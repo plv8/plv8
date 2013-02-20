@@ -88,7 +88,7 @@ quote_literal_cstr(const char *rawstr)
 static inline Local<v8::Value>
 WrapCallback(InvocationCallback func)
 {
-	return External::Wrap(
+	return External::New(
 			reinterpret_cast<void *>(
 				reinterpret_cast<uintptr_t>(func)));
 }
@@ -97,7 +97,7 @@ static inline InvocationCallback
 UnwrapCallback(Handle<v8::Value> value)
 {
 	return reinterpret_cast<InvocationCallback>(
-			reinterpret_cast<uintptr_t>(External::Unwrap(value)));
+			reinterpret_cast<uintptr_t>(External::Cast(*value)->Value()));
 }
 
 static inline void
@@ -534,11 +534,8 @@ plv8_Prepare(const Arguments &args)
 	}
 
 	Local<v8::Object> result = PlanTemplate->NewInstance();
-	result->SetInternalField(0, External::Wrap(saved));
-#if PG_VERSION_NUM >= 90000
-	if (parstate)
-		result->SetInternalField(1, External::Wrap(parstate));
-#endif
+	result->SetInternalField(0, External::New(saved));
+	result->SetInternalField(1, External::New(parstate));
 
 	return result;
 }
@@ -558,7 +555,7 @@ plv8_PlanCursor(const Arguments &args)
 	Portal				cursor;
 	plv8_param_state   *parstate = NULL;
 
-	plan = static_cast<SPIPlanPtr>(External::Unwrap(self->GetInternalField(0)));
+	plan = static_cast<SPIPlanPtr>(self->GetPointerFromInternalField(0));
 	/* XXX: Add plan validation */
 
 	if (args.Length() > 0 && args[0]->IsArray())
@@ -571,7 +568,7 @@ plv8_PlanCursor(const Arguments &args)
 	 * If the plan has the variable param info, use it.
 	 */
 	parstate = static_cast<plv8_param_state *>(
-			External::Unwrap(self->GetInternalField(1)));
+			self->GetPointerFromInternalField(1));
 
 	if (parstate)
 		argcount = parstate->numParams;
@@ -665,7 +662,7 @@ plv8_PlanExecute(const Arguments &args)
 	int					status;
 	plv8_param_state   *parstate = NULL;
 
-	plan = static_cast<SPIPlanPtr>(External::Unwrap(self->GetInternalField(0)));
+	plan = static_cast<SPIPlanPtr>(self->GetPointerFromInternalField(0));
 	/* XXX: Add plan validation */
 
 	if (args.Length() > 0 && args[0]->IsArray())
@@ -677,8 +674,8 @@ plv8_PlanExecute(const Arguments &args)
 	/*
 	 * If the plan has the variable param info, use it.
 	 */
-	parstate = static_cast<plv8_param_state *> (
-			External::Unwrap(self->GetInternalField(1)));
+	parstate = static_cast<plv8_param_state *>(
+			self->GetPointerFromInternalField(1));
 
 	if (parstate)
 		argcount = parstate->numParams;
@@ -752,19 +749,19 @@ plv8_PlanFree(const Arguments &args)
 	plv8_param_state   *parstate;
 	int					status = 0;
 
-	plan = static_cast<SPIPlanPtr>(External::Unwrap(self->GetInternalField(0)));
+	plan = static_cast<SPIPlanPtr>(self->GetPointerFromInternalField(0));
 
 	if (plan)
 		status = SPI_freeplan(plan);
 
-	self->SetInternalField(0, External::Wrap(0));
+	self->SetInternalField(0, External::New(0));
 
-	parstate = static_cast<plv8_param_state *> (
-			External::Unwrap(self->GetInternalField(1)));
+	parstate = static_cast<plv8_param_state *>(
+			self->GetPointerFromInternalField(1));
 
 	if (parstate)
 		pfree(parstate);
-	self->SetInternalField(1, External::Wrap(0));
+	self->SetInternalField(1, External::New(0));
 
 	return Int32::New(status);
 }
@@ -819,13 +816,14 @@ static Handle<v8::Value>
 plv8_ReturnNext(const Arguments& args)
 {
 	Handle<v8::Object>	self = args.This();
-
-	if (self->GetInternalField(PLV8_INTNL_CONV).IsEmpty())
-		throw js_error("return_next called in context that cannot accept a set");
 	Converter *conv = static_cast<Converter *>(
-			External::Unwrap(self->GetInternalField(PLV8_INTNL_CONV)));
+			self->GetPointerFromInternalField(PLV8_INTNL_CONV));
+
+	if (conv == NULL)
+		throw js_error("return_next called in context that cannot accept a set");
+
 	Tuplestorestate *tupstore = static_cast<Tuplestorestate *>(
-			External::Unwrap(self->GetInternalField(PLV8_INTNL_TUPSTORE)));
+			self->GetPointerFromInternalField(PLV8_INTNL_TUPSTORE));
 
 	conv->ToDatum(args[0], tupstore);
 
@@ -893,7 +891,7 @@ plv8_GetWindowObject(const Arguments& args)
 	Handle<v8::Value>	fcinfo_value =
 			self->GetInternalField(PLV8_INTNL_FCINFO);
 
-	if (External::Unwrap(fcinfo_value) == NULL)
+	if (!fcinfo_value->IsExternal())
 		throw js_error("get_window_object called in wrong context");
 
 	if (WindowObjectTemplate.IsEmpty())
@@ -939,13 +937,12 @@ plv8_MyWindowObject(const Arguments& args)
 {
 	Handle<v8::Object>	self = args.This();
 	/* fcinfo is embedded in the internal field.  See plv8_GetWindowObject() */
-	Handle<v8::Value>	fcinfo_value = self->GetInternalField(0);
+	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
+			self->GetPointerFromInternalField(0));
 
-	if (fcinfo_value.IsEmpty())
+	if (fcinfo == NULL)
 		throw js_error("window function api called with wrong object");
 
-	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
-			External::Unwrap(fcinfo_value));
 	WindowObject winobj = PG_WINDOW_OBJECT();
 
 	if (!winobj)
@@ -962,13 +959,11 @@ static inline plv8_type *
 plv8_MyArgType(const Arguments& args, int argno)
 {
 	Handle<v8::Object>	self = args.This();
-	Handle<v8::Value>	fcinfo_value = self->GetInternalField(0);
-
-	if (fcinfo_value.IsEmpty())
-		throw js_error("window function api called with wrong object");
-
 	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
-			External::Unwrap(fcinfo_value));
+			self->GetPointerFromInternalField(0));
+
+	if (fcinfo == NULL)
+		throw js_error("window function api called with wrong object");
 
 	/* This is safe to call in C++ context (without PG_TRY). */
 	return get_plv8_type(fcinfo, argno);

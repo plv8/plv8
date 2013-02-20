@@ -193,7 +193,7 @@ CreateExternalArray(void *data, ExternalArrayType array_type, int byte_size,
 	array->SetIndexedPropertiesToExternalArrayData(
 			data, array_type, length);
 	array->Set(String::New("length"), Int32::New(length), ReadOnly);
-	array->SetInternalField(0, External::Wrap(DatumGetPointer(datum)));
+	array->SetInternalField(0, External::New(DatumGetPointer(datum)));
 
 	return array;
 }
@@ -209,7 +209,7 @@ ExtractExternalArrayDatum(Handle<v8::Value> value)
 		Handle<Object> object = Handle<Object>::Cast(value);
 		if (object->GetIndexedPropertiesExternalArrayData())
 		{
-			return External::Unwrap(object->GetInternalField(0));
+			return object->GetPointerFromInternalField(0);
 		}
 	}
 

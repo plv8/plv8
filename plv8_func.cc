@@ -299,6 +299,7 @@ value_get_datum(Handle<v8::Value> value, Oid typid, char *isnull)
 			datum = ToDatum(value, &IsNull, &typinfo);
 		}
 		catch (js_error& e){ e.rethrow(); }
+		catch (pg_error& e){ e.rethrow(); }
 		*isnull = (IsNull ?  'n' : ' ');
 		return datum;
 	}

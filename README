@@ -14,7 +14,10 @@ plv8 is tested with:
 - V8: version 3.14.5
 - g++: version 4.5.1
 
-Also all tools that PostgreSQL and V8 require to be built are required.
+It is also known to work with some older versions of gcc and v8.
+
+Also all tools that PostgreSQL and V8 require to be built are required if you
+are building those from source.
 
 INSTALL
 -------

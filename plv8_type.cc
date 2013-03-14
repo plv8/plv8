@@ -209,7 +209,7 @@ ExtractExternalArrayDatum(Handle<v8::Value> value)
 		Handle<Object> object = Handle<Object>::Cast(value);
 		if (object->GetIndexedPropertiesExternalArrayData())
 		{
-			return object->GetPointerFromInternalField(0);
+			return object->GetAlignedPointerFromInternalField(0);
 		}
 	}
 

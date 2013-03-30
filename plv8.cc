@@ -984,7 +984,7 @@ CompileDialect(const char *src, Dialect dialect)
 	Local<Object>	compiler = Local<Object>::Cast(context->Global()->Get(key));
 	Local<Function>	func = Local<Function>::Cast(
 			compiler->Get(String::NewSymbol("compile")));
-	int		nargs = 1;
+	const int		nargs = 1;
 	Handle<v8::Value>	args[nargs];
 
 	args[0] = ToString(src);

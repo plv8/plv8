@@ -165,6 +165,9 @@ SubTranBlock::SubTranBlock()
 void
 SubTranBlock::enter()
 {
+	if (!IsTransactionOrTransactionBlock())
+		throw js_error("out of transaction");
+
 	m_resowner = CurrentResourceOwner;
 	m_mcontext = CurrentMemoryContext;
 	BeginInternalSubTransaction(NULL);

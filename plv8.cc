@@ -1376,7 +1376,8 @@ Converter::Converter(TupleDesc tupdesc) :
 	m_tupdesc(tupdesc),
 	m_colnames(tupdesc->natts),
 	m_coltypes(tupdesc->natts),
-	m_is_scalar(false)
+	m_is_scalar(false),
+	m_memcontext(NULL)
 {
 	Init();
 }
@@ -1385,9 +1386,36 @@ Converter::Converter(TupleDesc tupdesc, bool is_scalar) :
 	m_tupdesc(tupdesc),
 	m_colnames(tupdesc->natts),
 	m_coltypes(tupdesc->natts),
-	m_is_scalar(is_scalar)
+	m_is_scalar(is_scalar),
+	m_memcontext(NULL)
 {
 	Init();
+}
+
+Converter::~Converter()
+{
+	if (m_memcontext != NULL)
+	{
+		MemoryContext ctx = CurrentMemoryContext;
+
+		PG_TRY();
+		{
+			MemoryContextDelete(m_memcontext);
+		}
+		PG_CATCH();
+		{
+			ErrorData	   *edata;
+
+			MemoryContextSwitchTo(ctx);
+			// don't throw out from deconstructor
+			edata = CopyErrorData();
+			elog(WARNING, "~Converter: %s", edata->message);
+			FlushErrorState();
+			FreeErrorData(edata);
+		}
+		PG_END_TRY();
+		m_memcontext = NULL;
+	}
 }
 
 void
@@ -1398,7 +1426,16 @@ Converter::Init()
 		m_colnames[c] = ToString(NameStr(m_tupdesc->attrs[c]->attname));
 		PG_TRY();
 		{
-			plv8_fill_type(&m_coltypes[c], m_tupdesc->attrs[c]->atttypid, NULL);
+			if (m_memcontext == NULL)
+				m_memcontext = AllocSetContextCreate(
+									CurrentMemoryContext,
+									"ConverterContext",
+									ALLOCSET_SMALL_MINSIZE,
+									ALLOCSET_SMALL_INITSIZE,
+									ALLOCSET_SMALL_MAXSIZE);
+			plv8_fill_type(&m_coltypes[c],
+						   m_tupdesc->attrs[c]->atttypid,
+						   m_memcontext);
 		}
 		PG_CATCH();
 		{

@@ -548,6 +548,9 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 	for (int i = 0; i < nelems; i++)
 		result->Set(i, ToValue(values[i], nulls[i], &base));
 
+	pfree(values);
+	pfree(nulls);
+
 	return result;
 }
 

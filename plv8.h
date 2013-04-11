@@ -118,10 +118,12 @@ private:
 	std::vector< v8::Handle<v8::String> >	m_colnames;
 	std::vector< plv8_type >				m_coltypes;
 	bool									m_is_scalar;
+	MemoryContext							m_memcontext;
 
 public:
 	Converter(TupleDesc tupdesc);
 	Converter(TupleDesc tupdesc, bool is_scalar);
+	~Converter();
 	v8::Local<v8::Object> ToValue(HeapTuple tuple);
 	Datum	ToDatum(v8::Handle<v8::Value> value, Tuplestorestate *tupstore = NULL);
 

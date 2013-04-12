@@ -128,18 +128,18 @@ static:
 # available everywhere.  Since this integrity matters only developers,
 # we just check it if they are available.  We may come up with a better
 # solution to have it in one place in the future.
-META_VER := $(shell v8 -e 'print(JSON.parse(read("META.json")).version)' 2>/dev/null)
+META_VER = $(shell v8 -e 'print(JSON.parse(read("META.json")).version)' 2>/dev/null)
 ifndef META_VER
-META_VER := $(shell d8 -e 'print(JSON.parse(read("META.json")).version)' 2>/dev/null)
+META_VER = $(shell d8 -e 'print(JSON.parse(read("META.json")).version)' 2>/dev/null)
 endif
 ifndef META_VER
-META_VER := $(shell lsc -e 'console.log(JSON.parse(require("fs").readFileSync("META.json")).version)' 2>/dev/null)
+META_VER = $(shell lsc -e 'console.log(JSON.parse(require("fs").readFileSync("META.json")).version)' 2>/dev/null)
 endif
 ifndef META_VER
-META_VER := $(shell coffee -e 'console.log(JSON.parse(require("fs").readFileSync("META.json")).version)' 2>/dev/null)
+META_VER = $(shell coffee -e 'console.log(JSON.parse(require("fs").readFileSync("META.json")).version)' 2>/dev/null)
 endif
 ifndef META_VER
-META_VER := $(shell node -e 'console.log(JSON.parse(require("fs").readFileSync("META.json")).version)')
+META_VER = $(shell node -e 'console.log(JSON.parse(require("fs").readFileSync("META.json")).version)' 2>/dev/null)
 endif
 
 integritycheck:

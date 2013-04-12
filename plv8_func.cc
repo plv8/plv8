@@ -786,7 +786,15 @@ plv8_CursorFetch(const Arguments &args)
 		throw js_error("cannot find cursor");
 
 	/* XXX: get the argument */
-	SPI_cursor_fetch(cursor, true, 1);
+	PG_TRY();
+	{
+		SPI_cursor_fetch(cursor, true, 1);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
 
 	if (SPI_processed == 1)
 	{
@@ -810,7 +818,15 @@ plv8_CursorClose(const Arguments &args)
 	if (!cursor)
 		throw js_error("cannot find cursor");
 
-	SPI_cursor_close(cursor);
+	PG_TRY();
+	{
+		SPI_cursor_close(cursor);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
 
 	return Int32::New(cursor ? 1 : 0);
 }

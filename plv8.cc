@@ -381,7 +381,7 @@ DoCall(Handle<Function> fn, Handle<Object> receiver,
 	TryCatch		try_catch;
 
 	if (SPI_connect() != SPI_OK_CONNECT)
-		throw js_error(_("could not connect to SPI manager"));
+		throw js_error("could not connect to SPI manager");
 	Local<v8::Value> result = fn->Call(receiver, nargs, args);
 	int	status = SPI_finish();
 
@@ -1217,8 +1217,8 @@ FormatSPIStatus(int status) throw()
 			return "SPI_ERROR_OPUNKNOWN";
 		case SPI_ERROR_UNCONNECTED:
 		case SPI_ERROR_TRANSACTION:
-			return _("current transaction is aborted, "
-					 "commands ignored until end of transaction block");
+			return "current transaction is aborted, "
+				   "commands ignored until end of transaction block";
 		case SPI_ERROR_CURSOR:
 			return "SPI_ERROR_CURSOR";
 		case SPI_ERROR_ARGUMENT:
@@ -1233,7 +1233,7 @@ FormatSPIStatus(int status) throw()
 			return "SPI_ERROR_TYPUNKNOWN";
 		default:
 			snprintf(private_buf, sizeof(private_buf),
-				_("SPI_ERROR: %d"), status);
+				"SPI_ERROR: %d", status);
 			return private_buf;
 	}
 }

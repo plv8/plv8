@@ -1,5 +1,14 @@
 Revision history for plv8
 
+1.4.0       2013-04-29
+            - Implement fetch(n) and move(n).
+            - Fix a bug around type conversion.
+            - Support recent version of v8.
+            - Disallow use of plv8.execute() when outside of transaction.
+            - Fix some memory leaks.
+            - Remove use of gettext().
+            - Upgrade LiveScript to 1.1.1.
+
 1.3.0       2012-12-08
             - Make two dialects (plcoffee, plls) official sub-extensions.
             - Implement builtin json type conversion.

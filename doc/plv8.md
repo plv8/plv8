@@ -182,6 +182,9 @@ returned value is an integer that represents number of affected rows.
     var json_result = plv8.execute( 'SELECT * FROM tbl' );
     var num_affected = plv8.execute( 'DELETE FROM tbl WHERE price > $1', [ 1000 ] );
 
+Note this function and similar are not allowed outside of transaction,
+which can be the case when using the remote debugger.
+
 ### plv8.prepare( sql, [, typenames] ) ###
 
 Opens a prepared statement.  The `typename` parameter is an array where

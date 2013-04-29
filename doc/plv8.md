@@ -227,10 +227,16 @@ before leaving the function.
 
 Frees the prepared statement.
 
-### Cursor.fetch() ###
+### Cursor.fetch( [nrows] ) ###
 
-Fetches a row from the cursor and return as an object (note: not an array.)
-Fetching more than one row, and move() method are currently not implemented.
+When `nrows` parameter is omitted, fetches a row from the cursor and return
+as an object (note: not an array.)  If specified, fetches as many rows as
+the parameters up to exceeding, and returns an array of objects.  A negative
+value for this parameter will fetch backwards.
+
+### Cursor.move( [nrows] ) ###
+
+Move the cursor `nrows` rows.  A negative value will move backwards.
 
 ### Cursor.close() ###
 

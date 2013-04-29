@@ -40,6 +40,7 @@ static Handle<v8::Value> plv8_PlanCursor(const Arguments& args);
 static Handle<v8::Value> plv8_PlanExecute(const Arguments& args);
 static Handle<v8::Value> plv8_PlanFree(const Arguments& args);
 static Handle<v8::Value> plv8_CursorFetch(const Arguments& args);
+static Handle<v8::Value> plv8_CursorMove(const Arguments& args);
 static Handle<v8::Value> plv8_CursorClose(const Arguments& args);
 static Handle<v8::Value> plv8_ReturnNext(const Arguments& args);
 static Handle<v8::Value> plv8_Subtransaction(const Arguments& args);
@@ -640,6 +641,7 @@ plv8_PlanCursor(const Arguments &args)
 		Local<ObjectTemplate> templ = base->InstanceTemplate();
 		templ->SetInternalFieldCount(1);
 		SetCallback(templ, "fetch", plv8_CursorFetch);
+		SetCallback(templ, "move", plv8_CursorMove);
 		SetCallback(templ, "close", plv8_CursorClose);
 		CursorTemplate = Persistent<ObjectTemplate>::New(templ);
 	}
@@ -781,14 +783,26 @@ plv8_CursorFetch(const Arguments &args)
 	Handle<v8::Object>	self = args.This();
 	CString				cname(self->GetInternalField(0));
 	Portal				cursor = SPI_cursor_find(cname);
+	int					nfetch = 1;
+	bool				forward = true, wantarray = false;
 
 	if (!cursor)
 		throw js_error("cannot find cursor");
 
-	/* XXX: get the argument */
+	if (args.Length() >= 1)
+	{
+		wantarray = true;
+		nfetch = args[0]->Int32Value();
+
+		if (nfetch < 0)
+		{
+			nfetch = -nfetch;
+			forward = false;
+		}
+	}
 	PG_TRY();
 	{
-		SPI_cursor_fetch(cursor, true, 1);
+		SPI_cursor_fetch(cursor, forward, nfetch);
 	}
 	PG_CATCH();
 	{
@@ -796,12 +810,61 @@ plv8_CursorFetch(const Arguments &args)
 	}
 	PG_END_TRY();
 
-	if (SPI_processed == 1)
+	if (SPI_processed > 0)
 	{
 		Converter			conv(SPI_tuptable->tupdesc);
-		Handle<v8::Object>	result = conv.ToValue(SPI_tuptable->vals[0]);
-		return result;
+
+		if (!wantarray)
+		{
+			Handle<v8::Object>	result = conv.ToValue(SPI_tuptable->vals[0]);
+			return result;
+		}
+		else
+		{
+			Handle<Array> array = Array::New();
+			for (unsigned int i = 0; i < SPI_processed; i++)
+				array->Set(i, conv.ToValue(SPI_tuptable->vals[i]));
+			return array;
+		}
 	}
+	return Undefined();
+}
+
+/*
+ * cursor.move(n)
+ */
+static Handle<v8::Value>
+plv8_CursorMove(const Arguments& args)
+{
+	Handle<v8::Object>	self = args.This();
+	CString				cname(self->GetInternalField(0));
+	Portal				cursor = SPI_cursor_find(cname);
+	int					nmove = 1;
+	bool				forward = true;
+
+	if (!cursor)
+		throw js_error("cannot find cursor");
+
+	if (args.Length() < 1)
+		return Undefined();
+
+	nmove = args[0]->Int32Value();
+	if (nmove < 0)
+	{
+		nmove = -nmove;
+		forward = false;
+	}
+
+	PG_TRY();
+	{
+		SPI_cursor_move(cursor, forward, nmove);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
 	return Undefined();
 }
 

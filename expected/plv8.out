@@ -636,6 +636,21 @@ while(row = cursor.fetch()) {
   plv8.elog(INFO, JSON.stringify(row));
 }
 cursor.close();
+
+var cursor = plan.cursor();
+var rows;
+rows = cursor.fetch(2);
+plv8.elog(INFO, JSON.stringify(rows));
+rows = cursor.fetch(-2);
+plv8.elog(INFO, JSON.stringify(rows));
+cursor.move(1);
+rows = cursor.fetch(3);
+plv8.elog(INFO, JSON.stringify(rows));
+cursor.move(-2);
+rows = cursor.fetch(3);
+plv8.elog(INFO, JSON.stringify(rows));
+cursor.close();
+
 plan.free();
 
 var plan = plv8.prepare("SELECT * FROM test_tbl WHERE i = $1 and s = $2", ["int", "text"]);
@@ -671,6 +686,10 @@ INFO:  [object Cursor]
 INFO:  {"i":2,"s":"s2"}
 INFO:  {"i":3,"s":"s3"}
 INFO:  {"i":4,"s":"s4"}
+INFO:  [{"i":2,"s":"s2"},{"i":3,"s":"s3"}]
+INFO:  [{"i":2,"s":"s2"}]
+INFO:  [{"i":3,"s":"s3"},{"i":4,"s":"s4"}]
+INFO:  [{"i":4,"s":"s4"}]
 INFO:  rows.length =  1
 INFO:  {"i":2,"s":"s2"}
 WARNING:  Error: plan expected -1 argument(s), given is 0

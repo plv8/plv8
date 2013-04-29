@@ -382,6 +382,21 @@ while(row = cursor.fetch()) {
   plv8.elog(INFO, JSON.stringify(row));
 }
 cursor.close();
+
+var cursor = plan.cursor();
+var rows;
+rows = cursor.fetch(2);
+plv8.elog(INFO, JSON.stringify(rows));
+rows = cursor.fetch(-2);
+plv8.elog(INFO, JSON.stringify(rows));
+cursor.move(1);
+rows = cursor.fetch(3);
+plv8.elog(INFO, JSON.stringify(rows));
+cursor.move(-2);
+rows = cursor.fetch(3);
+plv8.elog(INFO, JSON.stringify(rows));
+cursor.close();
+
 plan.free();
 
 var plan = plv8.prepare("SELECT * FROM test_tbl WHERE i = $1 and s = $2", ["int", "text"]);

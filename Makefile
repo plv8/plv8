@@ -12,7 +12,7 @@
 #   'make static' will download v8 and build, then statically link to it.
 #
 #-----------------------------------------------------------------------------#
-PLV8_VERSION = 1.3.0
+PLV8_VERSION = 1.4.0
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

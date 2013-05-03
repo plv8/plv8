@@ -944,7 +944,7 @@ static char *
 CompileDialect(const char *src, Dialect dialect)
 {
 	HandleScope		handle_scope;
-	static Persistent<Context>	context = Context::New(NULL);
+	static Persistent<Context>	context = Context::New((ExtensionConfiguration*)NULL);
 	Context::Scope	context_scope(context);
 	TryCatch		try_catch;
 	Local<String>	key;

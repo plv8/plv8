@@ -1,0 +1,30 @@
+before_script:
+  - git clone -b $v8 --depth 10 git://github.com/v8/v8.git
+  - cd v8 && git describe --always
+  - make dependencies && make native library=shared -j8
+  - sudo install -v --mode=0644 include/* /usr/include
+  - sudo install -v --mode=0644 out/native/lib.target/libv8.so /usr/lib/libv8.so
+  - sudo install -v out/native/d8 /usr/bin/d8
+  - cd ..
+
+env:
+  - v8=3.14
+  - v8=3.15
+  - v8=3.16
+  - v8=3.17
+  - v8=trunk
+  - v8=master
+
+language: cpp
+compiler:
+  - clang
+  - gcc
+
+script: make
+
+matrix:
+  exclude:
+    - compiler: clang
+      env: v8=3.14
+    - compiler: clang
+      env: v8=3.15

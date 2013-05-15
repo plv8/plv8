@@ -1,5 +1,8 @@
 Revision history for plv8
 
+1.4.1       2013-05-14
+            - Fix compilation with v8 3.18.x
+
 1.4.0       2013-04-29
             - Implement fetch(n) and move(n).
             - Fix a bug around type conversion.

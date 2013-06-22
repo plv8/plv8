@@ -143,7 +143,8 @@ static void plv8_xact_cb(XactEvent event, void *arg);
 static plv8_exec_env *CreateExecEnv(Handle<Function> script);
 static plv8_proc *Compile(Oid fn_oid, FunctionCallInfo fcinfo,
 					bool validate, bool is_trigger, Dialect dialect);
-static Local<Function> CompileFunction(const char *proname, int proarglen,
+static Local<Function> CompileFunction(Handle<Context> global_context,
+					const char *proname, int proarglen,
 					const char *proargs[], const char *prosrc,
 					bool is_trigger, bool retset, Dialect dialect);
 static Datum CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
@@ -339,7 +340,9 @@ common_pl_inline_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 		HandleScope			handle_scope;
 		char			   *source_text = codeblock->source_text;
 
-		Handle<Function>	function = CompileFunction(NULL, 0, NULL,
+		Handle<Context>	global_context = GetGlobalContext();
+		Handle<Function>	function = CompileFunction(global_context,
+										NULL, 0, NULL,
 										source_text, false, false, dialect);
 		plv8_exec_env	   *xenv = CreateExecEnv(function);
 		return CallFunction(fcinfo, xenv, 0, NULL, NULL);
@@ -1030,11 +1033,23 @@ Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger,
 	}
 	PG_END_TRY();
 
-	HandleScope		handle_scope;
 	plv8_proc_cache *cache = proc->cache;
 
 	if (cache->function.IsEmpty())
+	{
+		/*
+		 * We need to create global context before entering CompileFunction
+		 * because GetGlobalContext could call startup procedure, which
+		 * could be this cache->function itself.  In this scenario,
+		 * Compile is called recursively and plv8_get_proc tries to refresh
+		 * cache because cache->function is still not yet ready at this
+		 * point.  Then some pointers of cache will become stale by pfree
+		 * and CompileFunction ends up compiling freed function source.
+		 */
+		HandleScope		handle_scope;
+		Handle<Context>	global_context = GetGlobalContext();
 		cache->function = Persistent<Function>::New(CompileFunction(
+						global_context,
 						cache->proname,
 						cache->nargs,
 						(const char **) argnames,
@@ -1042,12 +1057,14 @@ Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger,
 						is_trigger,
 						cache->retset,
 						dialect));
+	}
 
 	return proc;
 }
 
 static Local<Function>
 CompileFunction(
+	Handle<Context> global_context,
 	const char *proname,
 	int proarglen,
 	const char *proargs[],
@@ -1058,7 +1075,6 @@ CompileFunction(
 {
 	HandleScope		handle_scope;
 	StringInfoData	src;
-	Handle<Context>	global_context = GetGlobalContext();
 
 	initStringInfo(&src);
 

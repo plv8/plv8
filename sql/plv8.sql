@@ -462,3 +462,22 @@ $$ LANGUAGE plv8 IMMUTABLE;
 SELECT plv8_quotes('select');
 SELECT plv8_quotes('kevin''s name');
 SELECT plv8_quotes(NULL);
+
+-- exception handling
+CREATE OR REPLACE FUNCTION v8_test_throw() RETURNS float AS
+$$ 
+throw new Error('Error');
+$$
+LANGUAGE plv8;
+
+CREATE OR REPLACE FUNCTION v8_test_catch_throw() RETURNS text AS
+$$
+ try{
+   var res = plv8.execute('select * from  v8_test_throw()');
+ } catch(e) {
+   return JSON.stringify({"result": "error"});
+ }
+$$
+language plv8;
+
+SELECT v8_test_catch_throw();

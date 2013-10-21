@@ -481,3 +481,16 @@ $$
 language plv8;
 
 SELECT v8_test_catch_throw();
+
+DROP TABLE IF EXISTS t_attdrop CASCADE;
+CREATE TABLE t_attdrop AS SELECT i a, i b, i c FROM generate_series(1, 10)i;
+CREATE OR REPLACE FUNCTION f_attdrop(tbl t_attdrop) RETURNS int AS $$
+  return tbl.a;
+$$ LANGUAGE plv8;
+CREATE OR REPLACE FUNCTION f_attdrop(a int) RETURNS t_attdrop AS $$
+  return {a: a, b: 0, c: 10};
+$$ LANGUAGE plv8;
+
+ALTER TABLE t_attdrop DROP COLUMN b;
+SELECT f_attdrop(t.*) FROM t;
+SELECT f_attdrop(2);

@@ -1439,7 +1439,11 @@ Converter::Init()
 {
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
+		if (m_tupdesc->attrs[c]->attisdropped)
+			continue;
+
 		m_colnames[c] = ToString(NameStr(m_tupdesc->attrs[c]->attname));
+
 		PG_TRY();
 		{
 			if (m_memcontext == NULL)
@@ -1472,6 +1476,9 @@ Converter::ToValue(HeapTuple tuple)
 	{
 		Datum		datum;
 		bool		isnull;
+
+		if (m_tupdesc->attrs[c]->attisdropped)
+			continue;
 
 #if PG_VERSION_NUM >= 90000
 		datum = heap_getattr(tuple, c + 1, m_tupdesc, &isnull);
@@ -1515,11 +1522,12 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 	if (!m_is_scalar)
 	{
 		Handle<Array> names = obj->GetPropertyNames();
-		if ((int) names->Length() != m_tupdesc->natts)
-			throw js_error("expected fields and property names have different cardinality");
 
 		for (int c = 0; c < m_tupdesc->natts; c++)
 		{
+			if (m_tupdesc->attrs[c]->attisdropped)
+				continue;
+
 			bool found = false;
 			CString  colname(m_colnames[c]);
 			for (int d = 0; d < m_tupdesc->natts; d++)
@@ -1538,6 +1546,9 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
+		if (m_tupdesc->attrs[c]->attisdropped)
+			continue;
+
 		Handle<v8::Value> attr = m_is_scalar ? value : obj->Get(m_colnames[c]);
 		if (attr.IsEmpty() || attr->IsUndefined() || attr->IsNull())
 			nulls[c] = true;

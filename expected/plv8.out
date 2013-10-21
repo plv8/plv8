@@ -274,8 +274,11 @@ $$
 $$ LANGUAGE plv8;
 -- not enough fields specified
 SELECT * FROM set_of_unnamed_records() AS x(a int);
-ERROR:  Error: expected fields and property names have different cardinality
-DETAIL:  set_of_unnamed_records() LINE 2:     plv8.return_next({"a": 1, "b": 2}); 
+ a 
+---
+ 1
+(1 row)
+
 -- field names mismatch
 SELECT * FROM set_of_unnamed_records() AS x(a int, c int);
 ERROR:  Error: field name / property name mismatch
@@ -765,5 +768,25 @@ SELECT plv8_quotes(NULL);
     plv8_quotes     
 --------------------
  'null':NULL:"null"
+(1 row)
+
+DROP TABLE IF EXISTS t_attdrop CASCADE;
+NOTICE:  table "t_attdrop" does not exist, skipping
+CREATE TABLE t_attdrop AS SELECT i a, i b, i c FROM generate_series(1, 10)i;
+CREATE OR REPLACE FUNCTION f_attdrop(tbl t_attdrop) RETURNS int AS $$
+  return tbl.a;
+$$ LANGUAGE plv8;
+CREATE OR REPLACE FUNCTION f_attdrop(a int) RETURNS t_attdrop AS $$
+  return {a: a, b: 0, c: 10};
+$$ LANGUAGE plv8;
+ALTER TABLE t_attdrop DROP COLUMN b;
+SELECT f_attdrop(t.*) FROM t;
+ERROR:  relation "t" does not exist
+LINE 1: SELECT f_attdrop(t.*) FROM t;
+                                   ^
+SELECT f_attdrop(2);
+ f_attdrop 
+-----------
+ (2,10)
 (1 row)
 

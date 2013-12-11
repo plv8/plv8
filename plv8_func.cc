@@ -433,6 +433,17 @@ plv8_execute_params(const char *sql, Handle<Array> params)
 	return status;
 }
 
+static Handle<Array>
+convertArgsToArray(const Arguments &args, int start)
+{
+	Local<Array> result = Array::New(args.Length() - start);
+	for (int i = start; i < args.Length(); i++)
+	{
+		result->Set(i, args[i]);
+	}
+	return result;
+}
+
 /*
  * plv8.execute(statement, [param, ...])
  */
@@ -448,7 +459,12 @@ plv8_Execute(const Arguments &args)
 	Handle<Array>	params;
 
 	if (args.Length() >= 2)
-		params = Handle<Array>::Cast(args[1]);
+	{
+		if (args[1]->IsArray())
+			params = Handle<Array>::Cast(args[1]);
+		else /* Consume trailing elements as an array. */
+			params = convertArgsToArray(args, 1);
+	}
 
 	int				nparam = params.IsEmpty() ? 0 : params->Length();
 
@@ -489,7 +505,10 @@ plv8_Prepare(const Arguments &args)
 
 	if (args.Length() > 1)
 	{
-		array = Handle<Array>::Cast(args[1]);
+		if (args[1]->IsArray())
+			array = Handle<Array>::Cast(args[1]);
+		else /* Consume trailing elements as an array. */
+			array = convertArgsToArray(args, 1);
 		arraylen = array->Length();
 		types = (Oid *) palloc(sizeof(Oid) * arraylen);
 	}
@@ -563,9 +582,12 @@ plv8_PlanCursor(const Arguments &args)
 			Handle<External>::Cast(self->GetInternalField(0))->Value());
 	/* XXX: Add plan validation */
 
-	if (args.Length() > 0 && args[0]->IsArray())
+	if (args.Length() > 0)
 	{
-		params = Handle<Array>::Cast(args[0]);
+		if (args[0]->IsArray())
+			params = Handle<Array>::Cast(args[0]);
+		else
+			params = convertArgsToArray(args, 0);
 		nparam = params->Length();
 	}
 
@@ -672,9 +694,12 @@ plv8_PlanExecute(const Arguments &args)
 			Handle<External>::Cast(self->GetInternalField(0))->Value());
 	/* XXX: Add plan validation */
 
-	if (args.Length() > 0 && args[0]->IsArray())
+	if (args.Length() > 0)
 	{
-		params = Handle<Array>::Cast(args[0]);
+		if (args[0]->IsArray())
+			params = Handle<Array>::Cast(args[0]);
+		else
+			params = convertArgsToArray(args, 0);
 		nparam = params->Length();
 	}
 

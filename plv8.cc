@@ -696,6 +696,9 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 	char			functyptype;
 	bool			is_trigger = false;
 
+	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, fn_oid))
+		PG_RETURN_VOID();
+
 	/* Get the new function's pg_proc entry */
 	tuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 	if (!HeapTupleIsValid(tuple))

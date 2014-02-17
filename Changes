@@ -1,5 +1,11 @@
 Revision history for plv8
 
+1.4.2       2014-02-20
+            - Fix CREATE FUNCTION in startup procedure.
+            - Fix dropped column case.
+            - Accept non-array parameters to execute().
+            - Prevent privilege escalation in explicit calls to validators.
+
 1.4.1       2013-05-14
             - Fix compilation with v8 3.18.x
 

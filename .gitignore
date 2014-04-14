@@ -1,0 +1,22 @@
+# Generate source files
+/coffee-script.cc
+/livescript.cc
+/plv8_config.h
+
+# Generated test and install files
+/plcoffee--*.sql
+/plcoffee.control
+/plls--*.sql
+/plls.control
+/plv8--*.sql
+/plv8.control
+
+# Generic build files
+*.o
+*.so
+
+# For static build
+/build
+
+# For packaging
+plv8-*.zip

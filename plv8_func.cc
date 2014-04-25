@@ -434,12 +434,12 @@ plv8_execute_params(const char *sql, Handle<Array> params)
 }
 
 static Handle<Array>
-convertArgsToArray(const Arguments &args, int start)
+convertArgsToArray(const Arguments &args, int start, int downshift)
 {
 	Local<Array> result = Array::New(args.Length() - start);
 	for (int i = start; i < args.Length(); i++)
 	{
-		result->Set(i, args[i]);
+		result->Set(i - downshift, args[i]);
 	}
 	return result;
 }
@@ -463,7 +463,7 @@ plv8_Execute(const Arguments &args)
 		if (args[1]->IsArray())
 			params = Handle<Array>::Cast(args[1]);
 		else /* Consume trailing elements as an array. */
-			params = convertArgsToArray(args, 1);
+			params = convertArgsToArray(args, 1, 1);
 	}
 
 	int				nparam = params.IsEmpty() ? 0 : params->Length();
@@ -508,7 +508,7 @@ plv8_Prepare(const Arguments &args)
 		if (args[1]->IsArray())
 			array = Handle<Array>::Cast(args[1]);
 		else /* Consume trailing elements as an array. */
-			array = convertArgsToArray(args, 1);
+			array = convertArgsToArray(args, 1, 0);
 		arraylen = array->Length();
 		types = (Oid *) palloc(sizeof(Oid) * arraylen);
 	}
@@ -591,7 +591,7 @@ plv8_PlanCursor(const Arguments &args)
 		if (args[0]->IsArray())
 			params = Handle<Array>::Cast(args[0]);
 		else
-			params = convertArgsToArray(args, 0);
+			params = convertArgsToArray(args, 0, 0);
 		nparam = params->Length();
 	}
 
@@ -703,7 +703,7 @@ plv8_PlanExecute(const Arguments &args)
 		if (args[0]->IsArray())
 			params = Handle<Array>::Cast(args[0]);
 		else
-			params = convertArgsToArray(args, 0);
+			params = convertArgsToArray(args, 0, 0);
 		nparam = params->Length();
 	}
 

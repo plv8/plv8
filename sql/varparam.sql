@@ -10,3 +10,10 @@ do language plv8 $$
   cur.close();
   plan.free();
 $$;
+
+-- Show variadic argument handling
+do language plv8 $$
+   plv8.elog(INFO, JSON.stringify(plv8.execute("SELECT $1", 1)));
+   plv8.elog(INFO, JSON.stringify(plv8.execute("SELECT $1", [1])));
+   plv8.elog(INFO, JSON.stringify(plv8.execute("SELECT $1 a, $2 b", 1, 2)));
+$$;

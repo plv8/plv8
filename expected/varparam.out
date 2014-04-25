@@ -12,3 +12,12 @@ do language plv8 $$
 $$;
 INFO:  pg_class
 INFO:  pg_index
+-- Show variadic argument handling
+do language plv8 $$
+   plv8.elog(INFO, JSON.stringify(plv8.execute("SELECT $1", 1)));
+   plv8.elog(INFO, JSON.stringify(plv8.execute("SELECT $1", [1])));
+   plv8.elog(INFO, JSON.stringify(plv8.execute("SELECT $1 a, $2 b", 1, 2)));
+$$;
+INFO:  [{"?column?":"1"}]
+INFO:  [{"?column?":"1"}]
+INFO:  [{"a":"1","b":"2"}]

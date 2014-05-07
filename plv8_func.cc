@@ -518,7 +518,11 @@ plv8_Prepare(const Arguments &args)
 		CString			typestr(array->Get(i));
 		int32			typemod;
 
+#if PG_VERSION_NUM >= 90400
+		parseTypeString(typestr, &types[i], &typemod, false);
+#else
 		parseTypeString(typestr, &types[i], &typemod);
+#endif
 	}
 
 	PG_TRY();

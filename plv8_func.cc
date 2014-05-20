@@ -930,12 +930,13 @@ static Handle<v8::Value>
 plv8_ReturnNext(const Arguments& args)
 {
 	Handle<v8::Object>	self = args.This();
-	Converter *conv = static_cast<Converter *>(
-			Handle<External>::Cast(
-				self->GetInternalField(PLV8_INTNL_CONV))->Value());
+	Handle<v8::Value>	conv_value = self->GetInternalField(PLV8_INTNL_CONV);
 
-	if (conv == NULL)
+	if (!conv_value->IsExternal())
 		throw js_error("return_next called in context that cannot accept a set");
+
+	Converter *conv = static_cast<Converter *>(
+			Handle<External>::Cast(conv_value)->Value());
 
 	Tuplestorestate *tupstore = static_cast<Tuplestorestate *>(
 			Handle<External>::Cast(

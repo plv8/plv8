@@ -1,2 +1,5 @@
 DO $$ plv8.elog(NOTICE, 'this', 'is', 'inline', 'code') $$ LANGUAGE plv8;
 NOTICE:  this is inline code
+DO $$ plv8.return_next(new Object());$$ LANGUAGE plv8;
+ERROR:  Error: return_next called in context that cannot accept a set
+DETAIL:  undefined() LINE 1:  plv8.return_next(new Object());

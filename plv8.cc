@@ -1549,8 +1549,12 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
+		/* Make sure dropped columns are skipped by backend code. */
 		if (m_tupdesc->attrs[c]->attisdropped)
+		{
+			nulls[c] = true;
 			continue;
+		}
 
 		Handle<v8::Value> attr = m_is_scalar ? value : obj->Get(m_colnames[c]);
 		if (attr.IsEmpty() || attr->IsUndefined() || attr->IsNull())

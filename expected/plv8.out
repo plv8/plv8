@@ -811,3 +811,27 @@ SELECT f_attdrop(2);
  (2,10)
 (1 row)
 
+create table plv8test ( id serial primary key, data json, sum integer, num integer);
+insert into plv8test (data, sum, num) values ('{"a": 1, "b": 2}', 0, 0);
+insert into plv8test (data, sum, num) values ('{"a": 3, "b": 4}', 0, 0);
+insert into plv8test (data, sum, num) values ('{"a": 3, "b": 4}', 0, 0);
+CREATE OR REPLACE FUNCTION plv8_trigger_handler() RETURNS trigger AS
+$$
+    var sum = 0;
+    for (var k in NEW.data){ sum += NEW.data[k];}
+    NEW.sum = sum
+    return NEW;
+$$ 
+LANGUAGE plv8;
+CREATE TRIGGER plv8test_trigger
+BEFORE INSERT OR UPDATE
+ON plv8test FOR EACH ROW
+EXECUTE PROCEDURE plv8_trigger_handler();
+-- test OK
+update plv8test set num = 2 where id =2;
+-- then add two fields and drop one of them
+alter table plv8test add column repro1 varchar;
+alter table plv8test add column repro2 varchar;
+alter table plv8test drop column repro1;
+-- dropped columns should work with trigger
+update plv8test set repro2='test';

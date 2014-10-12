@@ -1,3 +1,19 @@
+before_install:
+  - psql --version
+  - sudo /etc/init.d/postgresql stop
+  - sudo apt-get -y --purge remove postgresql libpq-dev libpq5 postgresql-client-common postgresql-common
+  - sudo rm -rf /var/lib/postgresql
+  - wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+  - sudo sh -c "echo deb http://apt.postgresql.org/pub/repos/apt/ precise-pgdg main $PGVERSION >> /etc/apt/sources.list.d/postgresql.list"
+  - sudo apt-get update -qq
+  - sudo apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::="--force-confnew" install postgresql-$PGVERSION postgresql-server-dev-$PGVERSION
+  - sudo chmod 777 /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  - sudo echo "local   all         postgres                          trust" > /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  - sudo echo "local   all         all                               trust" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  - sudo echo "host    all         all         127.0.0.1/32          trust" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  - sudo echo "host    all         all         ::1/128               trust" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
+  - sudo /etc/init.d/postgresql restart
+
 before_script:
   - git clone -b $v8 --depth 10 git://github.com/v8/v8.git
   - cd v8 && git describe --always
@@ -8,23 +24,26 @@ before_script:
   - cd ..
 
 env:
-  - v8=3.14
-  - v8=3.15
-  - v8=3.16
-  - v8=3.17
-  - v8=trunk
-  - v8=master
+  matrix:
+    - PGVERSION=9.4 v8=3.18
+    - PGVERSION=9.4 v8=3.20
+    - PGVERSION=9.4 v8=3.22
+    - PGVERSION=9.3 v8=3.18
+    - PGVERSION=9.3 v8=3.20
+    - PGVERSION=9.3 v8=3.22
+    - PGVERSION=9.2 v8=3.18
+    - PGVERSION=9.2 v8=3.20
+    - PGVERSION=9.2 v8=3.22
+    - PGVERSION=9.1 v8=3.18
+    - PGVERSION=9.1 v8=3.20
+    - PGVERSION=9.1 v8=3.22
+    - PGVERSION=9.0 v8=3.18
+    - PGVERSION=9.0 v8=3.20
+    - PGVERSION=9.0 v8=3.22
 
 language: cpp
 compiler:
-  - clang
+#  - clang
   - gcc
 
 script: make
-
-matrix:
-  exclude:
-    - compiler: clang
-      env: v8=3.14
-    - compiler: clang
-      env: v8=3.15

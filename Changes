@@ -1,5 +1,12 @@
 Revision history for plv8
 
+1.4.3       2015-02-02
+            - Fix compilation for 9.4
+            - Fix off-by-one in variadic .execute handling
+            - Add .gitignore
+            - Fix incorrect code in return_next
+            - Mark NULL in converter even for dropped columns to prevent crash.
+
 1.4.2       2014-02-20
             - Fix CREATE FUNCTION in startup procedure.
             - Fix dropped column case.

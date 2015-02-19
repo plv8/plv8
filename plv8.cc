@@ -1615,6 +1615,8 @@ js_error::js_error(TryCatch &try_catch) throw()
 			 * at the first line to the javascript code.
 			 */
 			initStringInfo(&str);
+			if (strstr(m_msg, "Error: ") == m_msg)
+				m_msg += 7;
 			appendStringInfo(&str, "%s() LINE %d: %s",
 				script.str("?"), lineno - 1, source.str("?"));
 			m_detail = str.data;

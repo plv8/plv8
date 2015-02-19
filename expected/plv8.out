@@ -221,7 +221,7 @@ $$
 $$
 LANGUAGE plv8;
 SELECT * FROM set_of_record_but_non_obj();
-ERROR:  Error: argument must be an object
+ERROR:  argument must be an object
 DETAIL:  set_of_record_but_non_obj() LINE 2: 	plv8.return_next( "abc" );
 CREATE FUNCTION set_of_integers() RETURNS SETOF integer AS
 $$
@@ -281,7 +281,7 @@ SELECT * FROM set_of_unnamed_records() AS x(a int);
 
 -- field names mismatch
 SELECT * FROM set_of_unnamed_records() AS x(a int, c int);
-ERROR:  Error: field name / property name mismatch
+ERROR:  field name / property name mismatch
 DETAIL:  set_of_unnamed_records() LINE 2:     plv8.return_next({"a": 1, "b": 2}); 
 -- name counts and values match
 SELECT * FROM set_of_unnamed_records() AS x(a int, b int);
@@ -367,7 +367,7 @@ SELECT test_elog('ABC');
 NOTICE:  args = ABC
 WARNING:  warning
 INFO:  Error: ERROR
-ERROR:  Error: invalid error level
+ERROR:  invalid error level
 DETAIL:  test_elog() LINE 9: 	plv8.elog(21, 'FATAL is not allowed');
 -- execute()
 CREATE TABLE test_tbl (i integer, s text);
@@ -421,7 +421,7 @@ SELECT * FROM return_sql();
 
 CREATE FUNCTION test_sql_error() RETURNS void AS $$ plv8.execute("ERROR") $$ LANGUAGE plv8;
 SELECT test_sql_error();
-ERROR:  Error: syntax error at or near "ERROR"
+ERROR:  syntax error at or near "ERROR"
 DETAIL:  test_sql_error() LINE 1:  plv8.execute("ERROR") 
 CREATE FUNCTION catch_sql_error() RETURNS void AS $$
 try {
@@ -488,7 +488,7 @@ plv8.subtransaction(function(){
 });
 $$ LANGUAGE plv8;
 SELECT test_subtransaction_throw();
-ERROR:  Error: division by zero
+ERROR:  division by zero
 DETAIL:  test_subtransaction_throw() LINE 2: plv8.subtransaction(function(){
 SELECT * FROM subtrant;
  a 
@@ -622,7 +622,7 @@ ERROR:  ReferenceError: not_defined is not defined
 DETAIL:  reference_error() LINE 1: not_defined
 CREATE FUNCTION throw() RETURNS void AS $$throw new Error("an error");$$ LANGUAGE plv8;
 SELECT throw();
-ERROR:  Error: an error
+ERROR:  an error
 DETAIL:  throw() LINE 1: throw new Error("an error");
 -- SPI operations
 CREATE FUNCTION prep1() RETURNS void AS $$
@@ -737,10 +737,10 @@ SELECT caller(10, 2);
 (1 row)
 
 SELECT caller(10, 3);
-ERROR:  Error: javascript function is not found for "sqlf"
+ERROR:  javascript function is not found for "sqlf"
 DETAIL:  caller() LINE 8:     func = plv8.find_function("sqlf");
 SELECT caller(10, 4);
-ERROR:  Error: function "callee(int, int)" does not exist
+ERROR:  function "callee(int, int)" does not exist
 DETAIL:  caller() LINE 10:     func = plv8.find_function("callee(int, int)");
 SELECT caller(10, 5);
  caller 

@@ -352,10 +352,10 @@ CREATE FUNCTION bad_alloc(sz text) RETURNS void AS $$
   winobj.set_partition_local(context);
 $$ LANGUAGE plv8 WINDOW;
 SELECT bad_alloc('5') OVER ();
-ERROR:  Error: window local memory overflow
+ERROR:  window local memory overflow
 DETAIL:  bad_alloc() LINE 5:   winobj.set_partition_local(context);
 SELECT bad_alloc('not a number') OVER ();
-ERROR:  Error: window local memory overflow
+ERROR:  window local memory overflow
 DETAIL:  bad_alloc() LINE 5:   winobj.set_partition_local(context);
 SELECT bad_alloc('1000') OVER (); -- not so bad
  bad_alloc 
@@ -367,5 +367,5 @@ CREATE FUNCTION non_window() RETURNS void AS $$
   var winobj = plv8.get_window_object();
 $$ LANGUAGE plv8;
 SELECT non_window();
-ERROR:  Error: get_window_object called in wrong context
+ERROR:  get_window_object called in wrong context
 DETAIL:  non_window() LINE 2:   var winobj = plv8.get_window_object();

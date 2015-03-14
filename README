@@ -46,7 +46,7 @@ the following changes in Makefile.
   CUSTOM_CC = gcc
   SHLIB_LINK := $(SHLIB_LINK) -lv8 -Wl,-Bstatic -lstdc++ -Wl,-Bdynamic -lm
 
-For more detail, please refer to http://code.google.com/p/plv8js/issues/detail?id=29
+For more detail, please refer to https://github.com/plv8/plv8js/issues/29
 
 TEST
 ----
@@ -105,8 +105,8 @@ EXAMPLE (LIVESCRIPT)
 
 NOTES
 -----
-plv8 is hosted at Google Project Hosting
-http://code.google.com/p/plv8js/
+plv8 is hosted on github
+https://github.com/plv8/plv8js
 
 and distributed by PGXN.  For more detail, see
 http://pgxn.org/dist/plv8/doc/plv8.html

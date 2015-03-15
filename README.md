@@ -30,21 +30,27 @@ you can do the latter manually if you have not installed v8 yet.
 
 Once you installed plv8 into your dabase, create language via
 
+```
   $ psql -c 'CREATE EXTENSION plv8'
   $ psql -c 'CREATE EXTENSION plls'
   $ psql -c 'CREATE EXTENSION plcoffee'
+```
 
 in 9.1 or later, or in the prior versions
 
+```
   $ psql -f plv8.sql
+```
 
 to create database objects.
 
 In mingw64, you may have difficulty in building plv8.  If so, try to make
 the following changes in Makefile.
 
+```
   CUSTOM_CC = gcc
   SHLIB_LINK := $(SHLIB_LINK) -lv8 -Wl,-Bstatic -lstdc++ -Wl,-Bdynamic -lm
+```
 
 For more detail, please refer to https://github.com/plv8/plv8js/issues/29
 
@@ -54,11 +60,14 @@ TEST
 plv8 supports installcheck test.  Make sure set custom_variable_classes = 'plv8'
 in your postgresql.conf (before 9.2) and run
 
+```
   $ make installcheck
+```
 
 EXAMPLE (JAVASCRIPT)
 --------------------
 
+```
   CREATE OR REPLACE FUNCTION plv8_test(keys text[], vals text[])
   RETURNS text AS $$
     var o = {};
@@ -67,41 +76,46 @@ EXAMPLE (JAVASCRIPT)
     }
     return JSON.stringify(o);
   $$ LANGUAGE plv8 IMMUTABLE STRICT;
-  
+
   SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-           plv8_test        
+           plv8_test
   ---------------------------
    {"name":"Tom","age":"29"}
   (1 row)
+```
 
 EXAMPLE (COFFEESCRIPT)
 ----------------------
 
+```
   CREATE OR REPLACE FUNCTION plcoffee_test(keys text[], vals text[])
   RETURNS text AS $$
     return JSON.stringify(keys.reduce(((o, key, idx) ->
       o[key] = vals[idx]; return o), {}), {})
   $$ LANGUAGE plcoffee IMMUTABLE STRICT;
-  
+
   SELECT plcoffee_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-         plcoffee_test       
+         plcoffee_test
   ---------------------------
    {"name":"Tom","age":"29"}
   (1 row)
+```
 
 EXAMPLE (LIVESCRIPT)
 --------------------
 
+```
   CREATE OR REPLACE FUNCTION plls_test(keys text[], vals text[])
   RETURNS text AS $$
     return JSON.stringify { [key, vals[idx]] for key, idx in keys }
   $$ LANGUAGE plls IMMUTABLE STRICT;
-  
+
   SELECT plls_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-           plls_test        
+           plls_test
   ---------------------------
    {"name":"Tom","age":"29"}
   (1 row)
+```
 
 NOTES
 -----

@@ -181,8 +181,8 @@ plv8_setup_variable_paramlist(plv8_param_state *parstate,
 {
 	ParamListInfo		paramLI;
 
-	paramLI = (ParamListInfo) palloc0(sizeof(ParamListInfoData) +
-							sizeof(ParamExternData) * (parstate->numParams - 1));
+	paramLI = (ParamListInfo) palloc0(offsetof(ParamListInfoData, params) +
+							sizeof(ParamExternData) * parstate->numParams);
 	paramLI->numParams = parstate->numParams;
 	for(int i = 0; i < parstate->numParams; i++)
 	{

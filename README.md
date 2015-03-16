@@ -52,7 +52,7 @@ the following changes in Makefile.
   SHLIB_LINK := $(SHLIB_LINK) -lv8 -Wl,-Bstatic -lstdc++ -Wl,-Bdynamic -lm
 ```
 
-For more detail, please refer to https://github.com/plv8/plv8js/issues/29
+For more detail, please refer to https://github.com/plv8/plv8/issues/29
 
 TEST
 ----
@@ -120,7 +120,7 @@ EXAMPLE (LIVESCRIPT)
 NOTES
 -----
 plv8 is hosted on github
-https://github.com/plv8/plv8js
+https://github.com/plv8/plv8
 
 and distributed by PGXN.  For more detail, see
 http://pgxn.org/dist/plv8/doc/plv8.html

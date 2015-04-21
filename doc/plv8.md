@@ -160,6 +160,7 @@ automatically.  If the desired database type is one of
 - timestamptz
 - bytea
 - json (>= 9.2)
+- jsonb (>= 9.4)
 
 and the JS value looks compatible, then the conversion succeeds.  Otherwise,
 PL/v8 tries to convert them via cstring representation.  An array type is

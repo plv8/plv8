@@ -22,6 +22,9 @@ extern "C" {
 #include "utils/date.h"
 #include "utils/datetime.h"
 #include "utils/builtins.h"
+#if PG_VERSION_NUM >= 90400
+#include "utils/jsonb.h"
+#endif
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
@@ -300,6 +303,20 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 				return PointerGetDatum(datum_p);
 			}
 		}
+#if PG_VERSION_NUM >= 90400
+	case JSONBOID:
+		if (value->IsObject() || value->IsArray())
+		{
+			JSONObject JSON;
+
+			Handle<v8::Value> result = JSON.Stringify(value);
+			CString str(result);
+
+			// lots of casting, but it ends up working - there is no CStringGetJsonb exposed
+			return (Datum) DatumGetJsonb(DirectFunctionCall1(jsonb_in, (Datum) (char *) str));
+		}
+		break;
+#endif
 #if PG_VERSION_NUM >= 90200
 	case JSONOID:
 		if (value->IsObject() || value->IsArray())
@@ -491,6 +508,16 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 
 		if (p != DatumGetPointer(datum))
 			pfree(p);	// free if detoasted
+		return result;
+	}
+#endif
+#if PG_VERSION_NUM >= 90400
+	case JSONBOID:
+	{
+		Local<v8::Value>	jsonString = ToString(datum, type);
+		JSONObject JSON;
+		Local<v8::Value> result = Local<v8::Value>::New(JSON.Parse(jsonString));
+
 		return result;
 	}
 #endif

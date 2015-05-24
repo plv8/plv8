@@ -1,0 +1,14 @@
+CREATE SCHEMA
+CREATE FUNCTION
+CREATE TABLE
+COPY 1
+   get_key    
+--------------
+ {"ok": true}
+(1 row)
+
+   get_key    
+--------------
+ {"ok": true}
+(1 row)
+

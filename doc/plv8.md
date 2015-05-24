@@ -38,10 +38,10 @@ scalar function call.
         }
         return JSON.stringify(o);
     $$ LANGUAGE plv8 IMMUTABLE STRICT;
-    
+
     SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
     SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-             plv8_test        
+             plv8_test
     ---------------------------
      {"name":"Tom","age":"29"}
     (1 row)
@@ -68,12 +68,12 @@ PL/v8 supports set returning function calls.
         // and return all of them at the end of function.
         plv8.return_next( { "i": 1, "t": "a" } );
         plv8.return_next( { "i": 2, "t": "b" } );
-    
+
         // You can also return records with an array of JSON.
         return [ { "i": 3, "t": "c" }, { "i": 4, "t": "d" } ];
     $$
     LANGUAGE plv8;
-    
+
     SELECT * FROM set_of_records();
      i | t
     ---+---
@@ -109,7 +109,7 @@ PL/v8 supports trigger function calls.
         }
     $$
     LANGUAGE "plv8";
-    
+
     CREATE TRIGGER test_trigger
         BEFORE INSERT OR UPDATE OR DELETE
         ON test_tbl FOR EACH ROW
@@ -160,6 +160,7 @@ automatically.  If the desired database type is one of
 - timestamptz
 - bytea
 - json (>= 9.2)
+- jsonb (>= 9.4)
 
 and the JS value looks compatible, then the conversion succeeds.  Otherwise,
 PL/v8 tries to convert them via cstring representation.  An array type is
@@ -199,7 +200,7 @@ plan.free() before leaving the function.
       sum += rows[i].num;
     }
     plan.free();
-    
+
     return sum;
 
 ### PreparedPlan.execute( [args] ) ###
@@ -223,7 +224,7 @@ before leaving the function.
     }
     cursor.close();
     plan.free();
-    
+
     return sum;
 
 ### PreparedPlan.free() ###
@@ -405,9 +406,9 @@ and return the value.  An example for these types are as follows.
     }
     return sum;
   $$ LANGUAGE plv8 IMMUTABLE STRICT;
-  
+
   SELECT int4sum(ARRAY[1, 2, 3, 4, 5]);
-   int4sum 
+   int4sum
   ---------
         15
   (1 row)

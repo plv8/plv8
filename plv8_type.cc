@@ -515,16 +515,10 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 #if PG_VERSION_NUM >= 90400
 	case JSONBOID:
 	{
-		Jsonb   *jb = DatumGetJsonb(datum);
-		const char *str = JsonbToCString(NULL, &jb->root, VARSIZE(jb));
-		int			len = VARSIZE_ANY_EXHDR(jb) - 4;
-
-		Local<v8::Value>	jsonString = ToString(str, len);
+		Local<v8::Value>	jsonString = ToString(datum, type);
 		JSONObject JSON;
 		Local<v8::Value> result = Local<v8::Value>::New(JSON.Parse(jsonString));
 
-		if ((void *) jb != DatumGetPointer(datum))
-			pfree(jb);	// free if detoasted
 		return result;
 	}
 #endif

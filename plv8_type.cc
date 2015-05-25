@@ -29,6 +29,10 @@ extern "C" {
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
+#if PG_VERSION_NUM >= 90400
+#include "utils/jsonb.h"
+#endif
+
 #undef delete
 #undef namespace
 #undef typeid
@@ -163,11 +167,12 @@ CreateExternalArray(void *data, ExternalArrayType array_type, int byte_size,
 
 	if (externalArray.IsEmpty())
 	{
-		externalArray = Persistent<ObjectTemplate>::New(ObjectTemplate::New());
-		externalArray->SetInternalFieldCount(1);
+		Local<ObjectTemplate> templ = ObjectTemplate::New(plv8_isolate);
+		templ->SetInternalFieldCount(1);
+		externalArray.Reset(plv8_isolate, templ);
 	}
-
-	Local<Object> array = externalArray->NewInstance();
+	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, externalArray);
+	Local<Object> array = templ->NewInstance();
 	int		length;
 
 	switch (array_type)
@@ -195,8 +200,8 @@ CreateExternalArray(void *data, ExternalArrayType array_type, int byte_size,
 	}
 	array->SetIndexedPropertiesToExternalArrayData(
 			data, array_type, length);
-	array->Set(String::New("length"), Int32::New(length), ReadOnly);
-	array->SetInternalField(0, External::New(DatumGetPointer(datum)));
+	array->ForceSet(String::NewFromUtf8(plv8_isolate, "length"), Int32::New(plv8_isolate, length), ReadOnly);
+	array->SetInternalField(0, External::New(plv8_isolate, DatumGetPointer(datum)));
 
 	return array;
 }
@@ -435,7 +440,7 @@ Local<v8::Value>
 ToValue(Datum datum, bool isnull, plv8_type *type)
 {
 	if (isnull)
-		return Local<v8::Value>(*Null());
+		return Local<v8::Value>::New(plv8_isolate, Null(plv8_isolate));
 	else if (type->category == TYPCATEGORY_ARRAY || type->typid == RECORDARRAYOID)
 		return ToArrayValue(datum, isnull, type);
 	else if (type->category == TYPCATEGORY_COMPOSITE || type->typid == RECORDOID)
@@ -450,27 +455,27 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 	switch (type->typid)
 	{
 	case OIDOID:
-		return Uint32::New(DatumGetObjectId(datum));
+		return Uint32::New(plv8_isolate, DatumGetObjectId(datum));
 	case BOOLOID:
-		return Local<v8::Value>(*(Boolean::New((bool) DatumGetBool(datum))));
+		return Boolean::New(plv8_isolate, DatumGetBool(datum));
 	case INT2OID:
-		return Int32::New(DatumGetInt16(datum));
+		return Int32::New(plv8_isolate, DatumGetInt16(datum));
 	case INT4OID:
-		return Int32::New(DatumGetInt32(datum));
+		return Int32::New(plv8_isolate, DatumGetInt32(datum));
 	case INT8OID:
-		return Number::New(DatumGetInt64(datum));
+		return Number::New(plv8_isolate, DatumGetInt64(datum));
 	case FLOAT4OID:
-		return Number::New(DatumGetFloat4(datum));
+		return Number::New(plv8_isolate, DatumGetFloat4(datum));
 	case FLOAT8OID:
-		return Number::New(DatumGetFloat8(datum));
+		return Number::New(plv8_isolate, DatumGetFloat8(datum));
 	case NUMERICOID:
-		return Number::New(DatumGetFloat8(
+		return Number::New(plv8_isolate, DatumGetFloat8(
 			DirectFunctionCall1(numeric_float8, datum)));
 	case DATEOID:
-		return Date::New(DateToEpoch(DatumGetDateADT(datum)));
+		return Date::New(plv8_isolate, DateToEpoch(DatumGetDateADT(datum)));
 	case TIMESTAMPOID:
 	case TIMESTAMPTZOID:
-		return Date::New(TimestampTzToEpoch(DatumGetTimestampTz(datum)));
+		return Date::New(plv8_isolate, TimestampTzToEpoch(DatumGetTimestampTz(datum)));
 	case TEXTOID:
 	case VARCHAROID:
 	case BPCHAROID:
@@ -504,7 +509,7 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 
 		Local<v8::Value>	jsonString = ToString(str, len);
 		JSONObject JSON;
-		Local<v8::Value> result = Local<v8::Value>::New(JSON.Parse(jsonString));
+		Local<v8::Value> result = Local<v8::Value>::New(plv8_isolate, JSON.Parse(jsonString));
 
 		if (p != DatumGetPointer(datum))
 			pfree(p);	// free if detoasted
@@ -516,7 +521,7 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 	{
 		Local<v8::Value>	jsonString = ToString(datum, type);
 		JSONObject JSON;
-		Local<v8::Value> result = Local<v8::Value>::New(JSON.Parse(jsonString));
+		Local<v8::Value> result = Local<v8::Value>::New(plv8_isolate, JSON.Parse(jsonString));
 
 		return result;
 	}
@@ -560,7 +565,7 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 	deconstruct_array(DatumGetArrayTypeP(datum),
 						type->typid, type->len, type->byval, type->align,
 						&values, &nulls, &nelems);
-	Local<Array>  result = Array::New(nelems);
+	Local<Array>  result = Array::New(plv8_isolate, nelems);
 	plv8_type base = { 0 };
 	bool    ispreferred;
 
@@ -644,7 +649,7 @@ ToString(Datum value, plv8_type *type)
 
 	Local<String>	result =
 		encoding == PG_UTF8
-			? String::New(str)
+			? String::NewFromUtf8(plv8_isolate, str)
 			: ToString(str, strlen(str), encoding);
 	pfree(str);
 
@@ -672,7 +677,7 @@ ToString(const char *str, int len, int encoding)
 
 	if (utf8 != str)
 		len = strlen(utf8);
-	Local<String> result = String::New(utf8, len);
+	Local<String> result = String::NewFromUtf8(plv8_isolate, utf8, String::kNormalString, len);
 	if (utf8 != str)
 		pfree(utf8);
 	return result;

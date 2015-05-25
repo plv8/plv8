@@ -169,13 +169,16 @@ public:
 		if (WindowObjectIsValid(m_winobj))
 		{
 			m_plv8obj = v8::Handle<v8::Object>::Cast(
-					context->Global()->Get(v8::String::NewSymbol("plv8")));
+					context->Global()->Get(v8::String::NewFromUtf8(
+						context->GetIsolate(),
+						"plv8",
+						v8::String::kInternalizedString)));
 			if (m_plv8obj.IsEmpty())
 				throw js_error("plv8 object not found");
 			/* Stash the current item, just in case of nested call */
 			m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO);
 			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO,
-					v8::External::New(fcinfo));
+					v8::External::New(context->GetIsolate(), fcinfo));
 		}
 	}
 	bool IsWindowCall() { return WindowObjectIsValid(m_winobj); }
@@ -206,15 +209,18 @@ public:
 			   Converter *conv, Tuplestorestate *tupstore)
 	{
 		m_plv8obj = v8::Handle<v8::Object>::Cast(
-				context->Global()->Get(v8::String::NewSymbol("plv8")));
+				context->Global()->Get(v8::String::NewFromUtf8(
+					context->GetIsolate(),
+					"plv8",
+					v8::String::kInternalizedString)));
 		if (m_plv8obj.IsEmpty())
 			throw js_error("plv8 object not found");
 		m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV);
 		m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE);
 		m_plv8obj->SetInternalField(PLV8_INTNL_CONV,
-									v8::External::New(conv));
+									v8::External::New(context->GetIsolate(), conv));
 		m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE,
-									v8::External::New(tupstore));
+									v8::External::New(context->GetIsolate(), tupstore));
 	}
 	~SRFSupport()
 	{
@@ -224,6 +230,7 @@ public:
 	}
 };
 
+extern v8::Isolate* plv8_isolate;
 extern v8::Local<v8::Function> find_js_function(Oid fn_oid);
 extern v8::Local<v8::Function> find_js_function_by_name(const char *signature);
 extern const char *FormatSPIStatus(int status) throw();
@@ -242,7 +249,7 @@ extern char *ToCStringCopy(const v8::String::Utf8Value &value);
 
 // plv8_func.cc
 extern v8::Handle<v8::Function> CreateYieldFunction(Converter *conv, Tuplestorestate *tupstore);
-extern v8::Handle<v8::Value> Subtransaction(const v8::Arguments& args) throw();
+extern void Subtransaction(const v8::FunctionCallbackInfo<v8::Value>& info) throw();
 
 extern void SetupPlv8Functions(v8::Handle<v8::ObjectTemplate> plv8);
 

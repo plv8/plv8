@@ -10,7 +10,7 @@ REQUIREMENT
 
 plv8 is tested with:
 
-- PG: version 9.4 (maybe older are allowed)
+- PG: version 9.3, 9.2 and 9.4 (maybe older/newer are allowed)
 - V8: version 4.3.66
 - g++: version 4.8.2
 

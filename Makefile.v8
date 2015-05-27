@@ -21,7 +21,7 @@ SHLIB_LINK += $(addprefix $(AUTOV8_OUT)/, $(AUTOV8_STATIC_LIBS))
 all: $(AUTOV8_LIB)
 
 # For some reason, this solves parallel make dependency.
-plv8_config.h: $(AUTOV8_LIB)
+plv8_config.h plv8.so: $(AUTOV8_LIB)
 
 $(AUTOV8_DEPOT_TOOLS):
 	mkdir -p build

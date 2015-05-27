@@ -6,6 +6,8 @@
  *-------------------------------------------------------------------------
  */
 #include "plv8.h"
+#include "libplatform/libplatform.h"
+
 #include <new>
 
 extern "C" {
@@ -86,6 +88,8 @@ typedef struct plv8_proc_cache
 	Oid						argtypes[FUNC_MAX_ARGS];
 } plv8_proc_cache;
 
+Isolate* plv8_isolate = NULL;
+
 /*
  * The function and context are created at the first invocation.  Their
  * lifetime is same as plv8_proc, but they are not palloc'ed memory,
@@ -95,6 +99,7 @@ typedef struct plv8_exec_env
 {
 	Persistent<Object>		recv;
 	Persistent<Context>		context;
+	Local<Context> localContext() { return Local<Context>::New(plv8_isolate, context) ; }
 	struct plv8_exec_env   *next;
 } plv8_exec_env;
 
@@ -118,6 +123,7 @@ typedef struct plv8_proc
 typedef struct plv8_context
 {
 	Persistent<Context>		context;
+	Local<Context> localContext() { return Local<Context>::New(plv8_isolate, context) ; }
 	Oid						user_id;
 } plv8_context;
 
@@ -141,9 +147,10 @@ static void plv8_xact_cb(XactEvent event, void *arg);
  * They could raise errors with C++ throw statements, or never throw exceptions.
  */
 static plv8_exec_env *CreateExecEnv(Handle<Function> script);
+static plv8_exec_env *CreateExecEnv(Persistent<Function>& script);
 static plv8_proc *Compile(Oid fn_oid, FunctionCallInfo fcinfo,
 					bool validate, bool is_trigger, Dialect dialect);
-static Local<Function> CompileFunction(Handle<Context> global_context,
+static Local<Function> CompileFunction(Persistent<Context>& global_context,
 					const char *proname, int proarglen,
 					const char *proargs[], const char *prosrc,
 					bool is_trigger, bool retset, Dialect dialect);
@@ -152,11 +159,14 @@ static Datum CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 static Datum CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		int nargs, plv8_type argtypes[], plv8_type *rettype);
 static Datum CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv);
-static Persistent<Context> GetGlobalContext();
-static Persistent<ObjectTemplate> GetGlobalObjectTemplate();
+static void GetGlobalContext(Persistent<Context>& global_context);
+static Local<ObjectTemplate> GetGlobalObjectTemplate();
 
 /* A GUC to specify a custom start up function to call */
 static char *plv8_start_proc = NULL;
+
+/* A GUC to specify V8 flags (e.g. --es_staging) */
+static char *plv8_v8_flags = NULL;
 
 /* A GUC to specify the remote debugger port */
 static int plv8_debugger_port;
@@ -210,6 +220,18 @@ _PG_init(void)
 							   NULL,
 							   NULL);
 
+	DefineCustomStringVariable("plv8.v8_flags",
+							   gettext_noop("V8 engine initialization flags (e.g. --es_staging for additional ES6 features)."),
+							   NULL,
+							   &plv8_v8_flags,
+							   NULL,
+							   PGC_USERSET, 0,
+#if PG_VERSION_NUM >= 90100
+							   NULL,
+#endif
+							   NULL,
+							   NULL);
+
 	DefineCustomIntVariable("plv8.debugger_port",
 							gettext_noop("V8 remote debug port."),
 							gettext_noop("The default value is 35432.  "
@@ -226,6 +248,17 @@ _PG_init(void)
 	RegisterXactCallback(plv8_xact_cb, NULL);
 
 	EmitWarningsOnPlaceholders("plv8");
+
+
+	V8::InitializeICU();
+	Platform* platform = platform::CreateDefaultPlatform();
+	V8::InitializePlatform(platform);
+	V8::Initialize();
+	if (plv8_v8_flags != NULL) {
+	      V8::SetFlagsFromString(plv8_v8_flags, strlen(plv8_v8_flags));
+	}
+	plv8_isolate = Isolate::New();
+	plv8_isolate->Enter();
 }
 
 static void
@@ -237,8 +270,7 @@ plv8_xact_cb(XactEvent event, void *arg)
 	{
 		if (!env->recv.IsEmpty())
 		{
-			env->recv.Dispose();
-			env->recv.Clear();
+			env->recv.Reset();
 		}
 		env = env->next;
 		/*
@@ -278,7 +310,7 @@ common_pl_call_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 #ifdef ENABLE_DEBUGGER_SUPPORT
 		Locker				lock;
 #endif  // ENABLE_DEBUGGER_SUPPORT
-		HandleScope	handle_scope;
+		HandleScope	handle_scope(plv8_isolate);
 
 		if (!fcinfo->flinfo->fn_extra)
 		{
@@ -337,11 +369,12 @@ common_pl_inline_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 #ifdef ENABLE_DEBUGGER_SUPPORT
 		Locker				lock;
 #endif  // ENABLE_DEBUGGER_SUPPORT
-		HandleScope			handle_scope;
+		HandleScope			handle_scope(plv8_isolate);
 		char			   *source_text = codeblock->source_text;
 
-		Handle<Context>	global_context = GetGlobalContext();
-		Handle<Function>	function = CompileFunction(global_context,
+		Persistent<Context>	global_context;
+		GetGlobalContext(global_context);
+		Local<Function>	function = CompileFunction(global_context,
 										NULL, 0, NULL,
 										source_text, false, false, dialect);
 		plv8_exec_env	   *xenv = CreateExecEnv(function);
@@ -401,7 +434,7 @@ static Datum
 CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	int nargs, plv8_type argtypes[], plv8_type *rettype)
 {
-	Handle<Context>		context = xenv->context;
+	Local<Context>		context = xenv->localContext();
 	Context::Scope		context_scope(context);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS];
 	Handle<Object>		plv8obj;
@@ -428,10 +461,11 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 			args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
 	}
 
+	Local<Object> recv = Local<Object>::New(plv8_isolate, xenv->recv);
 	Local<Function>		fn =
-		Local<Function>::Cast(xenv->recv->GetInternalField(0));
+		Local<Function>::Cast(recv->GetInternalField(0));
 	Local<v8::Value> result =
-		DoCall(fn, xenv->recv, nargs, args);
+		DoCall(fn, recv, nargs, args);
 
 	if (rettype)
 		return ToDatum(result, &fcinfo->isnull, rettype);
@@ -509,7 +543,7 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 
 	tupstore = CreateTupleStore(fcinfo, &tupdesc);
 
-	Handle<Context>		context = xenv->context;
+	Handle<Context>		context = xenv->localContext();
 	Context::Scope		context_scope(context);
 	Converter			conv(tupdesc, proc->functypclass == TYPEFUNC_SCALAR);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS + 1];
@@ -523,10 +557,11 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	for (int i = 0; i < nargs; i++)
 		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
 
+	Local<Object> recv = Local<Object>::New(plv8_isolate, xenv->recv);
 	Local<Function>		fn =
-		Local<Function>::Cast(xenv->recv->GetInternalField(0));
+		Local<Function>::Cast(recv->GetInternalField(0));
 
-	Handle<v8::Value> result = DoCall(fn, xenv->recv, nargs, args);
+	Handle<v8::Value> result = DoCall(fn, recv, nargs, args);
 
 	if (result->IsUndefined())
 	{
@@ -572,7 +607,7 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	Handle<v8::Value>	args[10];
 	Datum				result = (Datum) 0;
 
-	Handle<Context>		context = xenv->context;
+	Handle<Context>		context = xenv->localContext();
 	Context::Scope		context_scope(context);
 
 	if (TRIGGER_FIRED_FOR_ROW(event))
@@ -586,13 +621,13 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 			// NEW
 			args[0] = conv.ToValue(trig->tg_trigtuple);
 			// OLD
-			args[1] = Undefined();
+			args[1] = Undefined(plv8_isolate);
 		}
 		else if (TRIGGER_FIRED_BY_DELETE(event))
 		{
 			result = PointerGetDatum(trig->tg_trigtuple);
 			// NEW
-			args[0] = Undefined();
+			args[0] = Undefined(plv8_isolate);
 			// OLD
 			args[1] = conv.ToValue(trig->tg_trigtuple);
 		}
@@ -607,7 +642,7 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	}
 	else
 	{
-		args[0] = args[1] = Undefined();
+		args[0] = args[1] = Undefined(plv8_isolate);
 	}
 
 	// 2: TG_NAME
@@ -615,32 +650,32 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 
 	// 3: TG_WHEN
 	if (TRIGGER_FIRED_BEFORE(event))
-		args[3] = String::New("BEFORE");
+		args[3] = String::NewFromUtf8(plv8_isolate, "BEFORE");
 	else
-		args[3] = String::New("AFTER");
+		args[3] = String::NewFromUtf8(plv8_isolate, "AFTER");
 
 	// 4: TG_LEVEL
 	if (TRIGGER_FIRED_FOR_ROW(event))
-		args[4] = String::New("ROW");
+		args[4] = String::NewFromUtf8(plv8_isolate, "ROW");
 	else
-		args[4] = String::New("STATEMENT");
+		args[4] = String::NewFromUtf8(plv8_isolate, "STATEMENT");
 
 	// 5: TG_OP
 	if (TRIGGER_FIRED_BY_INSERT(event))
-		args[5] = String::New("INSERT");
+		args[5] = String::NewFromUtf8(plv8_isolate, "INSERT");
 	else if (TRIGGER_FIRED_BY_DELETE(event))
-		args[5] = String::New("DELETE");
+		args[5] = String::NewFromUtf8(plv8_isolate, "DELETE");
 	else if (TRIGGER_FIRED_BY_UPDATE(event))
-		args[5] = String::New("UPDATE");
+		args[5] = String::NewFromUtf8(plv8_isolate, "UPDATE");
 #ifdef TRIGGER_FIRED_BY_TRUNCATE
 	else if (TRIGGER_FIRED_BY_TRUNCATE(event))
-		args[5] = String::New("TRUNCATE");
+		args[5] = String::NewFromUtf8(plv8_isolate, "TRUNCATE");
 #endif
 	else
-		args[5] = String::New("?");
+		args[5] = String::NewFromUtf8(plv8_isolate, "?");
 
 	// 6: TG_RELID
-	args[6] = Uint32::New(RelationGetRelid(rel));
+	args[6] = Uint32::New(plv8_isolate, RelationGetRelid(rel));
 
 	// 7: TG_TABLE_NAME
 	args[7] = ToString(RelationGetRelationName(rel));
@@ -649,16 +684,17 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	args[8] = ToString(get_namespace_name(RelationGetNamespace(rel)));
 
 	// 9: TG_ARGV
-	Handle<Array> tgargs = Array::New(trig->tg_trigger->tgnargs);
+	Handle<Array> tgargs = Array::New(plv8_isolate, trig->tg_trigger->tgnargs);
 	for (int i = 0; i < trig->tg_trigger->tgnargs; i++)
 		tgargs->Set(i, ToString(trig->tg_trigger->tgargs[i]));
 	args[9] = tgargs;
 
 	TryCatch			try_catch;
+	Local<Object> recv = Local<Object>::New(plv8_isolate, xenv->recv);
 	Local<Function>		fn =
-		Local<Function>::Cast(xenv->recv->GetInternalField(0));
+		Local<Function>::Cast(recv->GetInternalField(0));
 	Handle<v8::Value> newtup =
-		DoCall(fn, xenv->recv, lengthof(args), args);
+		DoCall(fn, recv, lengthof(args), args);
 
 	if (newtup.IsEmpty())
 		throw js_error(try_catch);
@@ -804,8 +840,7 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 				pfree(cache->prosrc);
 				cache->prosrc = NULL;
 			}
-			cache->function.Dispose();
-			cache->function.Clear();
+			cache->function.Reset();
 		}
 		else
 		{
@@ -914,10 +949,10 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 }
 
 static plv8_exec_env *
-CreateExecEnv(Handle<Function> function)
+CreateExecEnv(Persistent<Function>& function)
 {
 	plv8_exec_env	   *xenv;
-	HandleScope			handle_scope;
+	HandleScope			handle_scope(plv8_isolate);
 
 	PG_TRY();
 	{
@@ -929,18 +964,58 @@ CreateExecEnv(Handle<Function> function)
 	}
 	PG_END_TRY();
 
-	xenv->context = GetGlobalContext();
-	Context::Scope		scope(xenv->context);
+	GetGlobalContext(xenv->context);
+	Context::Scope		scope(xenv->localContext());
 
 	static Persistent<ObjectTemplate> recv_templ;
 	if (recv_templ.IsEmpty())
 	{
-		recv_templ = Persistent<ObjectTemplate>::New(ObjectTemplate::New());
-		recv_templ->SetInternalFieldCount(1);
+		Local<ObjectTemplate> templ = ObjectTemplate::New(plv8_isolate);
+		templ->SetInternalFieldCount(1);
+		recv_templ.Reset(plv8_isolate, templ);
 	}
-	xenv->recv = Persistent<Object>::New(recv_templ->NewInstance());
+	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, recv_templ);
+	Local<Object> obj = templ->NewInstance();
+	Local<Function> f = Local<Function>::New(plv8_isolate, function);
+	obj->SetInternalField(0, f);
+	xenv->recv.Reset(plv8_isolate, obj);
 
-	xenv->recv->SetInternalField(0, function);
+
+	return xenv;
+}
+
+static plv8_exec_env *
+CreateExecEnv(Handle<Function> function)
+{
+	plv8_exec_env	   *xenv;
+	HandleScope			handle_scope(plv8_isolate);
+
+	PG_TRY();
+	{
+		xenv = plv8_new_exec_env();
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	GetGlobalContext(xenv->context);
+	Context::Scope		scope(xenv->localContext());
+
+	static Persistent<ObjectTemplate> recv_templ;
+	if (recv_templ.IsEmpty())
+	{
+		Local<ObjectTemplate> templ = ObjectTemplate::New(plv8_isolate);
+		templ->SetInternalFieldCount(1);
+		recv_templ.Reset(plv8_isolate, templ);
+	}
+	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, recv_templ);
+	Local<Object> obj = templ->NewInstance();
+	Local<Function> f = Local<Function>::New(plv8_isolate, function);
+	obj->SetInternalField(0, f);
+	xenv->recv.Reset(plv8_isolate, obj);
+
 
 	return xenv;
 }
@@ -949,9 +1024,14 @@ CreateExecEnv(Handle<Function> function)
 static char *
 CompileDialect(const char *src, Dialect dialect)
 {
-	HandleScope		handle_scope;
-	static Persistent<Context>	context = Context::New((ExtensionConfiguration*)NULL);
-	Context::Scope	context_scope(context);
+	HandleScope		handle_scope(plv8_isolate);
+	static Persistent<Context>	context;
+	if (context.IsEmpty()) {
+	   Local<Context> ctx = Context::New(plv8_isolate, (ExtensionConfiguration*)NULL);
+	   context.Reset(plv8_isolate, ctx);
+	}
+	Local<Context> ctx = Local<Context>::New(plv8_isolate, context);
+	Context::Scope	context_scope(ctx);
 	TryCatch		try_catch;
 	Local<String>	key;
 	char		   *cresult;
@@ -962,24 +1042,24 @@ CompileDialect(const char *src, Dialect dialect)
 		case PLV8_DIALECT_COFFEE:
 			if (coffee_script_binary_data[0] == '\0')
 				throw js_error("CoffeeScript is not enabled");
-			key = String::NewSymbol("CoffeeScript");
+			key = String::NewFromUtf8(plv8_isolate, "CoffeeScript", String::kInternalizedString);
 			dialect_binary_data = (const char *) coffee_script_binary_data;
 			break;
 		case PLV8_DIALECT_LIVESCRIPT:
 			if (livescript_binary_data[0] == '\0')
 				throw js_error("LiveScript is not enabled");
-			key = String::NewSymbol("LiveScript");
+			key = String::NewFromUtf8(plv8_isolate, "LiveScript", String::kInternalizedString);
 			dialect_binary_data = (const char *) livescript_binary_data;
 			break;
 		default:
 			throw js_error("Unknown Dialect");
 	}
 
-	if (context->Global()->Get(key)->IsUndefined())
+	if (ctx->Global()->Get(key)->IsUndefined())
 	{
-		HandleScope		handle_scope;
+		HandleScope		handle_scope(plv8_isolate);
 		Local<Script>	script =
-			Script::New(ToString(dialect_binary_data), key);
+			Script::Compile(ToString(dialect_binary_data), key);
 		if (script.IsEmpty())
 			throw js_error(try_catch);
 		Local<v8::Value>	result = script->Run();
@@ -987,9 +1067,9 @@ CompileDialect(const char *src, Dialect dialect)
 			throw js_error(try_catch);
 	}
 
-	Local<Object>	compiler = Local<Object>::Cast(context->Global()->Get(key));
+	Local<Object>	compiler = Local<Object>::Cast(ctx->Global()->Get(key));
 	Local<Function>	func = Local<Function>::Cast(
-			compiler->Get(String::NewSymbol("compile")));
+			compiler->Get(String::NewFromUtf8(plv8_isolate, "compile", String::kInternalizedString)));
 	const int		nargs = 1;
 	Handle<v8::Value>	args[nargs];
 
@@ -1049,9 +1129,10 @@ Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger,
 		 * point.  Then some pointers of cache will become stale by pfree
 		 * and CompileFunction ends up compiling freed function source.
 		 */
-		HandleScope		handle_scope;
-		Handle<Context>	global_context = GetGlobalContext();
-		cache->function = Persistent<Function>::New(CompileFunction(
+		HandleScope		handle_scope(plv8_isolate);
+		Persistent<Context>	global_context;
+		GetGlobalContext(global_context);
+		cache->function.Reset(plv8_isolate, CompileFunction(
 						global_context,
 						cache->proname,
 						cache->nargs,
@@ -1067,7 +1148,7 @@ Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger,
 
 static Local<Function>
 CompileFunction(
-	Handle<Context> global_context,
+	Persistent<Context>& global_context,
 	const char *proname,
 	int proarglen,
 	const char *proargs[],
@@ -1076,7 +1157,7 @@ CompileFunction(
 	bool retset,
 	Dialect dialect)
 {
-	HandleScope		handle_scope;
+	EscapableHandleScope		handle_scope(plv8_isolate);
 	StringInfoData	src;
 
 	initStringInfo(&src);
@@ -1119,13 +1200,14 @@ CompileFunction(
 	if (proname)
 		name = ToString(proname);
 	else
-		name = Undefined();
+		name = Undefined(plv8_isolate);
 	Local<String> source = ToString(src.data, src.len);
 	pfree(src.data);
 
-	Context::Scope	context_scope(global_context);
+	Local<Context> context = Local<Context>::New(plv8_isolate, global_context);
+	Context::Scope	context_scope(context);
 	TryCatch		try_catch;
-	Local<Script>	script = Script::New(source, name);
+	Local<Script>	script = Script::Compile(source, Handle<String>::Cast(name));
 
 	if (script.IsEmpty())
 		throw js_error(try_catch);
@@ -1134,7 +1216,7 @@ CompileFunction(
 	if (result.IsEmpty())
 		throw js_error(try_catch);
 
-	return handle_scope.Close(Local<Function>::Cast(result));
+	return handle_scope.Escape(Local<Function>::Cast(result));
 }
 
 Local<Function>
@@ -1185,7 +1267,7 @@ find_js_function(Oid fn_oid)
 
 		TryCatch			try_catch;
 
-		func = Local<Function>::New(proc->cache->function);
+		func = Local<Function>::New(plv8_isolate, proc->cache->function);
 	}
 	catch (js_error& e) { e.rethrow(); }
 	catch (pg_error& e) { e.rethrow(); }
@@ -1260,34 +1342,35 @@ FormatSPIStatus(int status) throw()
 Handle<v8::Value>
 ThrowError(const char *message) throw()
 {
-	return ThrowException(Exception::Error(String::New(message)));
+	return plv8_isolate->ThrowException(Exception::Error(String::NewFromUtf8(plv8_isolate, message)));
 }
 
-static Persistent<Context>
-GetGlobalContext()
+static void
+GetGlobalContext(Persistent<Context>& global_context)
 {
 	Oid					user_id = GetUserId();
-	Persistent<Context>	global_context;
 	unsigned int		i;
 
 	for (i = 0; i < ContextVector.size(); i++)
 	{
 		if (ContextVector[i]->user_id == user_id)
 		{
-			global_context = ContextVector[i]->context;
+			global_context.Reset(plv8_isolate, ContextVector[i]->context);
 			break;
 		}
 	}
 	if (global_context.IsEmpty())
 	{
-		HandleScope				handle_scope;
-		Handle<ObjectTemplate>	global = GetGlobalObjectTemplate();
+		HandleScope				handle_scope(plv8_isolate);
+
+		Local<ObjectTemplate>	global = Local<ObjectTemplate>::New(plv8_isolate, GetGlobalObjectTemplate());
 		plv8_context		   *my_context;
 
-		global_context = Context::New(NULL, global);
+		global_context.Reset(plv8_isolate, Context::New(plv8_isolate, NULL, global));
 		my_context = (plv8_context *) MemoryContextAlloc(TopMemoryContext,
 														 sizeof(plv8_context));
-		my_context->context = global_context;
+		new(&my_context->context) Persistent<Context>();
+		my_context->context.Reset(plv8_isolate, global_context);
 		my_context->user_id = user_id;
 
 		/*
@@ -1303,8 +1386,8 @@ GetGlobalContext()
 		{
 			Local<Function>		func;
 
-			HandleScope			handle_scope;
-			Context::Scope		context_scope(global_context);
+			HandleScope			handle_scope(plv8_isolate);
+			Context::Scope		context_scope(my_context->localContext());
 			TryCatch			try_catch;
 			MemoryContext		ctx = CurrentMemoryContext;
 
@@ -1327,7 +1410,7 @@ GetGlobalContext()
 			if (!func.IsEmpty())
 			{
 				Handle<v8::Value>	result =
-					DoCall(func, global_context->Global(), 0, NULL);
+					DoCall(func, my_context->localContext()->Global(), 0, NULL);
 				if (result.IsEmpty())
 					throw js_error(try_catch);
 			}
@@ -1343,42 +1426,40 @@ GetGlobalContext()
 		v8::Debug::EnableAgent("plv8", plv8_debugger_port, false);
 #endif  // ENABLE_DEBUGGER_SUPPORT
 	}
-
-	return global_context;
 }
 
-static Persistent<ObjectTemplate>
+static Local<ObjectTemplate>
 GetGlobalObjectTemplate()
 {
 	static Persistent<ObjectTemplate>	global;
 
 	if (global.IsEmpty())
 	{
-		HandleScope				handle_scope;
+		HandleScope				handle_scope(plv8_isolate);
 
-		global = Persistent<ObjectTemplate>::New(ObjectTemplate::New());
+		Local<ObjectTemplate> templ = ObjectTemplate::New();
 		// ERROR levels for elog
-		global->Set(String::NewSymbol("DEBUG5"), Int32::New(DEBUG5));
-		global->Set(String::NewSymbol("DEBUG4"), Int32::New(DEBUG4));
-		global->Set(String::NewSymbol("DEBUG3"), Int32::New(DEBUG3));
-		global->Set(String::NewSymbol("DEBUG2"), Int32::New(DEBUG2));
-		global->Set(String::NewSymbol("DEBUG1"), Int32::New(DEBUG1));
-		global->Set(String::NewSymbol("DEBUG"), Int32::New(DEBUG5));
-		global->Set(String::NewSymbol("LOG"), Int32::New(LOG));
-		global->Set(String::NewSymbol("INFO"), Int32::New(INFO));
-		global->Set(String::NewSymbol("NOTICE"), Int32::New(NOTICE));
-		global->Set(String::NewSymbol("WARNING"), Int32::New(WARNING));
-		global->Set(String::NewSymbol("ERROR"), Int32::New(ERROR));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG5", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG5));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG4", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG4));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG3", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG3));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG2", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG2));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG1", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG1));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG5));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "LOG", String::kInternalizedString), Int32::New(plv8_isolate, LOG));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "INFO", String::kInternalizedString), Int32::New(plv8_isolate, INFO));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "NOTICE", String::kInternalizedString), Int32::New(plv8_isolate, NOTICE));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "WARNING", String::kInternalizedString), Int32::New(plv8_isolate, WARNING));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "ERROR", String::kInternalizedString), Int32::New(plv8_isolate, ERROR));
+		global.Reset(plv8_isolate, templ);
 
 		Handle<ObjectTemplate>	plv8 = ObjectTemplate::New();
 
 		SetupPlv8Functions(plv8);
-		plv8->Set(String::NewSymbol("version"), String::New(PLV8_VERSION));
+		plv8->Set(String::NewFromUtf8(plv8_isolate, "version", String::kInternalizedString), String::NewFromUtf8(plv8_isolate, PLV8_VERSION));
 
-		global->Set(String::NewSymbol("plv8"), plv8);
+		templ->Set(String::NewFromUtf8(plv8_isolate, "plv8", String::kInternalizedString), plv8);
 	}
-
-	return global;
+	return Local<ObjectTemplate>::New(plv8_isolate, global);
 }
 
 /*
@@ -1473,7 +1554,7 @@ Converter::Init()
 Local<Object>
 Converter::ToValue(HeapTuple tuple)
 {
-	Local<Object>	obj = Object::New();
+	Local<Object>	obj = Object::New(plv8_isolate);
 
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
@@ -1592,7 +1673,7 @@ js_error::js_error(const char *msg) throw()
 
 js_error::js_error(TryCatch &try_catch) throw()
 {
-	HandleScope			handle_scope;
+	HandleScope			handle_scope(plv8_isolate);
 	String::Utf8Value	exception(try_catch.Exception());
 	Handle<Message>		message = try_catch.Message();
 

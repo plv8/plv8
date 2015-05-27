@@ -3,7 +3,7 @@
 # Makefile for plv8
 #
 # @param DISABLE_DIALECT if defined, not build dialects (i.e. plcoffee, etc)
-# @param ENABLE_DEBUGGER_SUPPORT enables v8 deubbger agent
+# @param ENABLE_DEBUGGER_SUPPORT enables v8 debugger agent
 #
 # There are two ways to build plv8.
 # 1. Dynamic link to v8 (default)
@@ -37,7 +37,7 @@ DATA += plcoffee.control plcoffee--$(PLV8_VERSION).sql \
 endif
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 inline json startup_pre startup varparam json_conv \
-		  jsonb_conv window
+		  jsonb_conv window guc es6
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif
@@ -52,11 +52,16 @@ endif
 ifdef ENABLE_DEBUGGER_SUPPORT
 OPT_ENABLE_DEBUGGER_SUPPORT = -DENABLE_DEBUGGER_SUPPORT
 endif
-OPTFLAGS = -O2 -DV8_USE_UNSAFE_HANDLES
+
+# for older g++ (e.g. 4.6.x), which do not support c++11
+#OPTFLAGS = -O2 -std=gnu++0x -fno-rtti
+
+OPTFLAGS = -O2 -std=c++11 -fno-rtti
+
 CCFLAGS = -Wall $(OPTFLAGS) $(OPT_ENABLE_DEBUGGER_SUPPORT)
 
 ifdef V8_SRCDIR
-override CPPFLAGS += -I$(V8_SRCDIR)/include
+override CPPFLAGS += -I$(V8_SRCDIR) -I$(V8_SRCDIR)/include
 endif
 
 all:

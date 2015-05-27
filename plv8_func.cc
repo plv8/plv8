@@ -32,32 +32,32 @@ extern "C" {
 
 using namespace v8;
 
-static Handle<v8::Value> plv8_FunctionInvoker(const Arguments& args) throw();
-static Handle<v8::Value> plv8_Elog(const Arguments& args);
-static Handle<v8::Value> plv8_Execute(const Arguments& args);
-static Handle<v8::Value> plv8_Prepare(const Arguments& args);
-static Handle<v8::Value> plv8_PlanCursor(const Arguments& args);
-static Handle<v8::Value> plv8_PlanExecute(const Arguments& args);
-static Handle<v8::Value> plv8_PlanFree(const Arguments& args);
-static Handle<v8::Value> plv8_CursorFetch(const Arguments& args);
-static Handle<v8::Value> plv8_CursorMove(const Arguments& args);
-static Handle<v8::Value> plv8_CursorClose(const Arguments& args);
-static Handle<v8::Value> plv8_ReturnNext(const Arguments& args);
-static Handle<v8::Value> plv8_Subtransaction(const Arguments& args);
-static Handle<v8::Value> plv8_FindFunction(const Arguments& args);
-static Handle<v8::Value> plv8_GetWindowObject(const Arguments& args);
-static Handle<v8::Value> plv8_WinGetPartitionLocal(const Arguments& args);
-static Handle<v8::Value> plv8_WinSetPartitionLocal(const Arguments& args);
-static Handle<v8::Value> plv8_WinGetCurrentPosition(const Arguments& args);
-static Handle<v8::Value> plv8_WinGetPartitionRowCount(const Arguments& args);
-static Handle<v8::Value> plv8_WinSetMarkPosition(const Arguments& args);
-static Handle<v8::Value> plv8_WinRowsArePeers(const Arguments& args);
-static Handle<v8::Value> plv8_WinGetFuncArgInPartition(const Arguments& args);
-static Handle<v8::Value> plv8_WinGetFuncArgInFrame(const Arguments& args);
-static Handle<v8::Value> plv8_WinGetFuncArgCurrent(const Arguments& args);
-static Handle<v8::Value> plv8_QuoteLiteral(const Arguments& args);
-static Handle<v8::Value> plv8_QuoteNullable(const Arguments& args);
-static Handle<v8::Value> plv8_QuoteIdent(const Arguments& args);
+static void plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value>& args) throw();
+static void plv8_Elog(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_Execute(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_Prepare(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_PlanCursor(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_PlanExecute(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_PlanFree(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_CursorFetch(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_CursorClose(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_ReturnNext(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_Subtransaction(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_GetWindowObject(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_WinGetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_WinSetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_WinGetCurrentPosition(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_WinGetPartitionRowCount(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_WinSetMarkPosition(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_WinRowsArePeers(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_WinGetFuncArgInPartition(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_WinGetFuncArgInFrame(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_WinGetFuncArgCurrent(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_QuoteLiteral(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_QuoteNullable(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_QuoteIdent(const FunctionCallbackInfo<v8::Value>& args);
 
 /*
  * Window function API allows to store partition-local memory, but
@@ -87,26 +87,26 @@ quote_literal_cstr(const char *rawstr)
 #endif
 
 static inline Local<v8::Value>
-WrapCallback(InvocationCallback func)
+WrapCallback(FunctionCallback func)
 {
-	return External::New(
+	return External::New(plv8_isolate,
 			reinterpret_cast<void *>(
 				reinterpret_cast<uintptr_t>(func)));
 }
 
-static inline InvocationCallback
+static inline FunctionCallback
 UnwrapCallback(Handle<v8::Value> value)
 {
-	return reinterpret_cast<InvocationCallback>(
+	return reinterpret_cast<FunctionCallback>(
 			reinterpret_cast<uintptr_t>(External::Cast(*value)->Value()));
 }
 
 static inline void
 SetCallback(Handle<ObjectTemplate> obj, const char *name,
-			InvocationCallback func, PropertyAttribute attr = None)
+			FunctionCallback func, PropertyAttribute attr = None)
 {
-	obj->Set(String::NewSymbol(name),
-				FunctionTemplate::New(plv8_FunctionInvoker,
+	obj->Set(String::NewFromUtf8(plv8_isolate, name, String::kInternalizedString),
+				FunctionTemplate::New(plv8_isolate, plv8_FunctionInvoker,
 					WrapCallback(func)), attr);
 }
 
@@ -130,8 +130,10 @@ SPIResultToValue(int status)
 {
 	Local<v8::Value>	result;
 
-	if (status < 0)
-		return ThrowError(FormatSPIStatus(status));
+	if (status < 0) {
+		plv8_isolate->ThrowException(String::NewFromUtf8(plv8_isolate, FormatSPIStatus(status)));
+		return result;
+	}
 
 	switch (status)
 	{
@@ -142,7 +144,7 @@ SPIResultToValue(int status)
 	{
 		int				nrows = SPI_processed;
 		Converter		conv(SPI_tuptable->tupdesc);
-		Local<Array>	rows = Array::New(nrows);
+		Local<Array>	rows = Array::New(plv8_isolate, nrows);
 
 		for (int r = 0; r < nrows; r++)
 			rows->Set(r, conv.ToValue(SPI_tuptable->vals[r]));
@@ -151,7 +153,7 @@ SPIResultToValue(int status)
 		break;
 	}
 	default:
-		result = Int32::New(SPI_processed);
+		result = Int32::New(plv8_isolate, SPI_processed);
 		break;
 	}
 
@@ -197,9 +199,9 @@ SubTranBlock::exit(bool success)
 
 JSONObject::JSONObject()
 {
-	Handle<Context> context = Context::GetCurrent();
+	Handle<Context> context = plv8_isolate->GetCurrentContext();
 	Handle<Object> global = context->Global();
-	m_json = global->Get(String::NewSymbol("JSON"))->ToObject();
+	m_json = global->Get(String::NewFromUtf8(plv8_isolate, "JSON", String::kInternalizedString))->ToObject();
 	if (m_json.IsEmpty())
 		throw js_error("JSON not found");
 }
@@ -211,7 +213,7 @@ Handle<v8::Value>
 JSONObject::Parse(Handle<v8::Value> str)
 {
 	Handle<Function> parse_func =
-		Handle<Function>::Cast(m_json->Get(String::NewSymbol("parse")));
+		Handle<Function>::Cast(m_json->Get(String::NewFromUtf8(plv8_isolate, "parse", String::kInternalizedString)));
 
 	if (parse_func.IsEmpty())
 		throw js_error("JSON.parse() not found");
@@ -226,7 +228,7 @@ Handle<v8::Value>
 JSONObject::Stringify(Handle<v8::Value> val)
 {
 	Handle<Function> stringify_func =
-		Handle<Function>::Cast(m_json->Get(String::NewSymbol("stringify")));
+		Handle<Function>::Cast(m_json->Get(String::NewFromUtf8(plv8_isolate, "stringify", String::kInternalizedString)));
 
 	if (stringify_func.IsEmpty())
 		throw js_error("JSON.stringify() not found");
@@ -258,12 +260,12 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
  * v8 is not exception-safe! We cannot throw C++ exceptions over v8 functions.
  * So, we catch C++ exceptions and convert them to JavaScript ones.
  */
-static Handle<v8::Value>
-plv8_FunctionInvoker(const Arguments &args) throw()
+static void
+plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 {
-	HandleScope		handle_scope;
+	HandleScope		handle_scope(plv8_isolate);
 	MemoryContext	ctx = CurrentMemoryContext;
-	InvocationCallback	fn = UnwrapCallback(args.Data());
+	FunctionCallback	fn = UnwrapCallback(args.Data());
 
 	try
 	{
@@ -271,7 +273,7 @@ plv8_FunctionInvoker(const Arguments &args) throw()
 	}
 	catch (js_error& e)
 	{
-		return ThrowException(e.error_object());
+		args.GetReturnValue().Set(plv8_isolate->ThrowException(e.error_object()));
 	}
 	catch (pg_error& e)
 	{
@@ -282,20 +284,22 @@ plv8_FunctionInvoker(const Arguments &args) throw()
 		FlushErrorState();
 		FreeErrorData(edata);
 
-		return ThrowException(Exception::Error(message));
+		args.GetReturnValue().Set(plv8_isolate->ThrowException(Exception::Error(message)));
 	}
 }
 
 /*
  * plv8.elog(elevel, str)
  */
-static Handle<v8::Value>
-plv8_Elog(const Arguments& args)
+static void
+plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 {
 	MemoryContext	ctx = CurrentMemoryContext;
 
-	if (args.Length() < 2)
-		return ThrowError("usage: plv8.elog(elevel, ...)");
+	if (args.Length() < 2) {
+		args.GetReturnValue().Set(plv8_isolate->ThrowException(String::NewFromUtf8(plv8_isolate, "usage: plv8.elog(elevel, ...)")));
+		return;
+	}
 
 	int	elevel = args[0]->Int32Value();
 	switch (elevel)
@@ -312,7 +316,8 @@ plv8_Elog(const Arguments& args)
 	case ERROR:
 		break;
 	default:
-		return ThrowError("invalid error level");
+		args.GetReturnValue().Set(plv8_isolate->ThrowException(String::NewFromUtf8(plv8_isolate, "invalid error level")));
+		return;
 	}
 
 	std::ostringstream	stream;
@@ -329,7 +334,8 @@ plv8_Elog(const Arguments& args)
 	if (elevel != ERROR)
 	{
 		elog(elevel, "%s", message);
-		return Undefined();
+		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
 	}
 
 	/* ERROR case */
@@ -345,11 +351,12 @@ plv8_Elog(const Arguments& args)
 		FlushErrorState();
 		FreeErrorData(edata);
 
-		return ThrowException(Exception::Error(message));
+		args.GetReturnValue().Set(plv8_isolate->ThrowException(Exception::Error(message)));
+		return;
 	}
 	PG_END_TRY();
 
-	return Undefined();
+	args.GetReturnValue().Set(Undefined(plv8_isolate));
 }
 
 static Datum
@@ -434,9 +441,9 @@ plv8_execute_params(const char *sql, Handle<Array> params)
 }
 
 static Handle<Array>
-convertArgsToArray(const Arguments &args, int start, int downshift)
+convertArgsToArray(const FunctionCallbackInfo<v8::Value> &args, int start, int downshift)
 {
-	Local<Array> result = Array::New(args.Length() - start);
+	Local<Array> result = Array::New(plv8_isolate, args.Length() - start);
 	for (int i = start; i < args.Length(); i++)
 	{
 		result->Set(i - downshift, args[i]);
@@ -447,13 +454,15 @@ convertArgsToArray(const Arguments &args, int start, int downshift)
 /*
  * plv8.execute(statement, [param, ...])
  */
-static Handle<v8::Value>
-plv8_Execute(const Arguments &args)
+static void
+plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 {
 	int				status;
 
-	if (args.Length() < 1)
-		return Undefined();
+	if (args.Length() < 1) {
+		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
 
 	CString			sql(args[0]);
 	Handle<Array>	params;
@@ -487,14 +496,14 @@ plv8_Execute(const Arguments &args)
 
 	subtran.exit(true);
 
-	return SPIResultToValue(status);
+	args.GetReturnValue().Set(SPIResultToValue(status));
 }
 
 /*
  * plv8.prepare(statement, args...)
  */
-static Handle<v8::Value>
-plv8_Prepare(const Arguments &args)
+static void
+plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 {
 	SPIPlanPtr		initial = NULL, saved;
 	CString			sql(args[0]);
@@ -550,28 +559,29 @@ plv8_Prepare(const Arguments &args)
 
 	if (PlanTemplate.IsEmpty())
 	{
-		Local<FunctionTemplate> base = FunctionTemplate::New();
-		base->SetClassName(String::NewSymbol("PreparedPlan"));
+		Local<FunctionTemplate> base = FunctionTemplate::New(plv8_isolate);
+		base->SetClassName(String::NewFromUtf8(plv8_isolate, "PreparedPlan", String::kInternalizedString));
 		Local<ObjectTemplate> templ = base->InstanceTemplate();
 		templ->SetInternalFieldCount(2);
 		SetCallback(templ, "cursor", plv8_PlanCursor);
 		SetCallback(templ, "execute", plv8_PlanExecute);
 		SetCallback(templ, "free", plv8_PlanFree);
-		PlanTemplate = Persistent<ObjectTemplate>::New(templ);
+		PlanTemplate.Reset(plv8_isolate, templ);
 	}
+	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, PlanTemplate);
 
-	Local<v8::Object> result = PlanTemplate->NewInstance();
-	result->SetInternalField(0, External::New(saved));
-	result->SetInternalField(1, External::New(parstate));
+	Local<v8::Object> result = templ->NewInstance();
+	result->SetInternalField(0, External::New(plv8_isolate, saved));
+	result->SetInternalField(1, External::New(plv8_isolate, parstate));
 
-	return result;
+	args.GetReturnValue().Set(result);
 }
 
 /*
  * plan.cursor(args, ...)
  */
-static Handle<v8::Value>
-plv8_PlanCursor(const Arguments &args)
+static void
+plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 {
 	Handle<v8::Object>	self = args.This();
 	SPIPlanPtr			plan;
@@ -662,27 +672,28 @@ plv8_PlanCursor(const Arguments &args)
 	 */
 	if (CursorTemplate.IsEmpty())
 	{
-		Local<FunctionTemplate> base = FunctionTemplate::New();
-		base->SetClassName(String::NewSymbol("Cursor"));
+		Local<FunctionTemplate> base = FunctionTemplate::New(plv8_isolate);
+		base->SetClassName(String::NewFromUtf8(plv8_isolate, "Cursor", String::kInternalizedString));
 		Local<ObjectTemplate> templ = base->InstanceTemplate();
 		templ->SetInternalFieldCount(1);
 		SetCallback(templ, "fetch", plv8_CursorFetch);
 		SetCallback(templ, "move", plv8_CursorMove);
 		SetCallback(templ, "close", plv8_CursorClose);
-		CursorTemplate = Persistent<ObjectTemplate>::New(templ);
+		CursorTemplate.Reset(plv8_isolate, templ);
 	}
+	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, CursorTemplate);
 
-	Local<v8::Object> result = CursorTemplate->NewInstance();
+	Local<v8::Object> result = templ->NewInstance();
 	result->SetInternalField(0, cname);
 
-	return result;
+	args.GetReturnValue().Set(result);
 }
 
 /*
  * plan.execute(args, ...)
  */
-static Handle<v8::Value>
-plv8_PlanExecute(const Arguments &args)
+static void
+plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 {
 	Handle<v8::Object>	self = args.This();
 	SPIPlanPtr			plan;
@@ -771,14 +782,14 @@ plv8_PlanExecute(const Arguments &args)
 
 	subtran.exit(true);
 
-	return SPIResultToValue(status);
+	args.GetReturnValue().Set(SPIResultToValue(status));
 }
 
 /*
  * plan.free()
  */
-static Handle<v8::Value>
-plv8_PlanFree(const Arguments &args)
+static void
+plv8_PlanFree(const FunctionCallbackInfo<v8::Value> &args)
 {
 	Handle<v8::Object>	self = args.This();
 	SPIPlanPtr			plan;
@@ -791,23 +802,23 @@ plv8_PlanFree(const Arguments &args)
 	if (plan)
 		status = SPI_freeplan(plan);
 
-	self->SetInternalField(0, External::New(0));
+	self->SetInternalField(0, External::New(plv8_isolate, 0));
 
 	parstate = static_cast<plv8_param_state *>(
 			Handle<External>::Cast(self->GetInternalField(1))->Value());
 
 	if (parstate)
 		pfree(parstate);
-	self->SetInternalField(1, External::New(0));
+	self->SetInternalField(1, External::New(plv8_isolate, 0));
 
-	return Int32::New(status);
+	args.GetReturnValue().Set(Int32::New(plv8_isolate, status));
 }
 
 /*
  * cursor.fetch([n])
  */
-static Handle<v8::Value>
-plv8_CursorFetch(const Arguments &args)
+static void
+plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 {
 	Handle<v8::Object>	self = args.This();
 	CString				cname(self->GetInternalField(0));
@@ -846,24 +857,26 @@ plv8_CursorFetch(const Arguments &args)
 		if (!wantarray)
 		{
 			Handle<v8::Object>	result = conv.ToValue(SPI_tuptable->vals[0]);
-			return result;
+			args.GetReturnValue().Set(result);
+			return;
 		}
 		else
 		{
-			Handle<Array> array = Array::New();
+			Handle<Array> array = Array::New(plv8_isolate);
 			for (unsigned int i = 0; i < SPI_processed; i++)
 				array->Set(i, conv.ToValue(SPI_tuptable->vals[i]));
-			return array;
+			args.GetReturnValue().Set(array);
+			return;
 		}
 	}
-	return Undefined();
+	args.GetReturnValue().Set(Undefined(plv8_isolate));
 }
 
 /*
  * cursor.move(n)
  */
-static Handle<v8::Value>
-plv8_CursorMove(const Arguments& args)
+static void
+plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Handle<v8::Object>	self = args.This();
 	CString				cname(self->GetInternalField(0));
@@ -874,8 +887,10 @@ plv8_CursorMove(const Arguments& args)
 	if (!cursor)
 		throw js_error("cannot find cursor");
 
-	if (args.Length() < 1)
-		return Undefined();
+	if (args.Length() < 1) {
+		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
 
 	nmove = args[0]->Int32Value();
 	if (nmove < 0)
@@ -894,14 +909,14 @@ plv8_CursorMove(const Arguments& args)
 	}
 	PG_END_TRY();
 
-	return Undefined();
+	args.GetReturnValue().Set(Undefined(plv8_isolate));
 }
 
 /*
  * cursor.close()
  */
-static Handle<v8::Value>
-plv8_CursorClose(const Arguments &args)
+static void
+plv8_CursorClose(const FunctionCallbackInfo<v8::Value> &args)
 {
 	Handle<v8::Object>	self = args.This();
 	CString				cname(self->GetInternalField(0));
@@ -920,14 +935,14 @@ plv8_CursorClose(const Arguments &args)
 	}
 	PG_END_TRY();
 
-	return Int32::New(cursor ? 1 : 0);
+	args.GetReturnValue().Set(Int32::New(plv8_isolate, cursor ? 1 : 0));
 }
 
 /*
  * plv8.return_next(retval)
  */
-static Handle<v8::Value>
-plv8_ReturnNext(const Arguments& args)
+static void
+plv8_ReturnNext(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Handle<v8::Object>	self = args.This();
 	Handle<v8::Value>	conv_value = self->GetInternalField(PLV8_INTNL_CONV);
@@ -944,19 +959,23 @@ plv8_ReturnNext(const Arguments& args)
 
 	conv->ToDatum(args[0], tupstore);
 
-	return Undefined();
+	args.GetReturnValue().Set(Undefined(plv8_isolate));
 }
 
 /*
  * plv8.subtransaction(func(){ ... })
  */
-static Handle<v8::Value>
-plv8_Subtransaction(const Arguments& args)
+static void
+plv8_Subtransaction(const FunctionCallbackInfo<v8::Value>& args)
 {
-	if (args.Length() < 1)
-		return Undefined();
-	if (!args[0]->IsFunction())
-		return Undefined();
+	if (args.Length() < 1) {
+		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
+	if (!args[0]->IsFunction()) {
+		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
 	Handle<Function>	func = Handle<Function>::Cast(args[0]);
 	SubTranBlock		subtran;
 
@@ -970,17 +989,19 @@ plv8_Subtransaction(const Arguments& args)
 
 	if (result.IsEmpty())
 		throw js_error(try_catch);
-	return result;
+	args.GetReturnValue().Set(result);
 }
 
 /*
  * plv8.find_function("signature")
  */
-static Handle<v8::Value>
-plv8_FindFunction(const Arguments& args)
+static void
+plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 {
-	if (args.Length() < 1)
-		return Undefined();
+	if (args.Length() < 1) {
+		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
 	CString				signature(args[0]);
 	Local<Function>		func;
 
@@ -994,15 +1015,15 @@ plv8_FindFunction(const Arguments& args)
 	}
 	PG_END_TRY();
 
-	return func;
+	args.GetReturnValue().Set(func);
 }
 
 /*
  * plv8.get_window_object()
  * Returns window object in window functions, which provides window function API.
  */
-static Handle<v8::Value>
-plv8_GetWindowObject(const Arguments& args)
+static void
+plv8_GetWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Handle<v8::Object>	self = args.This();
 	Handle<v8::Value>	fcinfo_value =
@@ -1014,8 +1035,8 @@ plv8_GetWindowObject(const Arguments& args)
 	if (WindowObjectTemplate.IsEmpty())
 	{
 		/* Initialize it if we haven't yet. */
-		Local<FunctionTemplate> base = FunctionTemplate::New();
-		base->SetClassName(String::NewSymbol("WindowObject"));
+		Local<FunctionTemplate> base = FunctionTemplate::New(plv8_isolate);
+		base->SetClassName(String::NewFromUtf8(plv8_isolate, "WindowObject", String::kInternalizedString));
 		Local<ObjectTemplate> templ = base->InstanceTemplate();
 
 		/* We store fcinfo here. */
@@ -1033,24 +1054,25 @@ plv8_GetWindowObject(const Arguments& args)
 		SetCallback(templ, "get_func_arg_current", plv8_WinGetFuncArgCurrent);
 
 		/* Constants for get_func_in_XXX() */
-		templ->Set(String::NewSymbol("SEEK_CURRENT"), Int32::New(WINDOW_SEEK_CURRENT));
-		templ->Set(String::NewSymbol("SEEK_HEAD"), Int32::New(WINDOW_SEEK_HEAD));
-		templ->Set(String::NewSymbol("SEEK_TAIL"), Int32::New(WINDOW_SEEK_TAIL));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "SEEK_CURRENT", String::kInternalizedString), Int32::New(plv8_isolate, WINDOW_SEEK_CURRENT));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "SEEK_HEAD", String::kInternalizedString), Int32::New(plv8_isolate, WINDOW_SEEK_HEAD));
+		templ->Set(String::NewFromUtf8(plv8_isolate, "SEEK_TAIL", String::kInternalizedString), Int32::New(plv8_isolate, WINDOW_SEEK_TAIL));
 
-		WindowObjectTemplate = Persistent<ObjectTemplate>::New(templ);
+		WindowObjectTemplate.Reset(plv8_isolate, templ);
 	}
+	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, WindowObjectTemplate);
 
-	Local<v8::Object> js_winobj = WindowObjectTemplate->NewInstance();
+	Local<v8::Object> js_winobj = templ->NewInstance();
 	js_winobj->SetInternalField(0, fcinfo_value);
 
-	return js_winobj;
+	args.GetReturnValue().Set(js_winobj);
 }
 
 /*
  * Short-cut routine for window function API
  */
 static inline WindowObject
-plv8_MyWindowObject(const Arguments& args)
+plv8_MyWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Handle<v8::Object>	self = args.This();
 	/* fcinfo is embedded in the internal field.  See plv8_GetWindowObject() */
@@ -1073,7 +1095,7 @@ plv8_MyWindowObject(const Arguments& args)
  * argument information enough.  Thus, we obtain it from function expression.
  */
 static inline plv8_type *
-plv8_MyArgType(const Arguments& args, int argno)
+plv8_MyArgType(const FunctionCallbackInfo<v8::Value>& args, int argno)
 {
 	Handle<v8::Object>	self = args.This();
 	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
@@ -1091,8 +1113,8 @@ plv8_MyArgType(const Arguments& args, int argno)
  * The default allocation size is 1K, but the caller can override this value
  * by the argument at the first call.
  */
-static Handle<v8::Value>
-plv8_WinGetPartitionLocal(const Arguments& args)
+static void
+plv8_WinGetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args)
 {
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	size_t			size;
@@ -1120,8 +1142,10 @@ plv8_WinGetPartitionLocal(const Arguments& args)
 		storage->maxlen = size;
 
 	/* If nothing is stored, undefined is returned. */
-	if (storage->len == 0)
-		return Undefined();
+	if (storage->len == 0) {
+		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
 
 	/*
 	 * Currently we support only serializable JSON object to be stored.
@@ -1129,7 +1153,7 @@ plv8_WinGetPartitionLocal(const Arguments& args)
 	JSONObject JSON;
 	Handle<v8::Value> value = ToString(storage->data, storage->len);
 
-	return JSON.Parse(value);
+	args.GetReturnValue().Set(JSON.Parse(value));
 }
 
 /*
@@ -1137,13 +1161,15 @@ plv8_WinGetPartitionLocal(const Arguments& args)
  * If the storage has not been allocated, it's allocated based on the
  * size of JSON-ized input string.
  */
-static Handle<v8::Value>
-plv8_WinSetPartitionLocal(const Arguments& args)
+static void
+plv8_WinSetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args)
 {
 	WindowObject	winobj = plv8_MyWindowObject(args);
 
-	if (args.Length() < 1)
-		return Undefined();
+	if (args.Length() < 1) {
+		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
 
 	JSONObject JSON;
 	Handle<v8::Value> value = JSON.Stringify(args[0]);
@@ -1174,14 +1200,14 @@ plv8_WinSetPartitionLocal(const Arguments& args)
 	storage->len = str_size;
 	memcpy(storage->data, str, str_size);
 
-	return Undefined();
+        args.GetReturnValue().Set(Undefined(plv8_isolate));
 }
 
 /*
  * winobj.get_current_position()
  */
-static Handle<v8::Value>
-plv8_WinGetCurrentPosition(const Arguments& args)
+static void
+plv8_WinGetCurrentPosition(const FunctionCallbackInfo<v8::Value>& args)
 {
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	int64			pos = 0;
@@ -1196,14 +1222,14 @@ plv8_WinGetCurrentPosition(const Arguments& args)
 	}
 	PG_END_TRY();
 
-	return Integer::New(pos);
+	args.GetReturnValue().Set(Integer::New(plv8_isolate, pos));
 }
 
 /*
  * winobj.get_partition_row_count()
  */
-static Handle<v8::Value>
-plv8_WinGetPartitionRowCount(const Arguments& args)
+static void
+plv8_WinGetPartitionRowCount(const FunctionCallbackInfo<v8::Value>& args)
 {
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	int64			pos = 0;
@@ -1218,18 +1244,20 @@ plv8_WinGetPartitionRowCount(const Arguments& args)
 	}
 	PG_END_TRY();
 
-	return Integer::New(pos);
+	args.GetReturnValue().Set(Integer::New(plv8_isolate, pos));
 }
 
 /*
  * winobj.set_mark_pos(pos)
  */
-static Handle<v8::Value>
-plv8_WinSetMarkPosition(const Arguments& args)
+static void
+plv8_WinSetMarkPosition(const FunctionCallbackInfo<v8::Value>& args)
 {
 	WindowObject	winobj = plv8_MyWindowObject(args);
-	if (args.Length() < 1)
-		return Undefined();
+	if (args.Length() < 1) {
+                args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+        }
 	int64		markpos = args[0]->IntegerValue();
 
 	PG_TRY();
@@ -1242,18 +1270,20 @@ plv8_WinSetMarkPosition(const Arguments& args)
 	}
 	PG_END_TRY();
 
-	return Undefined();
+        args.GetReturnValue().Set(Undefined(plv8_isolate));
 }
 
 /*
  * winobj.rows_are_peers(pos1, pos2)
  */
-static Handle<v8::Value>
-plv8_WinRowsArePeers(const Arguments& args)
+static void
+plv8_WinRowsArePeers(const FunctionCallbackInfo<v8::Value>& args)
 {
 	WindowObject	winobj = plv8_MyWindowObject(args);
-	if (args.Length() < 2)
-		return Undefined();
+	if (args.Length() < 2) {
+                args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
 	int64		pos1 = args[0]->IntegerValue();
 	int64		pos2 = args[1]->IntegerValue();
 	bool		res = false;
@@ -1268,14 +1298,14 @@ plv8_WinRowsArePeers(const Arguments& args)
 	}
 	PG_END_TRY();
 
-	return Boolean::New(res);
+	args.GetReturnValue().Set(Boolean::New(plv8_isolate, res));
 }
 
 /*
  * winobj.get_func_arg_in_partition(argno, relpos, seektype, set_mark)
  */
-static Handle<v8::Value>
-plv8_WinGetFuncArgInPartition(const Arguments& args)
+static void
+plv8_WinGetFuncArgInPartition(const FunctionCallbackInfo<v8::Value>& args)
 {
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	/* Since we return undefined in "isout" case, throw if arg isn't enough. */
@@ -1305,19 +1335,21 @@ plv8_WinGetFuncArgInPartition(const Arguments& args)
 	PG_END_TRY();
 
 	/* Return undefined to tell it's out of partition. */
-	if (isout)
-		return Undefined();
+	if (isout) {
+                args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
 
 	plv8_type *type = plv8_MyArgType(args, argno);
 
-	return ToValue(res, isnull, type);
+	args.GetReturnValue().Set(ToValue(res, isnull, type));
 }
 
 /*
  * winobj.get_func_arg_in_frame(argno, relpos, seektype, set_mark)
  */
-static Handle<v8::Value>
-plv8_WinGetFuncArgInFrame(const Arguments& args)
+static void
+plv8_WinGetFuncArgInFrame(const FunctionCallbackInfo<v8::Value>& args)
 {
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	/* Since we return undefined in "isout" case, throw if arg isn't enough. */
@@ -1347,23 +1379,27 @@ plv8_WinGetFuncArgInFrame(const Arguments& args)
 	PG_END_TRY();
 
 	/* Return undefined to tell it's out of frame. */
-	if (isout)
-		return Undefined();
+	if (isout) {
+                args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
 
 	plv8_type *type = plv8_MyArgType(args, argno);
 
-	return ToValue(res, isnull, type);
+	args.GetReturnValue().Set(ToValue(res, isnull, type));
 }
 
 /*
  * winobj.get_func_arg_current(argno)
  */
-static Handle<v8::Value>
-plv8_WinGetFuncArgCurrent(const Arguments& args)
+static void
+plv8_WinGetFuncArgCurrent(const FunctionCallbackInfo<v8::Value>& args)
 {
 	WindowObject	winobj = plv8_MyWindowObject(args);
-	if (args.Length() < 1)
-		return Undefined();
+	if (args.Length() < 1) {
+                args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+        }
 	int			argno = args[0]->Int32Value();
 	bool		isnull;
 	Datum		res;
@@ -1382,17 +1418,19 @@ plv8_WinGetFuncArgCurrent(const Arguments& args)
 
 	plv8_type *type = plv8_MyArgType(args, argno);
 
-	return ToValue(res, isnull, type);
+	args.GetReturnValue().Set(ToValue(res, isnull, type));
 }
 
 /*
  * plv8.quote_literal(str)
  */
-static Handle<v8::Value>
-plv8_QuoteLiteral(const Arguments& args)
+static void
+plv8_QuoteLiteral(const FunctionCallbackInfo<v8::Value>& args)
 {
-	if (args.Length() < 1)
-		return Undefined();
+	if (args.Length() < 1) {
+                args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
 	CString			instr(args[0]);
 	char		   *result;
 
@@ -1406,22 +1444,26 @@ plv8_QuoteLiteral(const Arguments& args)
 	}
 	PG_END_TRY();
 
-	return ToString(result);
+	args.GetReturnValue().Set(ToString(result));
 }
 
 /*
  * plv8.quote_nullable(str)
  */
-static Handle<v8::Value>
-plv8_QuoteNullable(const Arguments& args)
+static void
+plv8_QuoteNullable(const FunctionCallbackInfo<v8::Value>& args)
 {
-	if (args.Length() < 1)
-		return Undefined();
+	if (args.Length() < 1) {
+                args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
 	CString			instr(args[0]);
 	char		   *result;
 
-	if (args[0]->IsNull() || args[0]->IsUndefined())
-		return ToString("NULL");
+	if (args[0]->IsNull() || args[0]->IsUndefined()) {
+		args.GetReturnValue().Set(ToString("NULL"));
+		return;
+	}
 
 	PG_TRY();
 	{
@@ -1433,17 +1475,19 @@ plv8_QuoteNullable(const Arguments& args)
 	}
 	PG_END_TRY();
 
-	return ToString(result);
+	args.GetReturnValue().Set(ToString(result));
 }
 
 /*
  * plv8.quote_ident(str)
  */
-static Handle<v8::Value>
-plv8_QuoteIdent(const Arguments& args)
+static void
+plv8_QuoteIdent(const FunctionCallbackInfo<v8::Value>& args)
 {
-	if (args.Length() < 1)
-		return Undefined();
+	if (args.Length() < 1) {
+                args.GetReturnValue().Set(Undefined(plv8_isolate));
+		return;
+	}
 	CString			instr(args[0]);
 	const char	   *result;
 
@@ -1457,5 +1501,5 @@ plv8_QuoteIdent(const Arguments& args)
 	}
 	PG_END_TRY();
 
-	return ToString(result);
+	args.GetReturnValue().Set(ToString(result));
 }

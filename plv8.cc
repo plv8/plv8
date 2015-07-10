@@ -134,6 +134,40 @@ static plv8_exec_env		   *exec_env_head = NULL;
 extern const unsigned char coffee_script_binary_data[];
 extern const unsigned char livescript_binary_data[];
 
+class Plv8ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
+ public:
+  virtual void* Allocate(size_t length) {
+    void* data = AllocateUninitialized(length);
+    return data == NULL ? data : memset(data, 0, length);
+  }
+  virtual void* AllocateUninitialized(size_t length) {
+			void *data = NULL;
+
+			PG_TRY();
+			{
+					data = palloc(length);
+			}
+			PG_CATCH();
+			{
+					throw pg_error();
+			}
+			PG_END_TRY();
+
+			return data;
+	}
+  virtual void Free(void* data, size_t) {
+			PG_TRY();
+			{
+					pfree(data);
+			}
+			PG_CATCH();
+			{
+					throw pg_error();
+			}
+			PG_END_TRY();
+	}
+};
+
 /*
  * lower_case_functions are postgres-like C functions.
  * They could raise errors with elog/ereport(ERROR).
@@ -201,7 +235,7 @@ void
 _PG_init(void)
 {
 	HASHCTL    hash_ctl = { 0 };
-	
+
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(plv8_proc_cache);
 	hash_ctl.hash = oid_hash;
@@ -249,6 +283,7 @@ _PG_init(void)
 
 	EmitWarningsOnPlaceholders("plv8");
 
+	V8::SetArrayBufferAllocator(new Plv8ArrayBufferAllocator);
 
 	V8::InitializeICU();
 	Platform* platform = platform::CreateDefaultPlatform();
@@ -259,6 +294,7 @@ _PG_init(void)
 	}
 	plv8_isolate = Isolate::New();
 	plv8_isolate->Enter();
+
 }
 
 static void

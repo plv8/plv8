@@ -37,7 +37,7 @@ DATA += plcoffee.control plcoffee--$(PLV8_VERSION).sql \
 endif
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 inline json startup_pre startup varparam json_conv \
-		  jsonb_conv window guc es6
+		  jsonb_conv window guc es6 arraybuffer
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif

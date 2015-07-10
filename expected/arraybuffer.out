@@ -6,7 +6,7 @@ AS $$
 $$;
 SELECT crash_test();
 WARNING:  Allocating: 8
- crash_test
+ crash_test 
 ------------
  t
 (1 row)

@@ -24,7 +24,7 @@ INSTALL
 
 There are two ways to build plv8.  The first is default `make`, which depends
 on system-installed libv8 and plv8 will be dynamically link to it.  The second
-is `make static`, which will download v8 soure at a specific version and build
+is `make static`, which will download v8 source at a specific version and build
 it, and statically link plv8 to it.  PGXN install will use the former, while
 you can do the latter manually if you have not installed v8 yet.
 

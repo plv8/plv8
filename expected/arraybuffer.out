@@ -5,7 +5,6 @@ AS $$
   return true;
 $$;
 SELECT crash_test();
-WARNING:  Allocating: 8
  crash_test 
 ------------
  t

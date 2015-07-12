@@ -140,8 +140,32 @@ class Plv8ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
     void* data = AllocateUninitialized(length);
     return data == NULL ? data : memset(data, 0, length);
   }
-  virtual void* AllocateUninitialized(size_t length) { return palloc(length); }
-  virtual void Free(void* data, size_t) { pfree(data); }
+  virtual void* AllocateUninitialized(size_t length) {
+			void *data = NULL;
+
+			PG_TRY();
+			{
+					data = palloc(length);
+			}
+			PG_CATCH();
+			{
+					throw pg_error();
+			}
+			PG_END_TRY();
+
+			return data;
+	}
+  virtual void Free(void* data, size_t) {
+			PG_TRY();
+			{
+					pfree(data);
+			}
+			PG_CATCH();
+			{
+					throw pg_error();
+			}
+			PG_END_TRY();
+	}
 };
 
 /*

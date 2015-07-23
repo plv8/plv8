@@ -60,3 +60,13 @@ include Makefile
 CCFLAGS += -I$(AUTOV8_DIR)/include -I$(AUTOV8_DIR)
 # We're gonna build static link.  Rip it out after include Makefile
 SHLIB_LINK := $(filter-out -lv8, $(SHLIB_LINK))
+
+ifeq ($(OS),Windows_NT)
+	# noop for now
+else
+	UNAME_S := $(shell uname -s)
+	ifeq ($(UNAME_S),Darwin)
+		CCFLAGS += -stdlib=libstdc++
+		SHLIB_LINK += -stdlib=libstdc++
+	endif
+endif

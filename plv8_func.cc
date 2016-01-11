@@ -8,6 +8,8 @@
 #include "plv8.h"
 #include "plv8_param.h"
 #include <sstream>
+#include <iostream>
+#include <fstream>
 
 extern "C" {
 #define delete		delete_
@@ -112,9 +114,6 @@ SetCallback(Handle<ObjectTemplate> obj, const char *name,
 
 class SubTranBlock
 {
-private:
-	ResourceOwner		m_resowner;
-	MemoryContext		m_mcontext;
 public:
 	SubTranBlock();
 	void enter();
@@ -161,8 +160,6 @@ SPIResultToValue(int status)
 }
 
 SubTranBlock::SubTranBlock()
-	: m_resowner(NULL),
-	  m_mcontext(NULL)
 {}
 
 void
@@ -171,12 +168,7 @@ SubTranBlock::enter()
 	if (!IsTransactionOrTransactionBlock())
 		throw js_error("out of transaction");
 
-	m_resowner = CurrentResourceOwner;
-	m_mcontext = CurrentMemoryContext;
 	BeginInternalSubTransaction(NULL);
-	/* Do not want to leave the previous memory context */
-	MemoryContextSwitchTo(m_mcontext);
-
 }
 
 void
@@ -186,15 +178,6 @@ SubTranBlock::exit(bool success)
 		ReleaseCurrentSubTransaction();
 	else
 		RollbackAndReleaseCurrentSubTransaction();
-
-	MemoryContextSwitchTo(m_mcontext);
-	CurrentResourceOwner = m_resowner;
-
-	/*
-	 * AtEOSubXact_SPI() should not have popped any SPI context, but just
-	 * in case it did, make sure we remain connected.
-	 */
-	SPI_restore_connection();
 }
 
 JSONObject::JSONObject()
@@ -490,6 +473,7 @@ plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 	PG_CATCH();
 	{
 		subtran.exit(false);
+		SPI_pop_conditional(true);
 		throw pg_error();
 	}
 	PG_END_TRY();
@@ -783,6 +767,8 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 	subtran.exit(true);
 
 	args.GetReturnValue().Set(SPIResultToValue(status));
+
+
 }
 
 /*

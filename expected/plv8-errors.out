@@ -1,0 +1,97 @@
+CREATE FUNCTION test_sql_error() RETURNS void AS $$ plv8.execute("ERROR") $$ LANGUAGE plv8;
+SELECT test_sql_error();
+ERROR:  syntax error at or near "ERROR"
+DETAIL:  test_sql_error() LINE 1:  plv8.execute("ERROR") 
+CREATE FUNCTION catch_sql_error() RETURNS void AS $$
+try {
+	plv8.execute("throw SQL error");
+	plv8.elog(NOTICE, "should not come here");
+} catch (e) {
+	plv8.elog(NOTICE, e);
+}
+$$ LANGUAGE plv8;
+SELECT catch_sql_error();
+NOTICE:  Error: syntax error at or near "throw"
+ catch_sql_error 
+-----------------
+ 
+(1 row)
+
+CREATE FUNCTION catch_sql_error_2() RETURNS text AS $$
+try {
+	plv8.execute("throw SQL error");
+	plv8.elog(NOTICE, "should not come here");
+} catch (e) {
+	plv8.elog(NOTICE, e);
+	return plv8.execute("select 'and can execute queries again' t").shift().t;
+}
+$$ LANGUAGE plv8;
+SELECT catch_sql_error_2();
+NOTICE:  Error: syntax error at or near "throw"
+       catch_sql_error_2       
+-------------------------------
+ and can execute queries again
+(1 row)
+
+-- subtransaction()
+CREATE TABLE subtrant(a int);
+CREATE FUNCTION test_subtransaction_catch() RETURNS void AS $$
+try {
+	plv8.subtransaction(function(){
+		plv8.execute("INSERT INTO subtrant VALUES(1)");
+		plv8.execute("INSERT INTO subtrant VALUES(1/0)");
+	});
+} catch (e) {
+	plv8.elog(NOTICE, e);
+	plv8.execute("INSERT INTO subtrant VALUES(2)");
+}
+$$ LANGUAGE plv8;
+SELECT test_subtransaction_catch();
+NOTICE:  Error: division by zero
+ test_subtransaction_catch 
+---------------------------
+ 
+(1 row)
+
+SELECT * FROM subtrant;
+ a 
+---
+ 2
+(1 row)
+
+TRUNCATE subtrant;
+CREATE FUNCTION test_subtransaction_throw() RETURNS void AS $$
+plv8.subtransaction(function(){
+	plv8.execute("INSERT INTO subtrant VALUES(1)");
+	plv8.execute("INSERT INTO subtrant VALUES(1/0)");
+});
+$$ LANGUAGE plv8;
+SELECT test_subtransaction_throw();
+ERROR:  division by zero
+DETAIL:  test_subtransaction_throw() LINE 2: plv8.subtransaction(function(){
+SELECT * FROM subtrant;
+ a 
+---
+(0 rows)
+
+-- exception handling
+CREATE OR REPLACE FUNCTION v8_test_throw() RETURNS float AS
+$$ 
+throw new Error('Error');
+$$
+LANGUAGE plv8;
+CREATE OR REPLACE FUNCTION v8_test_catch_throw() RETURNS text AS
+$$
+ try{
+   var res = plv8.execute('select * from  v8_test_throw()');
+ } catch(e) {
+   return JSON.stringify({"result": "error"});
+ }
+$$
+language plv8;
+SELECT v8_test_catch_throw();
+ v8_test_catch_throw 
+---------------------
+ {"result":"error"}
+(1 row)
+

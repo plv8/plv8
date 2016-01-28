@@ -283,8 +283,6 @@ _PG_init(void)
 
 	EmitWarningsOnPlaceholders("plv8");
 
-	V8::SetArrayBufferAllocator(new Plv8ArrayBufferAllocator);
-
 	V8::InitializeICU();
 	Platform* platform = platform::CreateDefaultPlatform();
 	V8::InitializePlatform(platform);
@@ -292,7 +290,9 @@ _PG_init(void)
 	if (plv8_v8_flags != NULL) {
 	      V8::SetFlagsFromString(plv8_v8_flags, strlen(plv8_v8_flags));
 	}
-	plv8_isolate = Isolate::New();
+	Isolate::CreateParams params;
+	params.array_buffer_allocator = new Plv8ArrayBufferAllocator();
+	plv8_isolate = Isolate::New(params);
 	plv8_isolate->Enter();
 
 }

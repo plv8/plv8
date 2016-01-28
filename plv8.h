@@ -67,6 +67,18 @@ public:
 	__attribute__((noreturn)) void rethrow() throw();
 };
 
+typedef enum plv8_external_array_type
+{
+	kExternalByteArray = 1,
+	kExternalUnsignedByteArray,
+	kExternalShortArray,
+	kExternalUnsignedShortArray,
+	kExternalIntArray,
+	kExternalUnsignedIntArray,
+	kExternalFloatArray,
+	kExternalDoubleArray
+} plv8_external_array_type;
+
 /*
  * When TYPCATEGORY_ARRAY, other fields are for element types.
  *
@@ -82,7 +94,7 @@ typedef struct plv8_type
 	char		category;
 	FmgrInfo	fn_input;
 	FmgrInfo	fn_output;
-	v8::ExternalArrayType ext_array;
+	plv8_external_array_type ext_array;
 } plv8_type;
 
 /*

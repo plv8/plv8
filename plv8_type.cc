@@ -160,48 +160,52 @@ inferred_datum_type(Handle<v8::Value> value)
 }
 
 static Local<Object>
-CreateExternalArray(void *data, ExternalArrayType array_type, int byte_size,
-					Datum datum)
+CreateExternalArray(void *data, plv8_external_array_type array_type,
+					int byte_size, Datum datum)
 {
-	static Persistent<ObjectTemplate> externalArray;
+	Local<v8::ArrayBuffer> buffer;
+	Local<v8::TypedArray> array;
 
-	if (externalArray.IsEmpty())
+	buffer = v8::ArrayBuffer::New(plv8_isolate, byte_size);
+	if (buffer.IsEmpty())
 	{
-		Local<ObjectTemplate> templ = ObjectTemplate::New(plv8_isolate);
-		templ->SetInternalFieldCount(1);
-		externalArray.Reset(plv8_isolate, templ);
+		return Local<Object>();
 	}
-	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, externalArray);
-	Local<Object> array = templ->NewInstance();
-	int		length;
 
 	switch (array_type)
 	{
 	case kExternalByteArray:
+		array = v8::Int8Array::New(buffer, 0, byte_size);
+		break;
 	case kExternalUnsignedByteArray:
-		length = byte_size;
+		array = v8::Uint8Array::New(buffer, 0, byte_size);
 		break;
 	case kExternalShortArray:
+		array = v8::Int16Array::New(buffer, 0, byte_size / sizeof(int16));
+		break;
 	case kExternalUnsignedShortArray:
-		length = byte_size / sizeof(int16);
+		array = v8::Uint16Array::New(buffer, 0, byte_size / sizeof(int16));
 		break;
 	case kExternalIntArray:
+		array = v8::Int32Array::New(buffer, 0, byte_size / sizeof(int32));
+		break;
 	case kExternalUnsignedIntArray:
-		length = byte_size / sizeof(int32);
+		array = v8::Uint32Array::New(buffer, 0, byte_size / sizeof(int32));
 		break;
 	case kExternalFloatArray:
-		length = byte_size / sizeof(float4);
+		array = v8::Float32Array::New(buffer, 0, byte_size / sizeof(float4));
 		break;
 	case kExternalDoubleArray:
-		length = byte_size / sizeof(float8);
+		array = v8::Float64Array::New(buffer, 0, byte_size / sizeof(float8));
 		break;
 	default:
 		throw js_error("unexpected array type");
 	}
-	array->SetIndexedPropertiesToExternalArrayData(
-			data, array_type, length);
-	array->ForceSet(String::NewFromUtf8(plv8_isolate, "length"), Int32::New(plv8_isolate, length), ReadOnly);
 	array->SetInternalField(0, External::New(plv8_isolate, DatumGetPointer(datum)));
+	// FIXME(bnoordhuis) Could create an ArrayBuffer directly from |data|
+	// but as it's unclear who owns that memory and what its life span is,
+	// let's just copy it over.
+	memcpy(buffer->GetContents().Data(), data, byte_size);
 
 	return array;
 }
@@ -212,13 +216,10 @@ ExtractExternalArrayDatum(Handle<v8::Value> value)
 	if (value->IsUndefined() || value->IsNull())
 		return NULL;
 
-	if (value->IsObject())
+	if (value->IsTypedArray())
 	{
 		Handle<Object> object = Handle<Object>::Cast(value);
-		if (object->GetIndexedPropertiesExternalArrayData())
-		{
-			return Handle<External>::Cast(object->GetInternalField(0))->Value();
-		}
+		return Handle<External>::Cast(object->GetInternalField(0))->Value();
 	}
 
 	return NULL;

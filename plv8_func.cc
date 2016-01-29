@@ -354,7 +354,8 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 		stream << CString(args[i]);
 	}
 
-	const char	   *message = stream.str().c_str();
+	std::string	string = stream.str();
+	const char	*message = string.c_str();
 
 	if (elevel != ERROR)
 	{

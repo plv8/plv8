@@ -16,7 +16,7 @@ before_install:
   - sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
   - sudo apt-get update -qq
   - if [ "$CXX" = "g++" ]; then sudo apt-get install -qq g++-4.8; fi
-  - if [ "$CXX" = "g++" ]; then export CXX="g++-4.8" CC="gcc-4.8"; fi
+  - if [ "$CXX" = "g++" ]; then export CXX="g++-4.8" CC="gcc-4.8" LD="g++-4.8"; fi
   - sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.8 90
 
 before_script:
@@ -30,12 +30,14 @@ before_script:
   - git checkout $tag && gclient sync > /dev/null
   - git describe --always
   - make dependencies > /dev/null || true
-  - export CXX=clang
+  - export CXX=g++
+  - export LD=g++
   - make native library=shared -j8 werror=no snapshot=no
   - sudo cp -rf include/* /usr/include
   - sudo cp -rf include /usr/include
   - sudo install -v --mode=0644 out/native/lib.target/* /usr/lib
-  - sudo install -v out/native/d8 /usr/bin/d8
+  - sudo install -v out/native/d8 /usr/bin/
+  - sudo install out/native/obj.target/tools/gyp/*.a /usr/lib
   - popd
   - createuser -U postgres -s travis
 

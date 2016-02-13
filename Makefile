@@ -65,6 +65,7 @@ else
 endif
 
 CCFLAGS = -Wall $(OPTFLAGS) $(OPT_ENABLE_DEBUGGER_SUPPORT)
+SHLIB_LINK += -lv8_base -lv8_libbase -lv8_libplatform -lv8_snapshot
 
 ifdef V8_SRCDIR
 override CPPFLAGS += -I$(V8_SRCDIR) -I$(V8_SRCDIR)/include

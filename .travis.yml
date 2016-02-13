@@ -36,7 +36,8 @@ before_script:
   - sudo cp -rf include/* /usr/include
   - sudo cp -rf include /usr/include
   - sudo install -v --mode=0644 out/native/lib.target/* /usr/lib
-  - sudo install -v out/native/d8 /usr/bin/d8
+  - sudo install -v out/native/d8 /usr/bin/
+  - sudo install out/native/obj.target/tools/gyp/*.a /usr/lib
   - popd
   - createuser -U postgres -s travis
 

@@ -53,26 +53,21 @@ ifdef ENABLE_DEBUGGER_SUPPORT
 OPT_ENABLE_DEBUGGER_SUPPORT = -DENABLE_DEBUGGER_SUPPORT
 endif
 
-# for older g++ (e.g. 4.6.x), which do not support c++11
-#OPTFLAGS = -O2 -std=gnu++0x -fno-rtti
-
-OPTFLAGS = -O2 -std=c++11 -fno-rtti
+ifeq ($(OS),Windows_NT)
+	OPTFLAGS = -O2 -std=c++11 -fno-rtti
+else
+	GCCVERSION = $(shell gcc --version | grep ^gcc | sed 's/^.* //g' | cut -f1-2 -d.)
+	ifeq ($(GCCVERSION),4.6)
+		OPTFLAGS = -O2 -std=gnu++0x -fno-rtti
+	else
+		OPTFLAGS = -O2 -std=c++11 -fno-rtti
+	endif
+endif
 
 CCFLAGS = -Wall $(OPTFLAGS) $(OPT_ENABLE_DEBUGGER_SUPPORT)
 
 ifdef V8_SRCDIR
 override CPPFLAGS += -I$(V8_SRCDIR) -I$(V8_SRCDIR)/include
-endif
-
-ifeq ($(OS),Windows_NT)
-	# noop for now, it could come in handy later
-else
-	UNAME_S := $(shell uname -s)
-	ifeq ($(UNAME_S),Darwin)
-		CCFLAGS += -stdlib=libstdc++
-		SHLIB_LINK := -stdlib=libstdc++
-		SHLIB_LINK += -lv8_base -lv8_libbase -lv8_libplatform -lv8_snapshot
-	endif
 endif
 
 all:

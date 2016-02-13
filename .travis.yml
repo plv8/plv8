@@ -13,6 +13,11 @@ before_install:
   - sudo echo "host    all         all         127.0.0.1/32          trust" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
   - sudo echo "host    all         all         ::1/128               trust" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
   - sudo /etc/init.d/postgresql restart
+  - sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+  - sudo apt-get update -qq
+  - if [ "$CXX" = "g++" ]; then sudo apt-get install -qq g++-4.8; fi
+  - if [ "$CXX" = "g++" ]; then export CXX="g++-4.8" CC="gcc-4.8"; fi
+  - sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.8 90
 
 before_script:
   - pushd ..
@@ -25,8 +30,10 @@ before_script:
   - git checkout $tag && gclient sync > /dev/null
   - git describe --always
   - make dependencies > /dev/null || true
-  - make native library=shared -j8
+  - export CXX=clang
+  - make native library=shared -j8 werror=no snapshot=no
   - sudo cp -rf include/* /usr/include
+  - sudo cp -rf include /usr/include
   - sudo install -v --mode=0644 out/native/lib.target/* /usr/lib
   - sudo install -v out/native/d8 /usr/bin/d8
   - popd
@@ -41,27 +48,13 @@ env:
     - PGVERSION=9.4 v8=4.3
     - PGVERSION=9.4 v8=4.2
     - PGVERSION=9.4 v8=4.1
-    - PGVERSION=9.4 v8=3.32
-    - PGVERSION=9.4 v8=3.31
-    - PGVERSION=9.4 v8=3.30
-    - PGVERSION=9.4 v8=3.18
-    - PGVERSION=9.4 v8=3.14
     - PGVERSION=9.3 v8=4.3
     - PGVERSION=9.3 v8=4.2
     - PGVERSION=9.3 v8=4.1
-    - PGVERSION=9.4 v8=3.32
-    - PGVERSION=9.3 v8=3.31
-    - PGVERSION=9.3 v8=3.30
-    - PGVERSION=9.3 v8=3.18
-    - PGVERSION=9.3 v8=3.14
     - PGVERSION=9.2 v8=4.3
     - PGVERSION=9.2 v8=4.2
     - PGVERSION=9.2 v8=4.1
-    - PGVERSION=9.4 v8=3.32
-    - PGVERSION=9.2 v8=3.31
-    - PGVERSION=9.2 v8=3.30
-    - PGVERSION=9.2 v8=3.18
-    - PGVERSION=9.2 v8=3.14
+
 
 language: cpp
 compiler:
@@ -73,3 +66,4 @@ script:
 
 after_script:
   - cat regression.diffs || true
+  - cat regression.out || true

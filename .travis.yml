@@ -49,7 +49,7 @@ env:
     - PGVERSION=9.2 v8=4.3
     - PGVERSION=9.2 v8=4.2
     - PGVERSION=9.2 v8=4.1
-  -CXX=g++-4.8
+  - CXX=g++-4.8
 language: cpp
 compiler:
 #  - clang

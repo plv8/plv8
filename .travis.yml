@@ -18,7 +18,6 @@ before_script:
   - pushd ..
   - git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
   - export PATH="$PATH":`pwd`/depot_tools
-  - export CXX=g++-4.8
   - popd
   - pushd ..
   - fetch v8; cd v8
@@ -26,6 +25,7 @@ before_script:
   - git checkout $tag && gclient sync > /dev/null
   - git describe --always
   - make dependencies > /dev/null || true
+  - export CXX=g++-4.8
   - make native library=shared -j8 werror=no
   - sudo cp -rf include/* /usr/include
   - sudo cp -rf include /usr/include
@@ -49,7 +49,7 @@ env:
     - PGVERSION=9.2 v8=4.3
     - PGVERSION=9.2 v8=4.2
     - PGVERSION=9.2 v8=4.1
-
+  -CXX=g++-4.8
 language: cpp
 compiler:
 #  - clang
@@ -60,3 +60,11 @@ script:
 
 after_script:
   - cat regression.diffs || true
+
+addons:
+    apt:
+      sources:
+        - ubuntu-toolchain-r-test
+      packages:
+        - gcc-4.8
+        - g++-4.8

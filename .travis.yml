@@ -66,3 +66,4 @@ script:
 
 after_script:
   - cat regression.diffs || true
+  - cat regression.out || true

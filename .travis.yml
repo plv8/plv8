@@ -18,6 +18,7 @@ before_script:
   - pushd ..
   - git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
   - export PATH="$PATH":`pwd`/depot_tools
+  - export CXX=g++-4.8
   - popd
   - pushd ..
   - fetch v8; cd v8

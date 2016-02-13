@@ -5,6 +5,8 @@ x.x.x       2015-xx-xx
               (see http://strongloop.com/strongblog/node-js-v0-12-c-apis-breaking/
               for an overview of the V8 changes which break existing code bases)
             - GUC plv8.v8_flags for V8 engine initialization flags
+            - Extended error object when an error is thrown from Postgres
+            - Fixed crash in ArrayBuffer
 
 1.4.4       2015-05-26
             - Add jsonb type coercion in function boundary.

@@ -56,7 +56,7 @@ endif
 ifeq ($(OS),Windows_NT)
 	OPTFLAGS = -O2 -std=c++11 -fno-rtti
 else
-	GCCVERSION = $(shell gcc --version | grep - ^gcc | sed 's/^.* //g' | cut -f1-2 -d.)
+	GCCVERSION = $(shell gcc --version | grep ^gcc | sed 's/^.* //g' | cut -f1-2 -d.)
 	ifeq ($(GCCVERSION),4.6)
 		OPTFLAGS = -O2 -std=gnu++0x -fno-rtti
 	else

@@ -112,9 +112,6 @@ SetCallback(Handle<ObjectTemplate> obj, const char *name,
 
 class SubTranBlock
 {
-private:
-	ResourceOwner		m_resowner;
-	MemoryContext		m_mcontext;
 public:
 	SubTranBlock();
 	void enter();
@@ -161,8 +158,6 @@ SPIResultToValue(int status)
 }
 
 SubTranBlock::SubTranBlock()
-	: m_resowner(NULL),
-	  m_mcontext(NULL)
 {}
 
 void
@@ -171,12 +166,7 @@ SubTranBlock::enter()
 	if (!IsTransactionOrTransactionBlock())
 		throw js_error("out of transaction");
 
-	m_resowner = CurrentResourceOwner;
-	m_mcontext = CurrentMemoryContext;
 	BeginInternalSubTransaction(NULL);
-	/* Do not want to leave the previous memory context */
-	MemoryContextSwitchTo(m_mcontext);
-
 }
 
 void
@@ -186,15 +176,6 @@ SubTranBlock::exit(bool success)
 		ReleaseCurrentSubTransaction();
 	else
 		RollbackAndReleaseCurrentSubTransaction();
-
-	MemoryContextSwitchTo(m_mcontext);
-	CurrentResourceOwner = m_resowner;
-
-	/*
-	 * AtEOSubXact_SPI() should not have popped any SPI context, but just
-	 * in case it did, make sure we remain connected.
-	 */
-	SPI_restore_connection();
 }
 
 JSONObject::JSONObject()
@@ -279,37 +260,12 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 	{
 		MemoryContextSwitchTo(ctx);
 		ErrorData *edata = CopyErrorData();
-
 		Handle<String> message = ToString(edata->message);
-		Handle<String> sqlerrcode = ToString(unpack_sql_state(edata->sqlerrcode));
-#if PG_VERSION_NUM >= 90300
-		Handle<Primitive> schema_name = edata->schema_name ?
-			Handle<Primitive>(ToString(edata->schema_name)) : Null(plv8_isolate);
-		Handle<Primitive> table_name = edata->table_name ?
-			Handle<Primitive>(ToString(edata->table_name)) : Null(plv8_isolate);
-		Handle<Primitive> column_name = edata->column_name ?
-			Handle<Primitive>(ToString(edata->column_name)) : Null(plv8_isolate);
-		Handle<Primitive> datatype_name = edata->datatype_name ?
-			Handle<Primitive>(ToString(edata->datatype_name)) : Null(plv8_isolate);
-		Handle<Primitive> constraint_name = edata->constraint_name ?
-			Handle<Primitive>(ToString(edata->constraint_name)) : Null(plv8_isolate);
-#endif
-
 		// XXX: add other fields? (detail, hint, context, internalquery...)
 		FlushErrorState();
 		FreeErrorData(edata);
 
-		Handle<v8::Object> err = Exception::Error(message)->ToObject();
-		err->Set(String::NewFromUtf8(plv8_isolate, "sqlerrcode"), sqlerrcode);
-#if PG_VERSION_NUM >= 90300
-		err->Set(String::NewFromUtf8(plv8_isolate, "schema_name"), schema_name);
-		err->Set(String::NewFromUtf8(plv8_isolate, "table_name"), table_name);
-		err->Set(String::NewFromUtf8(plv8_isolate, "column_name"), column_name);
-		err->Set(String::NewFromUtf8(plv8_isolate, "datatype_name"), datatype_name);
-		err->Set(String::NewFromUtf8(plv8_isolate, "constraint_name"), constraint_name);
-#endif
-
-		args.GetReturnValue().Set(plv8_isolate->ThrowException(err));
+		args.GetReturnValue().Set(plv8_isolate->ThrowException(Exception::Error(message)));
 	}
 }
 
@@ -515,6 +471,7 @@ plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 	PG_CATCH();
 	{
 		subtran.exit(false);
+		SPI_pop_conditional(true);
 		throw pg_error();
 	}
 	PG_END_TRY();
@@ -808,6 +765,8 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 	subtran.exit(true);
 
 	args.GetReturnValue().Set(SPIResultToValue(status));
+
+
 }
 
 /*

@@ -17,7 +17,7 @@ PLV8_VERSION = 1.5.0-dev1
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 
-PG_VERSION_NUM := $(shell cat `$(PG_CONFIG) --includedir`/pg_config*.h \
+PG_VERSION_NUM := $(shell cat `$(PG_CONFIG) --includedir-server`/pg_config*.h \
 		   | perl -ne 'print $$1 and exit if /PG_VERSION_NUM\s+(\d+)/')
 
 # set your custom C++ compler

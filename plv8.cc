@@ -1375,12 +1375,6 @@ FormatSPIStatus(int status) throw()
 	}
 }
 
-Handle<v8::Value>
-ThrowError(const char *message) throw()
-{
-	return plv8_isolate->ThrowException(Exception::Error(String::NewFromUtf8(plv8_isolate, message)));
-}
-
 static void
 GetGlobalContext(Persistent<Context>& global_context)
 {

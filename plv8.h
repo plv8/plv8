@@ -246,7 +246,6 @@ extern v8::Isolate* plv8_isolate;
 extern v8::Local<v8::Function> find_js_function(Oid fn_oid);
 extern v8::Local<v8::Function> find_js_function_by_name(const char *signature);
 extern const char *FormatSPIStatus(int status) throw();
-extern v8::Handle<v8::Value> ThrowError(const char *message) throw();
 extern plv8_type *get_plv8_type(PG_FUNCTION_ARGS, int argno);
 
 // plv8_type.cc

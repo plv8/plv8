@@ -36,8 +36,8 @@ DATA += plcoffee.control plcoffee--$(PLV8_VERSION).sql \
 		plls.control plls--$(PLV8_VERSION).sql
 endif
 DATA_built = plv8.sql
-REGRESS = init-extension plv8 inline json startup_pre startup varparam json_conv \
-		  jsonb_conv window guc es6 arraybuffer
+REGRESS = init-extension plv8 plv8-errors inline json startup_pre startup varparam json_conv \
+ 		  jsonb_conv window guc es6 arraybuffer
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif
@@ -45,7 +45,10 @@ endif
 SHLIB_LINK += -lv8
 ifdef V8_OUTDIR
 SHLIB_LINK += -L$(V8_OUTDIR)
+else
+SHLIB_LINK += -lv8_libplatform
 endif
+
 
 # v8's remote debugger is optional at the moment, since we don't know
 # how much of the v8 installation is built with debugger enabled.
@@ -53,22 +56,24 @@ ifdef ENABLE_DEBUGGER_SUPPORT
 OPT_ENABLE_DEBUGGER_SUPPORT = -DENABLE_DEBUGGER_SUPPORT
 endif
 
-ifeq ($(OS),Windows_NT)
-	OPTFLAGS = -O2 -std=c++11 -fno-rtti
-else
-	GCCVERSION = $(shell gcc --version | grep ^gcc | sed 's/^.* //g' | cut -f1-2 -d.)
-	ifeq ($(GCCVERSION),4.6)
-		OPTFLAGS = -O2 -std=gnu++0x -fno-rtti
-	else
-		OPTFLAGS = -O2 -std=c++11 -fno-rtti
-	endif
-endif
+# for older g++ (e.g. 4.6.x), which do not support c++11
+#OPTFLAGS = -O2 -std=gnu++0x -fno-rtti
+
+OPTFLAGS = -O2 -std=c++11 -fno-rtti
 
 CCFLAGS = -Wall $(OPTFLAGS) $(OPT_ENABLE_DEBUGGER_SUPPORT)
-SHLIB_LINK += -lv8_base -lv8_libbase -lv8_libplatform -lv8_snapshot
 
 ifdef V8_SRCDIR
 override CPPFLAGS += -I$(V8_SRCDIR) -I$(V8_SRCDIR)/include
+endif
+
+ifeq ($(OS),Windows_NT)
+	# noop for now, it could come in handy later
+else
+	UNAME_S := $(shell uname -s)
+	ifeq ($(UNAME_S),Darwin)
+		# nothing to do anymore, setting -stdlib=libstdc++ breaks things
+	endif
 endif
 
 all:

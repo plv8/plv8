@@ -43,6 +43,8 @@ before_script:
 
 
 env:
+  global:
+    - ARCH=x64
   matrix:
     - PGVERSION=9.5 v8=4.3
     - PGVERSION=9.5 v8=4.2

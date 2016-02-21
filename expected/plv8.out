@@ -714,7 +714,7 @@ SELECT f_attdrop(2);
  (2,10)
 (1 row)
 
-create table plv8test ( id serial, data json, sum integer, num integer);
+create table plv8test ( id numeric, data json, sum integer, num integer);
 insert into plv8test (data, sum, num) values ('{"a": 1, "b": 2}', 0, 0);
 insert into plv8test (data, sum, num) values ('{"a": 3, "b": 4}', 0, 0);
 insert into plv8test (data, sum, num) values ('{"a": 3, "b": 4}', 0, 0);

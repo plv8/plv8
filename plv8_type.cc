@@ -18,6 +18,7 @@ extern "C" {
 #include "access/htup_details.h"
 #endif
 #include "catalog/pg_type.h"
+#include "parser/parse_coerce.h"
 #include "utils/array.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
@@ -66,6 +67,7 @@ plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt)
 	type->typid = typid;
 	type->fn_input.fn_mcxt = type->fn_output.fn_mcxt = mcxt;
 	get_type_category_preferred(typid, &type->category, &ispreferred);
+	type->is_composite = (type->category == TYPCATEGORY_COMPOSITE);
 	get_typlenbyvalalign(typid, &type->len, &type->byval, &type->align);
 
 	if (get_typtype(typid) == TYPTYPE_DOMAIN)
@@ -125,6 +127,7 @@ plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt)
 				(errmsg("cannot determine element type of array: %u", typid)));
 
 		type->typid = elemid;
+		type->is_composite = (TypeCategory(elemid) == TYPCATEGORY_COMPOSITE);
 		get_typlenbyvalalign(type->typid, &type->len, &type->byval, &type->align);
 	}
 }
@@ -392,8 +395,14 @@ ToArrayDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	values = (Datum *) palloc(sizeof(Datum) * length);
 	nulls = (bool *) palloc(sizeof(bool) * length);
 	ndims[0] = length;
-	for (int i = 0; i < length; i++)
-		values[i] = ToScalarDatum(array->Get(i), &nulls[i], type);
+	for (int i = 0; i < length; i++) {
+		if (type->is_composite)
+		{
+			values[i] = ToRecordDatum(array->Get(i), &nulls[i], type);
+		} else {
+			values[i] = ToScalarDatum(array->Get(i), &nulls[i], type);
+		}
+	}
 
 	result = construct_md_array(values, nulls, 1, ndims, lbs,
 				type->typid, type->len, type->byval, type->align);

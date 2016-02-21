@@ -80,6 +80,7 @@ typedef struct plv8_type
 	bool		byval;
 	char		align;
 	char		category;
+	bool		is_composite;
 	FmgrInfo	fn_input;
 	FmgrInfo	fn_output;
 	v8::ExternalArrayType ext_array;

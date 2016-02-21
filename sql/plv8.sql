@@ -426,7 +426,7 @@ ALTER TABLE t_attdrop DROP COLUMN b;
 SELECT f_attdrop(t.*) FROM t;
 SELECT f_attdrop(2);
 
-create table plv8test ( id serial primary key, data json, sum integer, num integer);
+create table plv8test ( id numeric, data json, sum integer, num integer);
 insert into plv8test (data, sum, num) values ('{"a": 1, "b": 2}', 0, 0);
 insert into plv8test (data, sum, num) values ('{"a": 3, "b": 4}', 0, 0);
 insert into plv8test (data, sum, num) values ('{"a": 3, "b": 4}', 0, 0);

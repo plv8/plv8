@@ -819,3 +819,15 @@ CString::~CString()
 	if (m_str != *m_utf8)
 		pfree(m_str);
 }
+
+bool CString::toStdString(v8::Handle<v8::Value> value, std::string &out)
+{
+	if(value.IsEmpty()) return false;
+	auto obj = value->ToString();
+	String::Utf8Value utf8(obj);
+	if(*utf8) {
+		out = *utf8;
+		return true;
+	}
+	return false;
+}

@@ -7,7 +7,7 @@
  */
 #include "plv8.h"
 #include "plv8_param.h"
-#include <sstream>
+#include <string>
 
 extern "C" {
 #define delete		delete_
@@ -301,16 +301,20 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 		return;
 	}
 
-	std::ostringstream	stream;
-
+	std::string msg;
+	std::string buf;
 	for (int i = 1; i < args.Length(); i++)
 	{
-		if (i > 1)
-			stream << ' ';
-		stream << CString(args[i]);
+		if (i > 1){
+			msg += " ";
+		}
+		if (!CString::toStdString(args[i],buf)){
+			args.GetReturnValue().Set(Undefined(plv8_isolate));
+			return;
+		}
+		msg += buf;
 	}
-
-	const char	   *message = stream.str().c_str();
+	const char	*message = msg.c_str();
 
 	if (elevel != ERROR)
 	{

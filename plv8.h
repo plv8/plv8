@@ -24,6 +24,7 @@ extern "C" {
 #include "utils/tuplestore.h"
 #include "windowapi.h"
 }
+#include <string>
 
 #ifdef _MSC_VER
 #define __attribute__(what)		__declspec what
@@ -103,6 +104,8 @@ public:
 	operator const char* () const	{ return m_str; }
 	const char* str(const char *ifnull = NULL) const
 	{ return m_str ? m_str : ifnull; }
+
+    static bool toStdString(v8::Handle<v8::Value> value, std::string &out);
 
 private:
 	CString(const CString&);

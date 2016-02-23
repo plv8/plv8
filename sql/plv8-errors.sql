@@ -67,3 +67,31 @@ language plv8;
 
 SELECT v8_test_catch_throw();
 
+CREATE FUNCTION catch_elog_error() RETURNS void AS $$
+function f (){
+}
+f.prototype.toString = function(){
+        throw 'custom exception';
+}
+try {
+	plv8.elog(NOTICE, (new f));
+	plv8.elog(NOTICE, "should not come here");
+} catch (e) {
+	plv8.elog(NOTICE, 'catch result:'+ e);
+}
+$$ LANGUAGE plv8;
+SELECT catch_elog_error();
+
+CREATE FUNCTION catch_elog_error2() RETURNS void AS $$
+function f (){
+}
+f.prototype.toString = function(){
+        throw 'custom exception';
+}
+
+plv8.elog(NOTICE, (new f));
+plv8.elog(NOTICE, "should not come here");
+
+$$ LANGUAGE plv8;
+SELECT catch_elog_error2();
+

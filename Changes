@@ -8,6 +8,8 @@ x.x.x       2015-xx-xx
             - Fixed crash in ArrayBuffer
             - Fixed encoding issues with elog
             - Fixed memory leak in cursor fetch
+            - Errors return full error context as an object now
+            - Fixed crash bug in cursor fetch
 
 1.4.4       2015-05-26
             - Add jsonb type coercion in function boundary.

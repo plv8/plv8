@@ -860,6 +860,8 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 			return;
 		}
 	}
+
+	SPI_freetuptable(SPI_tuptable);
 	args.GetReturnValue().Set(Undefined(plv8_isolate));
 }
 

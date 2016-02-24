@@ -7,6 +7,7 @@ x.x.x       2015-xx-xx
             - GUC plv8.v8_flags for V8 engine initialization flags
             - Fixed crash in ArrayBuffer
             - Fixed encoding issues with elog
+            - Fixed memory leak in cursor fetch
 
 1.4.4       2015-05-26
             - Add jsonb type coercion in function boundary.

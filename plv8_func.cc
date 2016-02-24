@@ -846,6 +846,8 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 		{
 			Handle<v8::Object>	result = conv.ToValue(SPI_tuptable->vals[0]);
 			args.GetReturnValue().Set(result);
+			SPI_freetuptable(SPI_tuptable);
+
 			return;
 		}
 		else
@@ -854,9 +856,12 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 			for (unsigned int i = 0; i < SPI_processed; i++)
 				array->Set(i, conv.ToValue(SPI_tuptable->vals[i]));
 			args.GetReturnValue().Set(array);
+			SPI_freetuptable(SPI_tuptable);
 			return;
 		}
 	}
+
+	SPI_freetuptable(SPI_tuptable);
 	args.GetReturnValue().Set(Undefined(plv8_isolate));
 }
 

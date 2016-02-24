@@ -580,6 +580,15 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 
 	plan = static_cast<SPIPlanPtr>(
 			Handle<External>::Cast(self->GetInternalField(0))->Value());
+
+	if (plan == NULL) {
+		StringInfoData	buf;
+
+		initStringInfo(&buf);
+		appendStringInfo(&buf,
+				"plan unexpectedly null");
+		throw js_error(pstrdup(buf.data));
+	}
 	/* XXX: Add plan validation */
 
 	if (args.Length() > 0)

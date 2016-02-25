@@ -22,6 +22,17 @@ try {
 $$ LANGUAGE plv8;
 SELECT catch_sql_error_2();
 
+CREATE FUNCTION catch_sql_error_3() RETURNS text AS $$
+try {
+	plv8.execute("throw SQL error");
+	plv8.elog(NOTICE, "should not come here");
+} catch (e) {
+	plv8.elog(NOTICE, e.sqlerrcode);
+	return e.sqlerrcode;
+}
+$$ LANGUAGE plv8;
+SELECT catch_sql_error_3();
+
 -- subtransaction()
 CREATE TABLE subtrant(a int);
 CREATE FUNCTION test_subtransaction_catch() RETURNS void AS $$

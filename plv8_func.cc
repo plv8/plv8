@@ -339,6 +339,7 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 		}
 		msg += buf;
 	}
+
 	const char	*message = msg.c_str();
 
 	if (elevel != ERROR)

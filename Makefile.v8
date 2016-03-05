@@ -7,12 +7,11 @@
 # structure in v8 which may be different from version to another, but user
 # can specify the v8 version by AUTOV8_VERSION, too.
 #-----------------------------------------------------------------------------#
-AUTOV8_VERSION = 4.3.66
+AUTOV8_VERSION = 4.10.253
 AUTOV8_DIR = build/v8-git-mirror-$(AUTOV8_VERSION)
 AUTOV8_OUT = build/v8-git-mirror-$(AUTOV8_VERSION)/out/native
 AUTOV8_DEPOT_TOOLS = build/depot_tools
-AUTOV8_LIB = $(AUTOV8_OUT)/libv8_snapshot.a
-AUTOV8_STATIC_LIBS = libv8_base.a libv8_snapshot.a libv8_libplatform.a libv8_libbase.a libicui18n.a libicuuc.a libicudata.a
+AUTOV8_STATIC_LIBS = libv8_base.a libv8_nosnapshot.a libv8_libplatform.a libv8_libbase.a libicui18n.a libicuuc.a libicudata.a
 
 export PATH := $(abspath $(AUTOV8_DEPOT_TOOLS)):$(PATH)
 
@@ -32,13 +31,10 @@ $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
 	mv build/v8 $(AUTOV8_DIR)
 
 $(AUTOV8_LIB): $(AUTOV8_DIR)
-	env CXXFLAGS=-fPIC CFLAGS=-fPIC $(MAKE) -C build/v8-git-mirror-$(AUTOV8_VERSION) native
+	env CXXFLAGS=-fPIC CFLAGS=-fPIC $(MAKE) -C build/v8-git-mirror-$(AUTOV8_VERSION) native snapshot=on
 	test -f $(AUTOV8_OUT)/libv8_base.a || \
 		ln -s $(abspath $(AUTOV8_OUT)/obj.target/tools/gyp/libv8_base.a) \
 			$(AUTOV8_OUT)/libv8_base.a
-	test -f $(AUTOV8_OUT)/libv8_snapshot.a || \
-		ln -s $(abspath $(AUTOV8_OUT)/obj.target/tools/gyp/libv8_snapshot.a) \
-			$(AUTOV8_OUT)/libv8_snapshot.a
 	test -f $(AUTOV8_OUT)/libv8_libbase.a || \
 		ln -s $(abspath $(AUTOV8_OUT)/obj.target/tools/gyp/libv8_libbase.a) \
 			$(AUTOV8_OUT)/libv8_libbase.a

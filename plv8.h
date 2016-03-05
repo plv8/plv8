@@ -68,6 +68,18 @@ public:
 	__attribute__((noreturn)) void rethrow() throw();
 };
 
+typedef enum plv8_external_array_type
+{
+	kExternalByteArray = 1,
+	kExternalUnsignedByteArray,
+	kExternalShortArray,
+	kExternalUnsignedShortArray,
+	kExternalIntArray,
+	kExternalUnsignedIntArray,
+	kExternalFloatArray,
+	kExternalDoubleArray
+} plv8_external_array_type;
+
 /*
  * When TYPCATEGORY_ARRAY, other fields are for element types.
  *
@@ -84,7 +96,7 @@ typedef struct plv8_type
 	bool		is_composite;
 	FmgrInfo	fn_input;
 	FmgrInfo	fn_output;
-	v8::ExternalArrayType ext_array;
+	plv8_external_array_type ext_array;
 } plv8_type;
 
 /*
@@ -238,7 +250,6 @@ extern v8::Isolate* plv8_isolate;
 extern v8::Local<v8::Function> find_js_function(Oid fn_oid);
 extern v8::Local<v8::Function> find_js_function_by_name(const char *signature);
 extern const char *FormatSPIStatus(int status) throw();
-extern v8::Handle<v8::Value> ThrowError(const char *message) throw();
 extern plv8_type *get_plv8_type(PG_FUNCTION_ARGS, int argno);
 
 // plv8_type.cc

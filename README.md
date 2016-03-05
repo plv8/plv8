@@ -11,11 +11,9 @@ REQUIREMENT
 plv8 is tested with:
 
 - PG: version 9.2, 9.3, 9.4 and 9.5 (maybe older/newer are allowed)
-- V8: version 4.2 - 4.3.66 (as of v1.5.0)
+- V8: version 4.4 to 4.10
 - g++: version 4.8.2
 - clang++
-
-It is also known to work with some older versions of gcc and v8.
 
 Also all tools that PostgreSQL and V8 require to be built are required if you
 are building those from source.

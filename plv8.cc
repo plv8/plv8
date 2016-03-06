@@ -284,6 +284,7 @@ _PG_init(void)
 	EmitWarningsOnPlaceholders("plv8");
 
 	V8::InitializeICU();
+	V8::InitializeExternalStartupData("plv8");
 	Platform* platform = platform::CreateDefaultPlatform();
 	V8::InitializePlatform(platform);
 	V8::Initialize();

@@ -36,7 +36,7 @@ before_script:
   - make dependencies > /dev/null || true
   - export CXX=clang++
   - export LD=clang++
-  - make native library=shared -j8 werror=no snapshot=no i18nsupport=off
+  - make native library=shared -j8 werror=no snapshot=off
   - sudo cp -rf include/* /usr/include
   - sudo cp -rf include /usr/include
   - sudo install -v --mode=0644 out/native/lib.target/* /usr/lib

@@ -284,7 +284,7 @@ _PG_init(void)
 	EmitWarningsOnPlaceholders("plv8");
 
 	V8::InitializeICU();
-#if V8_MAJOR_VERSION == 4 && V8_MINOR_VERSION >= 5
+#if V8_MAJOR_VERSION == 4 && V8_MINOR_VERSION >= 6
 	V8::InitializeExternalStartupData("plv8");
 #endif
 	Platform* platform = platform::CreateDefaultPlatform();

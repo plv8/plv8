@@ -27,7 +27,7 @@ is `make static`, which will download v8 source at a specific version and build
 it, and statically link plv8 to it.  PGXN install will use the former, while
 you can do the latter manually if you have not installed v8 yet.
 
-Once you installed plv8 into your dabase, create language via
+Once you have built and installed plv8, create the language via:
 
 ```
   $ psql -c 'CREATE EXTENSION plv8'
@@ -35,7 +35,7 @@ Once you installed plv8 into your dabase, create language via
   $ psql -c 'CREATE EXTENSION plcoffee'
 ```
 
-in 9.1 or later, or in the prior versions
+in 9.1 or later, or in the prior versions:
 
 ```
   $ psql -f plv8.sql

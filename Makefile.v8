@@ -70,4 +70,7 @@ else
 		CCFLAGS += -stdlib=libstdc++
 		SHLIB_LINK += -stdlib=libstdc++
 	endif
+	ifeq ($(UNAME_S),Linux)
+		SHLIB_LINK += -lrt
+	endif
 endif

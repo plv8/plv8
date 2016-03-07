@@ -11,11 +11,9 @@ REQUIREMENT
 plv8 is tested with:
 
 - PG: version 9.2, 9.3, 9.4 and 9.5 (maybe older/newer are allowed)
-- V8: version 4.2 - 4.3.66 (as of v1.5.0)
+- V8: version 4.4 to 4.10
 - g++: version 4.8.2
 - clang++
-
-It is also known to work with some older versions of gcc and v8.
 
 Also all tools that PostgreSQL and V8 require to be built are required if you
 are building those from source.
@@ -29,7 +27,7 @@ is `make static`, which will download v8 source at a specific version and build
 it, and statically link plv8 to it.  PGXN install will use the former, while
 you can do the latter manually if you have not installed v8 yet.
 
-Once you installed plv8 into your dabase, create language via
+Once you have built and installed plv8, create the language via:
 
 ```
   $ psql -c 'CREATE EXTENSION plv8'
@@ -37,7 +35,7 @@ Once you installed plv8 into your dabase, create language via
   $ psql -c 'CREATE EXTENSION plcoffee'
 ```
 
-in 9.1 or later, or in the prior versions
+in 9.1 or later, or in the prior versions:
 
 ```
   $ psql -f plv8.sql

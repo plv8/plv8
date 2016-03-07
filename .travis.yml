@@ -36,7 +36,7 @@ before_script:
   - make dependencies > /dev/null || true
   - export CXX=clang++
   - export LD=clang++
-  - make native library=shared -j8 werror=no snapshot=no i18nsupport=off
+  - make native library=shared -j8 werror=no snapshot=off i18nsupport=off
   - sudo cp -rf include/* /usr/include
   - sudo cp -rf include /usr/include
   - sudo install -v --mode=0644 out/native/lib.target/* /usr/lib
@@ -48,14 +48,14 @@ before_script:
 
 env:
   matrix:
-    - PGVERSION=9.5 v8=4.3
-    - PGVERSION=9.5 v8=4.2
-    - PGVERSION=9.4 v8=4.3
-    - PGVERSION=9.4 v8=4.2
-    - PGVERSION=9.3 v8=4.3
-    - PGVERSION=9.3 v8=4.2
-    - PGVERSION=9.2 v8=4.3
-    - PGVERSION=9.2 v8=4.2
+    - PGVERSION=9.5 v8=4.4
+    - PGVERSION=9.5 v8=4.10
+    - PGVERSION=9.4 v8=4.4
+    - PGVERSION=9.4 v8=4.10
+    - PGVERSION=9.3 v8=4.4
+    - PGVERSION=9.3 v8=4.10
+    - PGVERSION=9.2 v8=4.4
+    - PGVERSION=9.2 v8=4.10
 
 
 language: cpp

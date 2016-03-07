@@ -283,16 +283,19 @@ _PG_init(void)
 
 	EmitWarningsOnPlaceholders("plv8");
 
-	V8::SetArrayBufferAllocator(new Plv8ArrayBufferAllocator);
-
 	V8::InitializeICU();
+#if V8_MAJOR_VERSION == 4 && V8_MINOR_VERSION >= 6
+	V8::InitializeExternalStartupData("plv8");
+#endif
 	Platform* platform = platform::CreateDefaultPlatform();
 	V8::InitializePlatform(platform);
 	V8::Initialize();
 	if (plv8_v8_flags != NULL) {
 	      V8::SetFlagsFromString(plv8_v8_flags, strlen(plv8_v8_flags));
 	}
-	plv8_isolate = Isolate::New();
+	Isolate::CreateParams params;
+	params.array_buffer_allocator = new Plv8ArrayBufferAllocator();
+	plv8_isolate = Isolate::New(params);
 	plv8_isolate->Enter();
 
 }
@@ -1373,12 +1376,6 @@ FormatSPIStatus(int status) throw()
 				"SPI_ERROR: %d", status);
 			return private_buf;
 	}
-}
-
-Handle<v8::Value>
-ThrowError(const char *message) throw()
-{
-	return plv8_isolate->ThrowException(Exception::Error(String::NewFromUtf8(plv8_isolate, message)));
 }
 
 static void

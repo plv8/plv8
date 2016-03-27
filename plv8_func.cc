@@ -112,9 +112,6 @@ SetCallback(Handle<ObjectTemplate> obj, const char *name,
 
 class SubTranBlock
 {
-private:
-	ResourceOwner		m_resowner;
-	MemoryContext		m_mcontext;
 public:
 	SubTranBlock();
 	void enter();
@@ -159,8 +156,6 @@ SPIResultToValue(int status)
 }
 
 SubTranBlock::SubTranBlock()
-	: m_resowner(NULL),
-	  m_mcontext(NULL)
 {}
 
 void
@@ -169,11 +164,7 @@ SubTranBlock::enter()
 	if (!IsTransactionOrTransactionBlock())
 		throw js_error("out of transaction");
 
-	m_resowner = CurrentResourceOwner;
-	m_mcontext = CurrentMemoryContext;
 	BeginInternalSubTransaction(NULL);
-	/* Do not want to leave the previous memory context */
-	MemoryContextSwitchTo(m_mcontext);
 
 }
 
@@ -185,14 +176,7 @@ SubTranBlock::exit(bool success)
 	else
 		RollbackAndReleaseCurrentSubTransaction();
 
-	MemoryContextSwitchTo(m_mcontext);
-	CurrentResourceOwner = m_resowner;
 
-	/*
-	 * AtEOSubXact_SPI() should not have popped any SPI context, but just
-	 * in case it did, make sure we remain connected.
-	 */
-	SPI_restore_connection();
 }
 
 JSONObject::JSONObject()
@@ -481,6 +465,7 @@ plv8_Execute(const Arguments &args)
 	PG_CATCH();
 	{
 		subtran.exit(false);
+		SPI_pop_conditional(true);
 		throw pg_error();
 	}
 	PG_END_TRY();

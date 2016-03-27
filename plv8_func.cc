@@ -468,6 +468,7 @@ static void
 plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 {
 	int				status;
+	ResourceOwner oldowner = CurrentResourceOwner;
 
 	if (args.Length() < 1) {
 		args.GetReturnValue().Set(Undefined(plv8_isolate));
@@ -508,6 +509,8 @@ plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 	subtran.exit(true);
 
 	args.GetReturnValue().Set(SPIResultToValue(status));
+
+	CurrentResourceOwner = oldowner;
 }
 
 /*

@@ -1,5 +1,5 @@
 CREATE OR REPLACE FUNCTION test_resource_owner()
-RETURNS jsonb
+RETURNS json
 AS $$
   return plv8.execute("SELECT 1")[0]
 $$ LANGUAGE plv8;

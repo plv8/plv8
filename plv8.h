@@ -14,6 +14,7 @@
 #include <v8-debug.h>
 #endif  // ENABLE_DEBUGGER_SUPPORT
 #include <vector>
+#include <string>
 
 extern "C" {
 #include "postgres.h"
@@ -102,6 +103,7 @@ public:
 	operator const char* () const	{ return m_str; }
 	const char* str(const char *ifnull = NULL) const
 	{ return m_str ? m_str : ifnull; }
+	static bool toStdString(v8::Handle<v8::Value> value, std::string &out);
 
 private:
 	CString(const CString&);

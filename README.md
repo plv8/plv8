@@ -43,6 +43,13 @@ in 9.1 or later, or in the prior versions:
 
 to create database objects.
 
+As of 2.0.0, there is a function to determine which version of plv8 you have
+installed:
+
+```
+  $ psql -c 'SELECT plv8_version()'
+```
+
 In mingw64, you may have difficulty in building plv8.  If so, try to make
 the following changes in Makefile.
 

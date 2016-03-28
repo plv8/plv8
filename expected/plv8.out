@@ -790,7 +790,9 @@ SELECT f_attdrop(2);
  (2,10)
 (1 row)
 
+SET client_min_messages = warning;
 create table plv8test ( id serial primary key, data json, sum integer, num integer);
+RESET client_min_messages;
 insert into plv8test (data, sum, num) values ('{"a": 1, "b": 2}', 0, 0);
 insert into plv8test (data, sum, num) values ('{"a": 3, "b": 4}', 0, 0);
 insert into plv8test (data, sum, num) values ('{"a": 3, "b": 4}', 0, 0);

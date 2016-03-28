@@ -1,0 +1,19 @@
+CREATE FUNCTION conv(o json) RETURNS json AS $$
+if (o instanceof Array) {
+	o[1] = 10;
+} else if (typeof(o) == 'object') {
+	o.i = 10;
+}
+return o;
+$$ LANGUAGE plv8;
+ERROR:  type json does not exist
+SELECT conv('{"i": 3, "b": 20}');
+ERROR:  function conv(unknown) does not exist
+LINE 1: SELECT conv('{"i": 3, "b": 20}');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+SELECT conv('[1, 2, 3]');
+ERROR:  function conv(unknown) does not exist
+LINE 1: SELECT conv('[1, 2, 3]');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.

@@ -1,7 +1,7 @@
 CREATE OR REPLACE FUNCTION test_resource_owner()
-RETURNS json
+RETURNS INT
 AS $$
-  return plv8.execute("SELECT 1")[0]
+  return plv8.execute("SELECT 1")[0]['?column?']
 $$ LANGUAGE plv8;
 CREATE TABLE resource_table (col TEXT);
 

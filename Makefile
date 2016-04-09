@@ -12,7 +12,7 @@
 #   'make static' will download v8 and build, then statically link to it.
 #
 #-----------------------------------------------------------------------------#
-PLV8_VERSION = 1.4.4
+PLV8_VERSION = 1.4.6
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -52,7 +52,7 @@ endif
 ifdef ENABLE_DEBUGGER_SUPPORT
 OPT_ENABLE_DEBUGGER_SUPPORT = -DENABLE_DEBUGGER_SUPPORT
 endif
-OPTFLAGS = -O2
+OPTFLAGS = -O2 -std=c++11 -fno-rtti
 CCFLAGS = -Wall $(OPTFLAGS) $(OPT_ENABLE_DEBUGGER_SUPPORT)
 
 ifdef V8_SRCDIR

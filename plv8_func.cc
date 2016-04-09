@@ -8,6 +8,7 @@
 #include "plv8.h"
 #include "plv8_param.h"
 #include <sstream>
+#include <string>
 
 extern "C" {
 #define delete		delete_
@@ -112,9 +113,6 @@ SetCallback(Handle<ObjectTemplate> obj, const char *name,
 
 class SubTranBlock
 {
-private:
-	ResourceOwner		m_resowner;
-	MemoryContext		m_mcontext;
 public:
 	SubTranBlock();
 	void enter();
@@ -159,8 +157,6 @@ SPIResultToValue(int status)
 }
 
 SubTranBlock::SubTranBlock()
-	: m_resowner(NULL),
-	  m_mcontext(NULL)
 {}
 
 void
@@ -169,11 +165,7 @@ SubTranBlock::enter()
 	if (!IsTransactionOrTransactionBlock())
 		throw js_error("out of transaction");
 
-	m_resowner = CurrentResourceOwner;
-	m_mcontext = CurrentMemoryContext;
 	BeginInternalSubTransaction(NULL);
-	/* Do not want to leave the previous memory context */
-	MemoryContextSwitchTo(m_mcontext);
 
 }
 
@@ -185,14 +177,7 @@ SubTranBlock::exit(bool success)
 	else
 		RollbackAndReleaseCurrentSubTransaction();
 
-	MemoryContextSwitchTo(m_mcontext);
-	CurrentResourceOwner = m_resowner;
 
-	/*
-	 * AtEOSubXact_SPI() should not have popped any SPI context, but just
-	 * in case it did, make sure we remain connected.
-	 */
-	SPI_restore_connection();
 }
 
 JSONObject::JSONObject()
@@ -315,16 +300,19 @@ plv8_Elog(const Arguments& args)
 		return ThrowError("invalid error level");
 	}
 
-	std::ostringstream	stream;
-
+	std::string msg;
+	std::string buf;
 	for (int i = 1; i < args.Length(); i++)
 	{
-		if (i > 1)
-			stream << ' ';
-		stream << CString(args[i]);
+		if (i > 1){
+			msg += " ";
+		}
+		if (!CString::toStdString(args[i],buf)){
+			return Undefined();
+		}
+		msg += buf;
 	}
-
-	const char	   *message = stream.str().c_str();
+	const char	*message = msg.c_str();
 
 	if (elevel != ERROR)
 	{
@@ -481,6 +469,7 @@ plv8_Execute(const Arguments &args)
 	PG_CATCH();
 	{
 		subtran.exit(false);
+		SPI_pop_conditional(true);
 		throw pg_error();
 	}
 	PG_END_TRY();

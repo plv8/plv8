@@ -1,0 +1,48 @@
+CREATE FUNCTION convb(o jsonb) RETURNS jsonb AS $$
+if (o instanceof Array) {
+	o[1] = 10;
+} else if (typeof(o) == 'object') {
+	o.i = 10;
+}
+return o;
+$$ LANGUAGE plv8;
+ERROR:  type jsonb does not exist
+SELECT convb('{"i": 3, "b": 20}');
+ERROR:  function convb(unknown) does not exist
+LINE 1: SELECT convb('{"i": 3, "b": 20}');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+SELECT convb('[1, 2, 3]');
+ERROR:  function convb(unknown) does not exist
+LINE 1: SELECT convb('[1, 2, 3]');
+               ^
+HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+CREATE FUNCTION get_keyb(key text, json_raw jsonb) RETURNS jsonb
+LANGUAGE plv8 IMMUTABLE STRICT
+AS $$
+  var val = json_raw[key];
+  var ret = {};
+  ret[key] = val;
+  return ret;
+$$;
+ERROR:  type jsonb does not exist
+CREATE TABLE jsonbonly (
+    data jsonb
+);
+ERROR:  type "jsonb" does not exist
+LINE 2:     data jsonb
+                 ^
+COPY jsonbonly (data) FROM stdin;
+ERROR:  relation "jsonbonly" does not exist
+{"ok": true}
+\.
+invalid command \.
+-- Call twice to test the function cache.
+SELECT get_keyb('ok', data) FROM jsonbonly;
+ERROR:  syntax error at or near "{"
+LINE 1: {"ok": true}
+        ^
+SELECT get_keyb('ok', data) FROM jsonbonly;
+ERROR:  relation "jsonbonly" does not exist
+LINE 1: SELECT get_keyb('ok', data) FROM jsonbonly;
+                                         ^

@@ -142,6 +142,7 @@ class Plv8ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
   }
   virtual void* AllocateUninitialized(size_t length) {
 			void *data = NULL;
+			MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
 			PG_TRY();
 			{
@@ -153,9 +154,12 @@ class Plv8ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
 			}
 			PG_END_TRY();
 
+			MemoryContextSwitchTo(oldcontext);
 			return data;
 	}
   virtual void Free(void* data, size_t) {
+			MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
 			PG_TRY();
 			{
 					pfree(data);
@@ -165,6 +169,8 @@ class Plv8ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
 					throw pg_error();
 			}
 			PG_END_TRY();
+
+			MemoryContextSwitchTo(oldcontext);
 	}
 };
 

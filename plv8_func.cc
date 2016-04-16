@@ -121,6 +121,7 @@ public:
 Persistent<ObjectTemplate> PlanTemplate;
 Persistent<ObjectTemplate> CursorTemplate;
 Persistent<ObjectTemplate> WindowObjectTemplate;
+ResourceOwner oldowner;
 
 static Handle<v8::Value>
 SPIResultToValue(int status)
@@ -163,6 +164,8 @@ SubTranBlock::SubTranBlock()
 void
 SubTranBlock::enter()
 {
+	oldowner = CurrentResourceOwner;
+
 	if (!IsTransactionOrTransactionBlock())
 		throw js_error("out of transaction");
 
@@ -172,6 +175,8 @@ SubTranBlock::enter()
 void
 SubTranBlock::exit(bool success)
 {
+	CurrentResourceOwner = oldowner;
+
 	if (success)
 		ReleaseCurrentSubTransaction();
 	else
@@ -469,7 +474,6 @@ static void
 plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 {
 	int				status;
-	ResourceOwner oldowner = CurrentResourceOwner;
 
 	if (args.Length() < 1) {
 		args.GetReturnValue().Set(Undefined(plv8_isolate));
@@ -510,7 +514,6 @@ plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 	subtran.exit(true);
 
 	args.GetReturnValue().Set(SPIResultToValue(status));
-	CurrentResourceOwner = oldowner;
 }
 
 /*
@@ -806,8 +809,6 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 	subtran.exit(true);
 
 	args.GetReturnValue().Set(SPIResultToValue(status));
-
-
 }
 
 /*

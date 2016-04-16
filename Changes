@@ -1,5 +1,9 @@
 Revision history for plv8
 
+1.5.2       2016-04-16
+            - Better fix for Resource Owner
+            - Fix memory allocation context
+
 1.5.0       2016-02-26
             - Adaptions for current V8 version, e.g. 4.1.0.x - 4.3.66
               (see http://strongloop.com/strongblog/node-js-v0-12-c-apis-breaking/

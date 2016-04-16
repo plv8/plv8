@@ -154,6 +154,8 @@ class Plv8ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
 			}
 			PG_END_TRY();
 
+			MemoryContextSwitchTo(oldcontext);
+
 			return data;
 	}
   virtual void Free(void* data, size_t) {
@@ -168,6 +170,9 @@ class Plv8ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
 					throw pg_error();
 			}
 			PG_END_TRY();
+
+			MemoryContextSwitchTo(oldcontext);
+
 	}
 };
 

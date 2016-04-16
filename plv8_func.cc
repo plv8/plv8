@@ -122,6 +122,8 @@ public:
 Persistent<ObjectTemplate> PlanTemplate;
 Persistent<ObjectTemplate> CursorTemplate;
 Persistent<ObjectTemplate> WindowObjectTemplate;
+ResourceOwner oldowner;
+
 
 static Handle<v8::Value>
 SPIResultToValue(int status)
@@ -162,6 +164,8 @@ SubTranBlock::SubTranBlock()
 void
 SubTranBlock::enter()
 {
+	oldowner = CurrentResourceOwner;
+
 	if (!IsTransactionOrTransactionBlock())
 		throw js_error("out of transaction");
 
@@ -172,6 +176,8 @@ SubTranBlock::enter()
 void
 SubTranBlock::exit(bool success)
 {
+	CurrentResourceOwner = oldowner;
+
 	if (success)
 		ReleaseCurrentSubTransaction();
 	else

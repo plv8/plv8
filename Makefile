@@ -37,7 +37,7 @@ DATA += plcoffee.control plcoffee--$(PLV8_VERSION).sql \
 endif
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 plv8-errors inline json startup_pre startup varparam json_conv \
- 		  jsonb_conv window guc es6 arraybuffer composites
+ 		  jsonb_conv window guc es6 arraybuffer composites currentresource
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif
@@ -99,7 +99,7 @@ ifeq ($(shell test $(PG_VERSION_NUM) -ge 90100 && echo yes), yes)
 DATA_built =
 all: $(DATA)
 %--$(PLV8_VERSION).sql: plv8.sql.common
-	sed -e 's/@LANG_NAME@/$*/g' $< | $(CC) -E -P $(CPPFLAGS) -DLANG_$* - > $@
+	sed -e 's/@LANG_NAME@/$*/g' $< | sed -e 's/@PLV8_VERSION@/$(PLV8_VERSION)/g' | $(CC) -E -P $(CPPFLAGS) -DLANG_$* - > $@
 %.control: plv8.control.common
 	sed -e 's/@PLV8_VERSION@/$(PLV8_VERSION)/g' $< | $(CC) -E -P -DLANG_$* - > $@
 subclean:

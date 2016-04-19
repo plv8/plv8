@@ -30,8 +30,7 @@ before_script:
   - popd
   - pushd ..
   - fetch v8; cd v8
-  - export tag=`git ls-remote |grep tags/$v8 | cut -f 3 -d / | sort  -k 3,3n -k 4,4n -t .|tail -1`
-  - git checkout $tag && gclient sync > /dev/null
+  - git checkout $v8 && gclient sync > /dev/null
   - git describe --always
   - make dependencies > /dev/null || true
   - export CXX=clang++
@@ -48,14 +47,14 @@ before_script:
 
 env:
   matrix:
-    - PGVERSION=9.5 v8=4.4
-    - PGVERSION=9.5 v8=4.10
-    - PGVERSION=9.4 v8=4.4
-    - PGVERSION=9.4 v8=4.10
-    - PGVERSION=9.3 v8=4.4
-    - PGVERSION=9.3 v8=4.10
-    - PGVERSION=9.2 v8=4.4
-    - PGVERSION=9.2 v8=4.10
+    - PGVERSION=9.5 v8=4.4.63.31
+    - PGVERSION=9.5 v8=5.1.281.14
+    - PGVERSION=9.4 v8=4.4.63.31
+    - PGVERSION=9.4 v8=5.1.281.14
+    - PGVERSION=9.3 v8=4.4.63.31
+    - PGVERSION=9.3 v8=5.1.281.14
+    - PGVERSION=9.2 v8=4.4.63.31
+    - PGVERSION=9.2 v8=5.1.281.14
 
 
 language: cpp

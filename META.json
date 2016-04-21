@@ -2,7 +2,7 @@
     "name": "plv8",
     "abstract": "A procedural language in JavaScript powered by V8",
     "description": "plv8 is a trusted procedural language that is safe to use, fast to run and easy to develop.",
-    "version": "1.5.2",
+    "version": "1.5.3",
     "maintainer": [
         "Hitoshi Harada <umi.tanuki@gmail.com>",
         "Andrew Dunstan <AMDunstan@gmail.com>",
@@ -27,21 +27,21 @@
     },
     "provides": {
         "plv8": {
-            "file": "plv8--1.5.2.sql",
+            "file": "plv8--1.5.3.sql",
             "docfile": "doc/plv8.md",
-            "version": "1.5.2",
+            "version": "1.5.3",
             "abstract": "A procedural language in JavaScript"
          },
         "plcoffee": {
-            "file": "plcoffee--1.5.2.sql",
+            "file": "plcoffee--1.5.3.sql",
             "docfile": "doc/plv8.md",
-            "version": "1.5.2",
+            "version": "1.5.3",
             "abstract": "A procedural language in CoffeeScript"
          },
         "plls": {
-            "file": "plls--1.5.2.sql",
+            "file": "plls--1.5.3.sql",
             "docfile": "doc/plv8.md",
-            "version": "1.5.2",
+            "version": "1.5.3",
             "abstract": "A procedural language in LiveScript"
          }
     },

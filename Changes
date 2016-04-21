@@ -1,5 +1,8 @@
 Revision history for plv8
 
+1.5.3       2016-04-20
+            - more resource and memory context changes
+
 1.5.2       2016-04-16
             - Better fix for Resource Owner
             - Fix memory allocation context

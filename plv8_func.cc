@@ -112,6 +112,9 @@ SetCallback(Handle<ObjectTemplate> obj, const char *name,
 
 class SubTranBlock
 {
+private:
+	ResourceOwner		m_resowner;
+	MemoryContext		m_mcontext;
 public:
 	SubTranBlock();
 	void enter();
@@ -121,6 +124,7 @@ public:
 Persistent<ObjectTemplate> PlanTemplate;
 Persistent<ObjectTemplate> CursorTemplate;
 Persistent<ObjectTemplate> WindowObjectTemplate;
+
 
 static Handle<v8::Value>
 SPIResultToValue(int status)
@@ -163,19 +167,27 @@ SubTranBlock::SubTranBlock()
 void
 SubTranBlock::enter()
 {
+
 	if (!IsTransactionOrTransactionBlock())
 		throw js_error("out of transaction");
 
+	m_resowner = CurrentResourceOwner;
+	m_mcontext = CurrentMemoryContext;
 	BeginInternalSubTransaction(NULL);
+	MemoryContextSwitchTo(m_mcontext);
 }
 
 void
 SubTranBlock::exit(bool success)
 {
+
 	if (success)
 		ReleaseCurrentSubTransaction();
 	else
 		RollbackAndReleaseCurrentSubTransaction();
+
+	MemoryContextSwitchTo(m_mcontext);
+	CurrentResourceOwner = m_resowner;
 }
 
 JSONObject::JSONObject()
@@ -469,7 +481,6 @@ static void
 plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 {
 	int				status;
-	ResourceOwner oldowner = CurrentResourceOwner;
 
 	if (args.Length() < 1) {
 		args.GetReturnValue().Set(Undefined(plv8_isolate));
@@ -510,7 +521,6 @@ plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 	subtran.exit(true);
 
 	args.GetReturnValue().Set(SPIResultToValue(status));
-	CurrentResourceOwner = oldowner;
 }
 
 /*
@@ -806,8 +816,6 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 	subtran.exit(true);
 
 	args.GetReturnValue().Set(SPIResultToValue(status));
-
-
 }
 
 /*

@@ -1,5 +1,8 @@
 Revision history for plv8
 
+1.4.8       2016-04-20
+            - better management of resources
+
 1.4.4       2015-05-26
             - Add jsonb type coercion in function boundary.
             - Fix crash related to FLEXIBLE_ARRAY_MEMBER changes.

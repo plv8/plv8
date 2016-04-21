@@ -113,6 +113,9 @@ SetCallback(Handle<ObjectTemplate> obj, const char *name,
 
 class SubTranBlock
 {
+private:
+	ResourceOwner	m_resowner;
+	MemoryContext m_mcontext;
 public:
 	SubTranBlock();
 	void enter();
@@ -122,7 +125,6 @@ public:
 Persistent<ObjectTemplate> PlanTemplate;
 Persistent<ObjectTemplate> CursorTemplate;
 Persistent<ObjectTemplate> WindowObjectTemplate;
-ResourceOwner oldowner;
 
 
 static Handle<v8::Value>
@@ -164,26 +166,26 @@ SubTranBlock::SubTranBlock()
 void
 SubTranBlock::enter()
 {
-	oldowner = CurrentResourceOwner;
-
 	if (!IsTransactionOrTransactionBlock())
 		throw js_error("out of transaction");
 
-	BeginInternalSubTransaction(NULL);
+	m_resowner = CurrentResourceOwner;
+	m_mcontext = CurrentMemoryContext;
 
+	BeginInternalSubTransaction(NULL);
+	MemoryContextSwitchTo(m_mcontext);
 }
 
 void
 SubTranBlock::exit(bool success)
 {
-	CurrentResourceOwner = oldowner;
-
 	if (success)
 		ReleaseCurrentSubTransaction();
 	else
 		RollbackAndReleaseCurrentSubTransaction();
 
-
+	MemoryContextSwitchTo(m_mcontext);
+	CurrentResourceOwner = m_resowner;
 }
 
 JSONObject::JSONObject()

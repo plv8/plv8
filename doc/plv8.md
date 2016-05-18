@@ -24,6 +24,7 @@ The documentation covers the following implemented features:
 - [Remote debugger](#remote-debugger)
 - [Runtime environment separation across users in the same session](#runtime-environment-separation-across-users-in-the-same-session)
 - [Start-up procedure](#start-up-procedure)
+- [Update procedure](#update-procedure)
 - [Dialects](#dialects)
 
 ## Requirements:
@@ -645,6 +646,72 @@ visible from any subsequent function as global variables.
 
 Remember `CREATE FUNCTION` also starts the plv8 runtime environment, so make sure
 to `SET` this `GUC` before any plv8 actions including `CREATE FUNCTION`.
+
+## Update procedure
+Updating PL/v8 is usually straightforward as it is a small and stable extension
+- it only contains a handful of objects that need to be added to PostgreSQL when
+installing the extension.
+
+The procedure that is responsible for invoking this installation script
+(generated during compile time based on `plv8.sql.common`), is controlled by
+PostgreSQL and runs when `CREATE EXTENSION` is executed only. After building,
+it takes the form of `plv8--<version>.sql` and is usually located under
+`/usr/share/postgresql/<PG_MAJOR>/extension`, depending on the OS.
+
+When this command is executed, PostgreSQL tracks which objects belong to the
+extension and conversely removes them upon uninstallation, i.e., whenever
+`DROP EXTENSION` is called.
+
+You can explore some of the objects that PL/v8 stores under PostgreSQL:
+
+```sql
+SELECT lanname FROM pg_catalog.pg_language WHERE lanname = 'plv8';
+SELECT proname FROM pg_proc p WHERE p.proname LIKE 'plv8%';
+SELECT typname FROM pg_catalog.pg_type WHERE typname LIKE 'plv8%';
+```
+
+__When__ and __if__ these objects change, extensions may provide upgrade scripts
+which contemplate different upgrade paths (e.g. going from 1.5 to 2.0 or from
+1.5.0 to 1.5.1). This allows using the special
+`ALTER EXTENSION <extension> UPDATE [ TO <new_version> ]` syntax instead of
+having to manually execute `DROP EXTENSION` followed by `CREATE EXTENSION`.
+
+This is particularly useful when a large number of user-owned objects depend on
+the extension, is it would mean dropping all of them and re-creating them after
+the extension is created again.
+
+Currently, PL/v8 does not ship with upgrade scripts as there haven't been
+updates to these objects since the early builds. This may change in 2.0.0 with
+the introduction of the `plv8_version` function, which was added as a function
+object as part of the extension install script.
+
+If there are no changes to these objects, there is no need to `DROP EXTENSION`
+/ `CREATE EXTENSION` as PostgreSQL is able to automatically read the new the
+control file (`plv8.control`) and load the binary into memory (`plv8.so`) as
+soon as a new connection is established. Don't be fooled by
+`SELECT pg_available_extensions()` returning the new version as that function
+actually re-reads the extension directory and returns the version value of the
+new control file, which may not represent the current PL/v8 version in memory.
+Also note that running `DROP EXTENSION` / `CREATE EXTENSION` has no effect
+whatsoever on loading the new PL/v8 version, although new scripts will be picked
+up.
+
+The best way of finding out which PL/v8 version you're running is by executing:
+
+```sql
+DO $$ plv8.elog(WARNING, plv8.version) $$ LANGUAGE plv8;
+```
+
+Even when using PL/v8 2.0.0, `SELECT plv8_version();` is only indicative of the
+upgrade scripts being ran, as mentioned earlier, not of the current PL/v8
+extension version in memory.
+
+In conclusion, for now it is safe to simply copy the new control and binary files
+to the correct paths. This can be either `make install` or by installing a newer
+package like `postgresql-9.5-plv8`. Then, make sure the new binary is loaded
+immediately by all users by forcing a server restart (a reload won't suffice) or
+simply prepare your code to deal with the fact that only newer connections will
+get access to the PL/v8 version.
 
 ## Dialects
 This module also contains some dialect supports. Currently, we have two dialects

@@ -8,12 +8,6 @@
 #include "plv8.h"
 
 extern "C" {
-#define delete		delete_
-#define namespace	namespace_
-#define	typeid		typeid_
-#define	typename	typename_
-#define	using		using_
-
 #if PG_VERSION_NUM >= 90300
 #include "access/htup_details.h"
 #endif
@@ -28,12 +22,6 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
-
-#undef delete
-#undef namespace
-#undef typeid
-#undef typename
-#undef using
 } // extern "C"
 
 //#define CHECK_INTEGER_OVERFLOW

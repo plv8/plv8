@@ -9,12 +9,6 @@
 #include <new>
 
 extern "C" {
-#define delete		delete_
-#define namespace	namespace_
-#define	typeid		typeid_
-#define	typename	typename_
-#define	using		using_
-
 #if PG_VERSION_NUM >= 90300
 #include "access/htup_details.h"
 #endif
@@ -31,12 +25,6 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
-
-#undef delete
-#undef namespace
-#undef typeid
-#undef typename
-#undef using
 
 PG_MODULE_MAGIC;
 

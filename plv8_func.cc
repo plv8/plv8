@@ -10,24 +10,12 @@
 #include <string>
 
 extern "C" {
-#define delete		delete_
-#define namespace	namespace_
-#define	typeid		typeid_
-#define	typename	typename_
-#define	using		using_
-
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
 #include "parser/parse_type.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
-
-#undef delete
-#undef namespace
-#undef typeid
-#undef typename
-#undef using
 } // extern "C"
 
 using namespace v8;

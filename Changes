@@ -1,5 +1,8 @@
 Revision history for plv8
 
+1.5.4       2016-11-23
+            - Remove defines for latest g++
+
 1.5.2       2016-04-16
             - Better fix for Resource Owner
             - Fix memory allocation context

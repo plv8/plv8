@@ -8,12 +8,6 @@
 #include "plv8.h"
 
 extern "C" {
-#define delete		delete_
-#define namespace	namespace_
-#define	typeid		typeid_
-#define	typename	typename_
-#define	using		using_
-
 #if PG_VERSION_NUM >= 90300
 #include "access/htup_details.h"
 #endif
@@ -33,12 +27,6 @@ extern "C" {
 #if PG_VERSION_NUM >= 90400
 #include "utils/jsonb.h"
 #endif
-
-#undef delete
-#undef namespace
-#undef typeid
-#undef typename
-#undef using
 } // extern "C"
 
 //#define CHECK_INTEGER_OVERFLOW

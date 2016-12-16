@@ -33,22 +33,29 @@ dynamically linking to Google's `libv8` library on your system. There are
 some issues with this as several linux distros ship a very old version of 
 `libv8`. The `3.x` versions of v8 will work with the `1.4.x` versions of plv8, 
 but to build the later versions of plv8 you need a v8 minimum version of 
-`4.4.x`, but can also use v8 version `5.x.x` (TODO: what version???). PGXN 
+`4.4.63.31`, but can also use v8 version `5.1.281.14`. PGXN 
 install will use the dynamically linked `libv8` library.
+
+If you would like to use `make` and you system does not have a new enough 
+version of `libv8` installed, see the `.travis.yml` file in the repo to see 
+how out CI test servers build v8 natively.
 
 > Note: If you have multiple versions of PostgreSQL installed like 9.5 and 9.6, 
 plv8 will only be built for PostgreSQL 9.6. This is because `make static` calls 
 `pg_config` to get the version number, which will always be the latest version 
 installed. If you need to build plv8 for PostgreSQL 9.5 while you have 9.6 
-installed, you can "hide" 9.6 from `pg_config`. One way to do this in Ubuntu 
-is to move the 9.6 directory:
-TODO: (Is there a better way?)
+installed pass `make` the `PG_CONFIG` variable to your 9.5 version of 
+`pg_config`. This works for `make`, `make static`, `make install`. For example 
+in Ubuntu:
 ```shell
-$ mv /usr/lib/postgresql/9.6 /usr/lib/
-# Then build pv8.
-$ make static
-# Then move it back.
-$ mv /usr/lib/9.6 /usr/lib/postgresql/
+$ make PG_CONFIG=/usr/lib/postgresql/9.5/bin/pg_config
+```
+
+> Note: You may run into problems with your C++ complier version. You can pass 
+`make` the `CUSTOM_CC` variable to change the complier. For example, to use 
+`g++` version 4.9:
+```shell
+$ make CUSTOM_CC g++-4.9
 ```
 
 > Note: In `mingw64`, you may have difficulty in building plv8. If so, try to 
@@ -71,38 +78,29 @@ After running `make` or `make static` the following files must be copied to the
 correct location for PostgreSQL to find them:
 #### plv8 JavaScript Extension:
 - `plv8.so`
--- On Ubuntu: `$ cp ./plv8.so /usr/lib/postgres/{your-postgresql-version-here}/lib`
--- e.g. `$ cp ./plv8.so /usr/lib/postgres/9.6/lib`
 - `plv8.control`
--- On Ubuntu: `$ cp ./plv8.control/usr/share/postgres/{your-postgresql-version-here}/extension`
--- e.g. `$ cp ./plv8.control/usr/share/postgres/9.6/extension`
 - `plv8--{plv8-build-version-here}.sql`
--- On Ubuntu: `$ cp ./plv8--{plv8-build-version-here}.sql /usr/share/postgres/{your-postgresql-version-here}/extension`
--- e.g. `$ cp ./plv8--1.5.4.sql /usr/share/postgres/9.6/extension`
 
 The following files will also be build and can be optionally installed if you 
 need the CoffeeScript or LiveScript versions:
 #### CoffeeScript Extension:
-- `plcoffee.so`
--- On Ubuntu: `$ cp ./plcoffee.so /usr/lib/postgres/{your-postgresql-version-here}/lib`
--- e.g. `$ cp ./plcoffee.so /usr/lib/postgres/9.6/lib`
 - plcoffee.control
--- On Ubuntu: `$ cp ./plcoffee.control/usr/share/postgres/{your-postgresql-version-here}/extension`
--- e.g. `$ cp ./plcoffee.control/usr/share/postgres/9.6/extension`
 - plcoffee--{plv8-build-version-here}.sql
--- On Ubuntu: `$ cp ./plcoffee--{plv8-build-version-here}.sql /usr/share/postgres/{your-postgresql-version-here}/extension`
--- e.g. `$ cp ./plcoffee--1.5.4.sql /usr/share/postgres/9.6/extension`
 
 #### LiveScript Extension:
-- `plls.so`
--- On Ubuntu: `$ cp ./plls.so /usr/lib/postgres/{your-postgresql-version-here}/lib`
--- e.g. `$ cp ./plls.so /usr/lib/postgres/9.6/lib`
 - plls.control
--- On Ubuntu: `$ cp ./plls.control/usr/share/postgres/{your-postgresql-version-here}/extension`
--- e.g. `$ cp ./plls.control/usr/share/postgres/9.6/extension`
 - plls--{plv8-build-version-here}.sql
--- On Ubuntu: `$ cp ./plls--{plv8-build-version-here}.sql /usr/share/postgres/{your-postgresql-version-here}/extension`
--- e.g. `$ cp ./plls--1.5.4.sql /usr/share/postgres/9.6/extension`
+
+### Automatically Install the Build
+You can install the build for your system by running:
+```shell
+$ make install
+```
+
+> Note: You should do this a root/admin. `sudo make install`
+
+> Note: If you need to install plv8 for a different version of PostgreSQL, pass 
+the `PG_CONFIG` variable. See above.
 
 ## Debian/Ubuntu 14.04 and 16.04:
 You can install plv8 using `apt-get`, but it will be version `v1.4.8` 

@@ -15,3 +15,10 @@ SELECT test_resource_owner() FROM resource_table;
 ---------------------
 (0 rows)
 
+INSERT INTO resource_table (col) VALUES ('123abc');
+SELECT test_resource_owner() FROM resource_table;
+ test_resource_owner 
+---------------------
+ {"?column?": 1}
+(1 row)
+

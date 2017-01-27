@@ -1,7 +1,7 @@
 PL/v8
 =====
 PL/v8 is a trusted procedural language that is safe to use, fast to run and
-easy to develop, powered by V8 JavaScript Engine. The Pl/v8 project is maintained
+easy to develop, powered by V8 JavaScript Engine. The PL/v8 project is maintained
 at [https://github.com/plv8/plv8](https://github.com/plv8/plv8).
 
 ## Table of Contents

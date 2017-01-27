@@ -1,12 +1,13 @@
 PL/v8
 =====
 PL/v8 is a trusted procedural language that is safe to use, fast to run and
-easy to develop, powered by V8 JavaScript Engine.
+easy to develop, powered by V8 JavaScript Engine. The Pl/v8 project is maintained
+at [https://github.com/plv8/plv8](https://github.com/plv8/plv8).
 
-## Contents
-Implemented features are as follows.
+## Table of Contents
+The documentation covers the following implemented features:
 
-- [Requirements](#requirement)
+- [Requirements](#requirements)
 - [Installing PL/v8](#installing-plv8)
 - [Install the PL/v8 Extensions on a Database](#install-the-plv8-extensions-on-a-database)
 - [Scalar function calls](#scalar-function-calls)
@@ -135,13 +136,13 @@ $ apt-get install postgresql-9.6-plv8
 ```
 
 ### Redhat/CentOS:
-TODO
+TODO - PL/v8 supports Redhat/CentOS. A Pull Request for installation steps is greatly appreciated.
 
 ### MacOS:
-TODO
+TODO - PL/v8 supports MacOS. A Pull Request for installation steps is greatly appreciated
 
 ### Windows:
-TODO
+TODO - PL/v8 supports Windows. A Pull Request for installation steps is greatly appreciated
 
 ## Install the PL/v8 Extensions on a Database:
 Once the PL/v8 extensions have been added to the server, you should restart the

@@ -8,7 +8,7 @@ function that is callable from SQL.
 ## Documentation
 Implemented features are as follows.
 
-- [Requirements](/doc/plv8.md#requirement)
+- [Requirements](/doc/plv8.md#requirements)
 - [Installing PL/v8](/doc/plv8.md#installing-plv8)
 - [Install the PL/v8 Extensions on a Database](/doc/plv8.md#install-the-plv8-extensions-on-a-database)
 - [Scalar function calls](/doc/plv8.md#scalar-function-calls)

@@ -139,6 +139,9 @@ $ apt-get install postgresql-9.6-plv8
 TODO - PL/v8 supports Redhat/CentOS. A Pull Request for installation steps is greatly appreciated.
 
 ### MacOS:
+```shell
+$ brew install plv8
+```
 TODO - PL/v8 supports MacOS. A Pull Request for installation steps is greatly appreciated
 
 ### Windows:

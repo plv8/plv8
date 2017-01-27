@@ -6,7 +6,7 @@ by V8 JavaScript Engine.  With this program you can write in JavaScript your
 function that is callable from SQL.
 
 ## Documentation
-Implemented features are as follows.
+The documentation covers the following implemented features:
 
 - [Requirements](/doc/plv8.md#requirements)
 - [Installing PL/v8](/doc/plv8.md#installing-plv8)

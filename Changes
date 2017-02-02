@@ -1,5 +1,8 @@
 Revision history for plv8
 
+2.0.0       2017-02-02
+            - track v8 5.4.500.43
+
 2.0.0-dev
             - track v8 4.4-4.10
             - add plv8_version()

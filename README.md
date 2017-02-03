@@ -25,6 +25,7 @@ The documentation covers the following implemented features:
 - [Remote debugger](/doc/plv8.md#remote-debugger)
 - [Runtime environment separation across users in the same session](/doc/plv8.md#runtime-environment-separation-across-users-in-the-same-session)
 - [Start-up procedure](/doc/plv8.md#start-up-procedure)
+- [Update procedure](/doc/plv8.md#update-procedure)
 - [Dialects](/doc/plv8.md#dialects)
 
 ## Notes:

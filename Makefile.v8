@@ -67,8 +67,8 @@ else
 	SHLIB_LINK += -L$(AUTOV8_OUT)
 	UNAME_S := $(shell uname -s)
 	ifeq ($(UNAME_S),Darwin)
-		CCFLAGS += -stdlib=libstdc++
-		SHLIB_LINK += -stdlib=libstdc++
+		CCFLAGS += -stdlib=libc++ -std=c++11
+		SHLIB_LINK += -stdlib=libc++
 	endif
 	ifeq ($(UNAME_S),Linux)
 		SHLIB_LINK += -lrt

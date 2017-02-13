@@ -21,7 +21,6 @@ The documentation covers the following implemented features:
 - [Window function API](#window-function-api)
 - [Typed array](#typed-array)
 - [ES6 Language Features](#es6-language-features)
-- [Remote debugger](#remote-debugger)
 - [Runtime environment separation across users in the same session](#runtime-environment-separation-across-users-in-the-same-session)
 - [Start-up procedure](#start-up-procedure)
 - [Update procedure](#update-procedure)
@@ -31,7 +30,7 @@ The documentation covers the following implemented features:
 PL/v8 is tested with:
 
 - PG: version 9.2, 9.3, 9.4 and 9.5 (maybe older/newer are allowed)
-- V8: version 4.4 to 5.1
+- V8: version 4.4 to 5.4
 - g++: version 4.8.2
 - clang++
 
@@ -43,9 +42,9 @@ are building those from source.
 ### Build from source:
 Determine the [PL/v8 release](https://github.com/plv8/plv8/releases) you want to download and use it's version and path below.
 ```shell
-$ wget https://github.com/plv8/plv8/archive/v1.5.5.tar.gz
-$ tar -xvzf v1.5.5.tar.gz
-$ cd plv8-1.5.5
+$ wget https://github.com/plv8/plv8/archive/v2.0.0.tar.gz
+$ tar -xvzf v2.0.0.tar.gz
+$ cd plv8-2.0.0
 $ make static
 ```
 This will build PL/v8 for you linking to Google's v8 as a static library by
@@ -377,8 +376,7 @@ returned value is an integer that represents number of affected rows.
   var num_affected = plv8.execute( 'DELETE FROM tbl WHERE price > $1', [ 1000 ] );
 ```
 
-Note this function and similar one are not allowed outside of a transaction,
-which can be the case when using the remote debugger.
+Note this function and similar are not allowed outside of transaction.
 
 ### `plv8.prepare( sql, [, typenames] )`
 Opens a prepared statement. The `typename` parameter is an array where
@@ -601,17 +599,6 @@ initialized. Compared to [Dialects (see below)](#dialects), which can be set on 
 per function base, the V8 flags cannot be changed once the runtime is
 initialized. So normally this setting should rather be set per database,
 and not per session.
-
-## Remote debugger
-PL/v8 supports v8 remote debugger. You need to enable it at the compile time
-to pass `ENABLE_DEBUGGER_SUPPORT` to `make`. `make static` will automatically
-turns it on. If enabled and once PL/v8 module is loaded and the execution
-engine is initialized, PL/v8 accepts a remote debugger connection. If you
-have `d8` from v8 package, run with `--remote-debug --debug-port=35432` to
-attach the functions. If you want to change the remote debugger port, there
-is a GUC `plv8.debugger_port` flag to set the port number. You can also try
-`debugger;` statements inside functions to set breakpoints. For more details
-of v8 remote debugger, see v8 documentation.
 
 ## Runtime environment separation across users in the same session
 In PL/v8, each session has one global JS runtime context. This enables function

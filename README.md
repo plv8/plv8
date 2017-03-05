@@ -1,132 +1,36 @@
-A Procedural Language in JavaScript powered by V8
+PL/v8 - A Procedural Language in JavaScript powered by V8
 =================================================
 
-plv8 is a shared library that provides a PostgreSQL procedural language powered
+PL/v8 is a shared library that provides a PostgreSQL procedural language powered
 by V8 JavaScript Engine.  With this program you can write in JavaScript your
 function that is callable from SQL.
 
-REQUIREMENT
------------
+## Documentation
+The documentation covers the following implemented features:
 
-plv8 is tested with:
+- [Requirements](/doc/plv8.md#requirements)
+- [Installing PL/v8](/doc/plv8.md#installing-plv8)
+- [Install the PL/v8 Extensions on a Database](/doc/plv8.md#install-the-plv8-extensions-on-a-database)
+- [Scalar function calls](/doc/plv8.md#scalar-function-calls)
+- [Set returing function calls](/doc/plv8.md#set-returning-function-calls)
+- [Trigger function calls](/doc/plv8.md#trigger-function-calls)
+- [Inline statement calls](/doc/plv8.md#inline-statement-calls)
+- [Auto mapping between JS and database built-in types](/doc/plv8.md#auto-mapping-between-js-and-database-built-in-types)
+- [Database access via SPI including prepared statements and cursors](/doc/plv8.md#database-access-via-spi-including-prepared-statements-and-cursors)
+- [Subtransaction](/doc/plv8.md#subtransaction)
+- [Utility functions](/doc/plv8.md#utility-functions)
+- [Window function API](/doc/plv8.md#window-function-api)
+- [Typed array](/doc/plv8.md#typed-array)
+- [ES6 Language Features](/doc/plv8.md#es6-language-features)
+- [Remote debugger](/doc/plv8.md#remote-debugger)
+- [Runtime environment separation across users in the same session](/doc/plv8.md#runtime-environment-separation-across-users-in-the-same-session)
+- [Start-up procedure](/doc/plv8.md#start-up-procedure)
+- [Update procedure](/doc/plv8.md#update-procedure)
+- [Dialects](/doc/plv8.md#dialects)
 
-- PG: version 9.2, 9.3, 9.4 and 9.5 (maybe older/newer are allowed)
-- V8: version 4.4 to 4.10
-- g++: version 4.8.2
-- clang++
-
-Also all tools that PostgreSQL and V8 require to be built are required if you
-are building those from source.
-
-INSTALL
--------
-
-There are two ways to build plv8.  The first is default `make`, which depends
-on system-installed libv8 and plv8 will be dynamically link to it.  The second
-is `make static`, which will download v8 source at a specific version and build
-it, and statically link plv8 to it.  PGXN install will use the former, while
-you can do the latter manually if you have not installed v8 yet.
-
-Once you have built and installed plv8, create the language via:
-
-```
-  $ psql -c 'CREATE EXTENSION plv8'
-  $ psql -c 'CREATE EXTENSION plls'
-  $ psql -c 'CREATE EXTENSION plcoffee'
-```
-
-in 9.1 or later, or in the prior versions:
-
-```
-  $ psql -f plv8.sql
-```
-
-to create database objects.
-
-As of 2.0.0, there is a function to determine which version of plv8 you have
-installed:
-
-```
-  $ psql -c 'SELECT plv8_version()'
-```
-
-In mingw64, you may have difficulty in building plv8.  If so, try to make
-the following changes in Makefile.
-
-```
-  CUSTOM_CC = gcc
-  SHLIB_LINK := $(SHLIB_LINK) -lv8 -Wl,-Bstatic -lstdc++ -Wl,-Bdynamic -lm
-```
-
-For more detail, please refer to https://github.com/plv8/plv8/issues/29
-
-TEST
-----
-
-plv8 supports installcheck test.  Make sure set custom_variable_classes = 'plv8'
-in your postgresql.conf (before 9.2) and run
-
-```
-  $ make installcheck
-```
-
-EXAMPLE (JAVASCRIPT)
---------------------
-
-```
-  CREATE OR REPLACE FUNCTION plv8_test(keys text[], vals text[])
-  RETURNS text AS $$
-    var o = {};
-    for(var i=0; i<keys.length; i++){
-      o[keys[i]] = vals[i];
-    }
-    return JSON.stringify(o);
-  $$ LANGUAGE plv8 IMMUTABLE STRICT;
-
-  SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-           plv8_test
-  ---------------------------
-   {"name":"Tom","age":"29"}
-  (1 row)
-```
-
-EXAMPLE (COFFEESCRIPT)
-----------------------
-
-```
-  CREATE OR REPLACE FUNCTION plcoffee_test(keys text[], vals text[])
-  RETURNS text AS $$
-    return JSON.stringify(keys.reduce(((o, key, idx) ->
-      o[key] = vals[idx]; return o), {}), {})
-  $$ LANGUAGE plcoffee IMMUTABLE STRICT;
-
-  SELECT plcoffee_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-         plcoffee_test
-  ---------------------------
-   {"name":"Tom","age":"29"}
-  (1 row)
-```
-
-EXAMPLE (LIVESCRIPT)
---------------------
-
-```
-  CREATE OR REPLACE FUNCTION plls_test(keys text[], vals text[])
-  RETURNS text AS $$
-    return JSON.stringify { [key, vals[idx]] for key, idx in keys }
-  $$ LANGUAGE plls IMMUTABLE STRICT;
-
-  SELECT plls_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-           plls_test
-  ---------------------------
-   {"name":"Tom","age":"29"}
-  (1 row)
-```
-
-NOTES
------
-plv8 is hosted on github
+## Notes:
+PL/v8 is hosted on github at:
 https://github.com/plv8/plv8
 
-and distributed by PGXN.  For more detail, see
+PL/v8 is distributed by PGXN.  For more detail, see:
 http://pgxn.org/dist/plv8/doc/plv8.html

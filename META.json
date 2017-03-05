@@ -2,12 +2,9 @@
     "name": "plv8",
     "abstract": "A procedural language in JavaScript powered by V8",
     "description": "plv8 is a trusted procedural language that is safe to use, fast to run and easy to develop.",
-    "version": "2.0.0-dev1",
+    "version": "2.0.2",
     "maintainer": [
-        "Hitoshi Harada <umi.tanuki@gmail.com>",
-        "Andrew Dunstan <AMDunstan@gmail.com>",
-        "Takahiro Itagaki <itagaki.takahiro@gmail.com>",
-        "Kiswono Prayogo <kiswono@gmail.com>"
+        "Jerry Sievert <code@legitimatesounding.com>"
     ],
     "license": {
         "PostgreSQL": "http://www.postgresql.org/about/licence"
@@ -16,42 +13,42 @@
     "prereqs": {
         "runtime": {
             "requires": {
-                "v8": "3.6.2",
+                "v8": "5.4.500",
                 "PostgreSQL": "8.4.0"
             },
             "recommends": {
-                "PostgreSQL": "9.2.0"
+                "PostgreSQL": "9.5.0"
             }
         }
     },
     "provides": {
         "plv8": {
-            "file": "plv8--2.0.0-dev1.sql",
+            "file": "plv8--2.0.2.sql",
             "docfile": "doc/plv8.md",
-            "version": "2.0.0-dev1",
+            "version": "2.0.1",
             "abstract": "A procedural language in JavaScript"
          },
         "plcoffee": {
-            "file": "plcoffee--2.0.0-dev1.sql",
+            "file": "plcoffee--2.0.2.sql",
             "docfile": "doc/plv8.md",
-            "version": "2.0.0-dev1",
+            "version": "2.0.1",
             "abstract": "A procedural language in CoffeeScript"
          },
         "plls": {
-            "file": "plls--2.0.0-dev1.sql",
+            "file": "plls--2.0.2.sql",
             "docfile": "doc/plv8.md",
-            "version": "2.0.0-dev1",
+            "version": "2.0.1",
             "abstract": "A procedural language in LiveScript"
          }
     },
     "resources": {
-        "homepage": "http://code.google.com/p/plv8js/",
+        "homepage": "https://github.com/plv8/plv8",
         "bugtracker": {
-            "web": "http://code.google.com/p/plv8js/issues/list"
+            "web": "https://github.com/plv8/plv8/issues"
         },
         "repository": {
-            "url":  "https://code.google.com/p/plv8js/",
-            "web":  "http://code.google.com/p/plv8js/source/checkout",
+            "url":  "https://github.com/plv8/plv8",
+            "web":  "https://github.com/plv8/plv8.git",
             "type": "git"
         }
     },
@@ -61,6 +58,7 @@
     },
     "tags": [
        "PL",
-       "JavaScript"
+       "JavaScript",
+       "v8"
     ]
 }

@@ -1375,6 +1375,18 @@ ThrowError(const char *message) throw()
 	return plv8_isolate->ThrowException(Exception::Error(String::NewFromUtf8(plv8_isolate, message)));
 }
 
+static text *
+charToText(char *string)
+{
+	int len = strlen(string);
+	text *result = (text *) palloc(len + 1 + VARHDRSZ);
+
+	SET_VARSIZE(result, len + VARHDRSZ);
+	memcpy(VARDATA(result), string, len + 1);
+
+	return result;
+}
+
 static void
 GetGlobalContext(Persistent<Context>& global_context)
 {
@@ -1420,10 +1432,40 @@ GetGlobalContext(Persistent<Context>& global_context)
 			Context::Scope		context_scope(my_context->localContext());
 			TryCatch			try_catch;
 			MemoryContext		ctx = CurrentMemoryContext;
+			text *arg1, *arg2;
+			FunctionCallInfoData fake_fcinfo;
+			FmgrInfo	flinfo;
+
+			char proc[NAMEDATALEN + 32];
+			strcpy(proc, plv8_start_proc);
+			strcat(proc, "()");
+			char perm[16];
+			strcpy(perm, "EXECUTE");
+			arg1 = charToText(proc);
+			arg2 = charToText(perm);
+
+			MemSet(&fake_fcinfo, 0, sizeof(fake_fcinfo));
+			MemSet(&flinfo, 0, sizeof(flinfo));
+			fake_fcinfo.flinfo = &flinfo;
+			flinfo.fn_oid = InvalidOid;
+			flinfo.fn_mcxt = CurrentMemoryContext;
+			fake_fcinfo.nargs = 2;
+			fake_fcinfo.arg[0] = CStringGetDatum(arg1);
+			fake_fcinfo.arg[1] = CStringGetDatum(arg2);
 
 			PG_TRY();
 			{
-				func = find_js_function_by_name(plv8_start_proc);
+				Datum ret = has_function_privilege_name(&fake_fcinfo);
+
+				if (ret == 0) {
+					elog(WARNING, "failed to find js function %s", plv8_start_proc);
+				} else {
+					if (DatumGetBool(ret)) {
+						func = find_js_function_by_name(plv8_start_proc);
+					} else {
+						elog(WARNING, "no permission to execute js function %s", plv8_start_proc);
+					}
+				}
 			}
 			PG_CATCH();
 			{

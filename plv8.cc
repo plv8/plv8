@@ -198,6 +198,9 @@ static char *plv8_start_proc = NULL;
 /* A GUC to specify V8 flags (e.g. --es_staging) */
 static char *plv8_v8_flags = NULL;
 
+/* A GUC to specify the ICU data directory */
+static char *plv8_icu_data = NULL;
+
 /* A GUC to specify the remote debugger port */
 static int plv8_debugger_port;
 /*
@@ -250,6 +253,18 @@ _PG_init(void)
 							   NULL,
 							   NULL);
 
+	DefineCustomStringVariable("plv8.icu_data",
+								 gettext_noop("ICU data file directory."),
+								 NULL,
+								 &plv8_icu_data,
+								 NULL,
+								 PGC_USERSET, 0,
+#if PG_VERSION_NUM >= 90100
+								 NULL,
+#endif
+								 NULL,
+								 NULL);
+
 	DefineCustomStringVariable("plv8.v8_flags",
 							   gettext_noop("V8 engine initialization flags (e.g. --es_staging for additional ES6 features)."),
 							   NULL,
@@ -279,7 +294,14 @@ _PG_init(void)
 
 	EmitWarningsOnPlaceholders("plv8");
 
-	V8::InitializeICU();
+	if (plv8_icu_data == NULL) {
+		elog(DEBUG1, "no icu dir");
+		V8::InitializeICU();
+	} else {
+		elog(DEBUG1, "init icu data %s", plv8_icu_data);
+		V8::InitializeICU(plv8_icu_data);
+	}
+
 #if V8_MAJOR_VERSION == 4 && V8_MINOR_VERSION >= 6
 	V8::InitializeExternalStartupData("plv8");
 #endif

@@ -11,11 +11,6 @@
 #include <string>
 
 extern "C" {
-#define delete		delete_
-#define namespace	namespace_
-#define	typeid		typeid_
-#define	typename	typename_
-#define	using		using_
 
 #include "access/xact.h"
 #include "catalog/pg_type.h"

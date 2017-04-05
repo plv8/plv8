@@ -9,11 +9,6 @@
 #include <new>
 
 extern "C" {
-#define delete		delete_
-#define namespace	namespace_
-#define	typeid		typeid_
-#define	typename	typename_
-#define	using		using_
 
 #if PG_VERSION_NUM >= 90300
 #include "access/htup_details.h"
@@ -1319,17 +1314,14 @@ GetGlobalContext()
 			Context::Scope		context_scope(global_context);
 			TryCatch			try_catch;
 			MemoryContext		ctx = CurrentMemoryContext;
-			text *arg1, *arg2;
+			text *arg;
 			FunctionCallInfoData fake_fcinfo;
 			FmgrInfo	flinfo;
 
-			char proc[NAMEDATALEN + 32];
-			strcpy(proc, plv8_start_proc);
-			strcat(proc, "()");
 			char perm[16];
 			strcpy(perm, "EXECUTE");
-			arg1 = charToText(proc);
-			arg2 = charToText(perm);
+			arg = charToText(perm);
+			Oid funcoid = DatumGetObjectId(DirectFunctionCall1(regprocin, CStringGetDatum(plv8_start_proc)));
 
 			MemSet(&fake_fcinfo, 0, sizeof(fake_fcinfo));
 			MemSet(&flinfo, 0, sizeof(flinfo));
@@ -1337,12 +1329,12 @@ GetGlobalContext()
 			flinfo.fn_oid = InvalidOid;
 			flinfo.fn_mcxt = CurrentMemoryContext;
 			fake_fcinfo.nargs = 2;
-			fake_fcinfo.arg[0] = CStringGetDatum(arg1);
-			fake_fcinfo.arg[1] = CStringGetDatum(arg2);
+			fake_fcinfo.arg[0] = ObjectIdGetDatum(funcoid);
+			fake_fcinfo.arg[1] = CStringGetDatum(arg);
 
 			PG_TRY();
 			{
-				Datum ret = has_function_privilege_name(&fake_fcinfo);
+				Datum ret = has_function_privilege_id(&fake_fcinfo);
 
 				if (ret == 0) {
 					elog(WARNING, "failed to find js function %s", plv8_start_proc);

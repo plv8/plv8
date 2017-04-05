@@ -8,11 +8,6 @@
 #include "plv8.h"
 
 extern "C" {
-#define delete		delete_
-#define namespace	namespace_
-#define	typeid		typeid_
-#define	typename	typename_
-#define	using		using_
 
 #if PG_VERSION_NUM >= 90300
 #include "access/htup_details.h"

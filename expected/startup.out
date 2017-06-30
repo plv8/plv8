@@ -19,6 +19,6 @@ reset plv8.start_proc;
 -- should fail because of a reference error
 do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;
 ERROR:  ReferenceError: foo is not defined
-CONTEXT:  undefined() LINE 1:  plv8.elog(NOTICE, 'foo = ' + foo)
+CONTEXT:  undefined() LINE 1:  plv8.elog(NOTICE, 'foo = ' + foo) 
 RESET ROLE;
 DROP ROLE someone_else;

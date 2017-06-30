@@ -1749,7 +1749,6 @@ js_error::js_error(TryCatch &try_catch) throw()
 	HandleScope		handle_scope(plv8_isolate);
 	String::Utf8Value	exception(try_catch.Exception());
 	Handle<Message>		message = try_catch.Message();
-	Handle<v8::Object> 	err = try_catch.Exception()->ToObject();
 
 	m_msg = NULL;
 	m_code = 0;
@@ -1760,6 +1759,7 @@ js_error::js_error(TryCatch &try_catch) throw()
 	try
 	{
 		m_msg = ToCStringCopy(exception);
+		Handle<v8::Object> err = try_catch.Exception()->ToObject();
 		StringInfoData	detailStr;
 		StringInfoData	hintStr;
 		StringInfoData	contextStr;

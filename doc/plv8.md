@@ -93,14 +93,6 @@ https://github.com/plv8/plv8/issues/29
   SHLIB_LINK := $(SHLIB_LINK) -lv8 -Wl,-Bstatic -lstdc++ -Wl,-Bdynamic -lm
 ```
 
-### Test the Build
-PL/v8 supports installcheck test.  Make sure to set `custom_variable_classes = 'plv8'`
-in your postgresql.conf (before 9.2) and run:
-
-```
-$ make installcheck
-```
-
 ### Installing the build:
 After running `make` or `make static` the following files must be copied to the
 correct location for PostgreSQL to find them:
@@ -130,6 +122,14 @@ $ make install
 
 > Note: If you need to install PL/v8 for a different version of PostgreSQL, pass
 the `PG_CONFIG` variable. See above.
+
+### Test the Install
+PL/v8 supports installcheck test.  Make sure to set `custom_variable_classes = 'plv8'`
+in your postgresql.conf (before 9.2) and run:
+
+```
+$ make installcheck
+```
 
 ### Debian/Ubuntu 14.04 and 16.04:
 You can install PL/v8 using `apt-get`, but it will be version `v1.4.8`

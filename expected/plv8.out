@@ -222,7 +222,7 @@ $$
 LANGUAGE plv8;
 SELECT * FROM set_of_record_but_non_obj();
 ERROR:  argument must be an object
-DETAIL:  set_of_record_but_non_obj() LINE 2: 	plv8.return_next( "abc" );
+CONTEXT:  set_of_record_but_non_obj() LINE 2: 	plv8.return_next( "abc" );
 CREATE FUNCTION set_of_integers() RETURNS SETOF integer AS
 $$
 	plv8.return_next( 1 );
@@ -282,7 +282,7 @@ SELECT * FROM set_of_unnamed_records() AS x(a int);
 -- field names mismatch
 SELECT * FROM set_of_unnamed_records() AS x(a int, c int);
 ERROR:  field name / property name mismatch
-DETAIL:  set_of_unnamed_records() LINE 2:     plv8.return_next({"a": 1, "b": 2}); 
+CONTEXT:  set_of_unnamed_records() LINE 2:     plv8.return_next({"a": 1, "b": 2}); 
 -- name counts and values match
 SELECT * FROM set_of_unnamed_records() AS x(a int, b int);
  a | b 
@@ -368,7 +368,7 @@ NOTICE:  args = ABC
 WARNING:  warning
 INFO:  Error: ERROR
 ERROR:  invalid error level
-DETAIL:  test_elog() LINE 9: 	plv8.elog(21, 'FATAL is not allowed');
+CONTEXT:  test_elog() LINE 9: 	plv8.elog(21, 'FATAL is not allowed');
 -- execute()
 CREATE TABLE test_tbl (i integer, s text);
 CREATE FUNCTION test_sql() RETURNS integer AS
@@ -539,15 +539,15 @@ SELECT * FROM trig_table;
 -- ERRORS
 CREATE FUNCTION syntax_error() RETURNS text AS '@' LANGUAGE plv8;
 ERROR:  SyntaxError: Unexpected token ILLEGAL
-DETAIL:  syntax_error() LINE 1: @
+CONTEXT:  syntax_error() LINE 1: @
 CREATE FUNCTION reference_error() RETURNS text AS 'not_defined' LANGUAGE plv8;
 SELECT reference_error();
 ERROR:  ReferenceError: not_defined is not defined
-DETAIL:  reference_error() LINE 1: not_defined
+CONTEXT:  reference_error() LINE 1: not_defined
 CREATE FUNCTION throw() RETURNS void AS $$throw new Error("an error");$$ LANGUAGE plv8;
 SELECT throw();
 ERROR:  an error
-DETAIL:  throw() LINE 1: throw new Error("an error");
+CONTEXT:  throw() LINE 1: throw new Error("an error");
 -- SPI operations
 CREATE FUNCTION prep1() RETURNS void AS $$
 var plan = plv8.prepare("SELECT * FROM test_tbl");
@@ -662,10 +662,10 @@ SELECT caller(10, 2);
 
 SELECT caller(10, 3);
 ERROR:  javascript function is not found for "sqlf"
-DETAIL:  caller() LINE 8:     func = plv8.find_function("sqlf");
+CONTEXT:  caller() LINE 8:     func = plv8.find_function("sqlf");
 SELECT caller(10, 4);
 ERROR:  function "callee(int, int)" does not exist
-DETAIL:  caller() LINE 10:     func = plv8.find_function("callee(int, int)");
+CONTEXT:  caller() LINE 10:     func = plv8.find_function("callee(int, int)");
 SELECT caller(10, 5);
  caller 
 --------

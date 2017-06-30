@@ -274,9 +274,18 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 			Handle<Primitive>(ToString(edata->datatype_name)) : Null(plv8_isolate);
 		Handle<Primitive> constraint_name = edata->constraint_name ?
 			Handle<Primitive>(ToString(edata->constraint_name)) : Null(plv8_isolate);
+		Handle<Primitive> detail = edata->detail ?
+			Handle<Primitive>(ToString(edata->detail)) : Null(plv8_isolate);
+		Handle<Primitive> hint = edata->hint ?
+			Handle<Primitive>(ToString(edata->hint)) : Null(plv8_isolate);
+		Handle<Primitive> context = edata->context ?
+			Handle<Primitive>(ToString(edata->context)) : Null(plv8_isolate);
+		Handle<Primitive> internalquery = edata->internalquery ?
+			Handle<Primitive>(ToString(edata->internalquery)) : Null(plv8_isolate);
+		Handle<Integer> code = Uint32::New(plv8_isolate, edata->sqlerrcode);
+
 #endif
 
-		// XXX: add other fields? (detail, hint, context, internalquery...)
 		FlushErrorState();
 		FreeErrorData(edata);
 
@@ -288,6 +297,11 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 		err->Set(String::NewFromUtf8(plv8_isolate, "column_name"), column_name);
 		err->Set(String::NewFromUtf8(plv8_isolate, "datatype_name"), datatype_name);
 		err->Set(String::NewFromUtf8(plv8_isolate, "constraint_name"), constraint_name);
+		err->Set(String::NewFromUtf8(plv8_isolate, "detail"), detail);
+		err->Set(String::NewFromUtf8(plv8_isolate, "hint"), hint);
+		err->Set(String::NewFromUtf8(plv8_isolate, "context"), context);
+		err->Set(String::NewFromUtf8(plv8_isolate, "internalquery"), internalquery);
+		err->Set(String::NewFromUtf8(plv8_isolate, "code"), code);
 #endif
 
 		args.GetReturnValue().Set(plv8_isolate->ThrowException(err));

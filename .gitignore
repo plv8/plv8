@@ -18,5 +18,8 @@
 # For static build
 /build
 
+# Test results
+/results
+
 # For packaging
 plv8-*.zip

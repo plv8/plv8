@@ -30,6 +30,7 @@ OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8
 EXTENSION = plv8
 PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql
+
 DATA = $(PLV8_DATA)
 ifndef DISABLE_DIALECT
 DATA += plcoffee.control plcoffee--$(PLV8_VERSION).sql \

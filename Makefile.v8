@@ -7,7 +7,7 @@
 # structure in v8 which may be different from version to another, but user
 # can specify the v8 version by AUTOV8_VERSION, too.
 #-----------------------------------------------------------------------------#
-AUTOV8_VERSION = 5.8.301
+AUTOV8_VERSION = 5.4.500.43
 AUTOV8_DIR = build/v8-git-mirror-$(AUTOV8_VERSION)
 AUTOV8_OUT = build/v8-git-mirror-$(AUTOV8_VERSION)/out/native
 AUTOV8_DEPOT_TOOLS = build/depot_tools
@@ -35,7 +35,7 @@ $(AUTOV8_OUT)/third_party/icu/common/icudtb.dat:
 $(AUTOV8_OUT)/third_party/icu/common/icudtl.dat:
 
 $(AUTOV8_LIB): $(AUTOV8_DIR)
-	env CXXFLAGS=-fPIC CFLAGS=-fPIC $(MAKE) -C build/v8-git-mirror-$(AUTOV8_VERSION) x64.debug -j 4
+	env CXXFLAGS=-fPIC CFLAGS=-fPIC $(MAKE) -C build/v8-git-mirror-$(AUTOV8_VERSION) native
 	test -f $(AUTOV8_OUT)/libv8_base.a || \
 		ln -s $(abspath $(AUTOV8_OUT)/obj.target/src/libv8_base.a) \
 			$(AUTOV8_OUT)/libv8_base.a

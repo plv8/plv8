@@ -13,7 +13,6 @@ AUTOV8_OUT = build/v8-git-mirror-$(AUTOV8_VERSION)/out/native
 AUTOV8_DEPOT_TOOLS = build/depot_tools
 AUTOV8_LIB = $(AUTOV8_OUT)/libv8_snapshot.a
 AUTOV8_STATIC_LIBS = libv8_base.a libv8_nosnapshot.a libv8_libplatform.a libv8_libbase.a libv8_libsampler.a libicui18n.a libicuuc.a
-
 export PATH := $(abspath $(AUTOV8_DEPOT_TOOLS)):$(PATH)
 
 SHLIB_LINK += $(addprefix $(AUTOV8_OUT)/, $(AUTOV8_STATIC_LIBS))
@@ -30,6 +29,10 @@ $(AUTOV8_DEPOT_TOOLS):
 $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
 	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync
 	mv build/v8 $(AUTOV8_DIR)
+
+$(AUTOV8_OUT)/third_party/icu/common/icudtb.dat:
+
+$(AUTOV8_OUT)/third_party/icu/common/icudtl.dat:
 
 $(AUTOV8_LIB): $(AUTOV8_DIR)
 	env CXXFLAGS=-fPIC CFLAGS=-fPIC $(MAKE) -C build/v8-git-mirror-$(AUTOV8_VERSION) native

@@ -538,7 +538,7 @@ SELECT * FROM trig_table;
 
 -- ERRORS
 CREATE FUNCTION syntax_error() RETURNS text AS '@' LANGUAGE plv8;
-ERROR:  SyntaxError: Unexpected token ILLEGAL
+ERROR:  SyntaxError: Invalid or unexpected token
 CONTEXT:  syntax_error() LINE 1: @
 CREATE FUNCTION reference_error() RETURNS text AS 'not_defined' LANGUAGE plv8;
 SELECT reference_error();

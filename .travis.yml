@@ -49,12 +49,12 @@ env:
   matrix:
     - PGVERSION=9.5 v8=4.4.63.31
     - PGVERSION=9.5 v8=5.1.281.14
-    - PGVERSION=9.4 v8=4.4.63.31
-    - PGVERSION=9.4 v8=5.1.281.14
-    - PGVERSION=9.3 v8=4.4.63.31
-    - PGVERSION=9.3 v8=5.1.281.14
-    - PGVERSION=9.2 v8=4.4.63.31
-    - PGVERSION=9.2 v8=5.1.281.14
+#    - PGVERSION=9.4 v8=4.4.63.31
+#    - PGVERSION=9.4 v8=5.1.281.14
+#    - PGVERSION=9.3 v8=4.4.63.31
+#    - PGVERSION=9.3 v8=5.1.281.14
+#    - PGVERSION=9.2 v8=4.4.63.31
+#    - PGVERSION=9.2 v8=5.1.281.14
 
 
 language: cpp
@@ -66,7 +66,7 @@ sudo: required
 dist: trusty
 
 script:
-  - make && sudo make install && make installcheck
+  - make static && sudo make install && make installcheck
 
 after_script:
   - cat regression.diffs || true

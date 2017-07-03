@@ -1,7 +1,7 @@
 CREATE FUNCTION test_sql_error() RETURNS void AS $$ plv8.execute("ERROR") $$ LANGUAGE plv8;
 SELECT test_sql_error();
 ERROR:  syntax error at or near "ERROR"
-DETAIL:  test_sql_error() LINE 1:  plv8.execute("ERROR") 
+CONTEXT:  test_sql_error() LINE 1:  plv8.execute("ERROR") 
 CREATE FUNCTION catch_sql_error() RETURNS void AS $$
 try {
 	plv8.execute("throw SQL error");
@@ -84,7 +84,7 @@ plv8.subtransaction(function(){
 $$ LANGUAGE plv8;
 SELECT test_subtransaction_throw();
 ERROR:  division by zero
-DETAIL:  test_subtransaction_throw() LINE 2: plv8.subtransaction(function(){
+CONTEXT:  test_subtransaction_throw() LINE 2: plv8.subtransaction(function(){
 SELECT * FROM subtrant;
  a 
 ---
@@ -144,4 +144,4 @@ plv8.elog(NOTICE, "should not come here");
 $$ LANGUAGE plv8;
 SELECT catch_elog_error2();
 ERROR:  custom exception
-DETAIL:  catch_elog_error2() LINE 5:         throw 'custom exception';
+CONTEXT:  catch_elog_error2() LINE 5:         throw 'custom exception';

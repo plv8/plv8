@@ -25,19 +25,19 @@
         "plv8": {
             "file": "plv8--2.0.4-dev.sql",
             "docfile": "doc/plv8.md",
-            "version": "2.0.1",
+            "version": "2.0.3-dev",
             "abstract": "A procedural language in JavaScript"
          },
         "plcoffee": {
             "file": "plcoffee--2.0.4-dev.sql",
             "docfile": "doc/plv8.md",
-            "version": "2.0.1",
+            "version": "2.0.3-dev",
             "abstract": "A procedural language in CoffeeScript"
          },
         "plls": {
             "file": "plls--2.0.4-dev.sql",
             "docfile": "doc/plv8.md",
-            "version": "2.0.1",
+            "version": "2.0.3-dev",
             "abstract": "A procedural language in LiveScript"
          }
     },

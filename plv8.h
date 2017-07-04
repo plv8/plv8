@@ -48,7 +48,10 @@ class js_error
 {
 private:
 	char	   *m_msg;
+	int	   m_code;
 	char	   *m_detail;
+	char	   *m_hint;
+	char	   *m_context;
 
 public:
 	js_error() throw();

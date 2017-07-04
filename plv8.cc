@@ -1753,47 +1753,96 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 }
 
 js_error::js_error() throw()
-	: m_msg(NULL), m_detail(NULL)
+	: m_msg(NULL), m_code(0), m_detail(NULL), m_hint(NULL), m_context(NULL)
 {
 }
 
 js_error::js_error(const char *msg) throw()
 {
 	m_msg = pstrdup(msg);
+	m_code = 0;
 	m_detail = NULL;
+	m_hint = NULL;
+	m_context = NULL;
 }
 
 js_error::js_error(TryCatch &try_catch) throw()
 {
-	HandleScope			handle_scope(plv8_isolate);
+	HandleScope		handle_scope(plv8_isolate);
 	String::Utf8Value	exception(try_catch.Exception());
 	Handle<Message>		message = try_catch.Message();
 
 	m_msg = NULL;
+	m_code = 0;
 	m_detail = NULL;
+	m_hint = NULL;
+	m_context = NULL;
 
 	try
 	{
 		m_msg = ToCStringCopy(exception);
+		Handle<v8::Object> err = try_catch.Exception()->ToObject();
+		StringInfoData	detailStr;
+		StringInfoData	hintStr;
+		StringInfoData	contextStr;
+		initStringInfo(&detailStr);
+		initStringInfo(&hintStr);
+		initStringInfo(&contextStr);
+
+		if (!err.IsEmpty())
+                {
+			v8::Local<v8::Value> errCode = err->Get(String::NewFromUtf8(plv8_isolate, "code"));
+			if (!errCode->IsUndefined() && !errCode->IsNull())
+			{
+				int32_t code = errCode->Int32Value();
+				m_code = code;
+			}
+
+			v8::Local<v8::Value> errDetail = err->Get(String::NewFromUtf8(plv8_isolate, "detail"));
+			if (!errDetail->IsUndefined() && !errDetail->IsNull())
+			{
+				CString detail(errDetail);
+				appendStringInfo(&detailStr, "%s", detail.str("?"));
+				m_detail = detailStr.data;
+			}
+
+			v8::Local<v8::Value> errHint = err->Get(String::NewFromUtf8(plv8_isolate, "hint"));
+			if (!errHint->IsUndefined() && !errHint->IsNull())
+			{
+				CString hint(errHint);
+				appendStringInfo(&hintStr, "%s", hint.str("?"));
+				m_hint = hintStr.data;
+			}
+
+			v8::Local<v8::Value> errContext = err->Get(String::NewFromUtf8(plv8_isolate, "context"));
+			if (!errContext->IsUndefined() && !errContext->IsNull())
+			{
+				CString context(errContext);
+				appendStringInfo(&contextStr, "%s\n", context.str("?"));
+			}
+                }
+
 
 		if (!message.IsEmpty())
 		{
-			StringInfoData	str;
-			CString			script(message->GetScriptResourceName());
-			int				lineno = message->GetLineNumber();
-			CString			source(message->GetSourceLine());
+			CString		script(message->GetScriptResourceName());
+			int		lineno = message->GetLineNumber();
+			CString		source(message->GetSourceLine());
+			// TODO: Get stack trace?
+			//Handle<StackTrace> stackTrace(message->GetStackTrace());
 
 			/*
 			 * Report lineno - 1 because "function _(...){" was added
 			 * at the first line to the javascript code.
 			 */
-			initStringInfo(&str);
 			if (strstr(m_msg, "Error: ") == m_msg)
 				m_msg += 7;
-			appendStringInfo(&str, "%s() LINE %d: %s",
+
+			appendStringInfo(&contextStr, "%s() LINE %d: %s",
 				script.str("?"), lineno - 1, source.str("?"));
-			m_detail = str.data;
 		}
+
+		m_context = contextStr.data;
 	}
 	catch (...)
 	{
@@ -1820,8 +1869,13 @@ void
 js_error::rethrow() throw()
 {
 	ereport(ERROR,
-		(m_msg ? errmsg("%s", m_msg) : 0,
-			m_detail ? errdetail("%s", m_detail) : 0));
+		(
+			m_code ? errcode(m_code): 0,
+			m_msg ? errmsg("%s", m_msg) : 0,
+			m_detail ? errdetail("%s", m_detail) : 0,
+			m_hint ? errhint("%s", m_hint) : 0,
+			m_context ? errcontext("%s", m_context) : 0
+                ));
 	exit(0);	// keep compiler quiet
 }
 
@@ -1832,3 +1886,4 @@ pg_error::rethrow() throw()
 	PG_RE_THROW();
 	exit(0);	// keep compiler quiet
 }
+

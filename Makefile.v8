@@ -7,7 +7,7 @@
 # structure in v8 which may be different from version to another, but user
 # can specify the v8 version by AUTOV8_VERSION, too.
 #-----------------------------------------------------------------------------#
-AUTOV8_VERSION = 5.4.500.43
+AUTOV8_VERSION = 5.8.301
 AUTOV8_DIR = build/v8-git-mirror-$(AUTOV8_VERSION)
 AUTOV8_OUT = build/v8-git-mirror-$(AUTOV8_VERSION)/out/native
 AUTOV8_DEPOT_TOOLS = build/depot_tools

@@ -1,5 +1,9 @@
 Revision history for plv8
 
+2.1.0       2017-07-05
+            - track v8 5.8.301
+            - better error handling
+
 2.0.0       2017-02-02
             - track v8 5.4.500.43
 

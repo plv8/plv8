@@ -42,12 +42,10 @@ are building those from source.
 ### Build from source:
 Determine the [PL/v8 release](https://github.com/plv8/plv8/releases) you want to download and use it's version and path below.
 
-```
-$ wget https://github.com/plv8/plv8/archive/v2.0.0.tar.gz
-$ tar -xvzf v2.0.0.tar.gz
-$ cd plv8-2.0.0
-$ make static
-```
+    $ wget https://github.com/plv8/plv8/archive/v2.0.0.tar.gz
+    $ tar -xvzf v2.0.0.tar.gz
+    $ cd plv8-2.0.0
+    $ make static
 
 This will build PL/v8 for you linking to Google's v8 as a static library by
 downloading the v8 source at a specific version and building it along with
@@ -72,26 +70,20 @@ installed pass `make` the `PG_CONFIG` variable to your 9.5 version of
 `pg_config`. This works for `make`, `make static`, `make install`. For example
 in Ubuntu:
 
-```
-$ make PG_CONFIG=/usr/lib/postgresql/9.5/bin/pg_config
-```
+    $ make PG_CONFIG=/usr/lib/postgresql/9.5/bin/pg_config
 
 > Note: You may run into problems with your C++ complier version. You can pass
 `make` the `CUSTOM_CC` variable to change the complier. For example, to use
 `g++` version 4.9:
 
-```
-$ make CUSTOM_CC g++-4.9
-```
+    $ make CUSTOM_CC g++-4.9
 
 > Note: In `mingw64`, you may have difficulty in building PL/v8. If so, try to
 make the following changes in Makefile. For more detail, please refer to
 https://github.com/plv8/plv8/issues/29
 
-```
-  CUSTOM_CC = gcc
-  SHLIB_LINK := $(SHLIB_LINK) -lv8 -Wl,-Bstatic -lstdc++ -Wl,-Bdynamic -lm
-```
+    CUSTOM_CC = gcc
+    SHLIB_LINK := $(SHLIB_LINK) -lv8 -Wl,-Bstatic -lstdc++ -Wl,-Bdynamic -lm
 
 ### Installing the build:
 After running `make` or `make static` the following files must be copied to the
@@ -114,9 +106,7 @@ need the CoffeeScript or LiveScript versions:
 ### Automatically Install the Build
 You can install the build for your system by running:
 
-```
-$ make install
-```
+    $ make install
 
 > Note: You should do this a root/admin. `sudo make install`
 
@@ -127,30 +117,24 @@ the `PG_CONFIG` variable. See above.
 PL/v8 supports installcheck test.  Make sure to set `custom_variable_classes = 'plv8'`
 in your postgresql.conf (before 9.2) and run:
 
-```
-$ make installcheck
-```
+    $ make installcheck
 
 ### Debian/Ubuntu 14.04 and 16.04:
 You can install PL/v8 using `apt-get`, but it will be version `v1.4.8`
 (As of 2016-12-16).
 
-```
-$ apt-get install postgresql-{your-postgresql-version-here}-plv8
-# e.g.
-$ apt-get install postgresql-9.1-plv8
-# OR up to
-$ apt-get install postgresql-9.6-plv8
-```
+    $ apt-get install postgresql-{your-postgresql-version-here}-plv8
+    # e.g.
+    $ apt-get install postgresql-9.1-plv8
+    # OR up to
+    $ apt-get install postgresql-9.6-plv8
 
 ### Redhat/CentOS:
 TODO - PL/v8 supports Redhat/CentOS. A Pull Request for installation steps is greatly appreciated.
 
 ### MacOS:
 
-```
-$ brew install plv8
-```
+    $ brew install plv8
 
 ### Windows:
 TODO - PL/v8 supports Windows. A Pull Request for installation steps is greatly appreciated
@@ -161,108 +145,92 @@ PostgreSQL service. Then you can connect to the server and install the extension
 on a database by running the following SQL queries on PostgreSQL version 9.1 or
 later:
 
-```
-  CREATE EXTENSION plv8;
-  CREATE EXTENSION plls;
-  CREATE EXTENSION plcoffee;
-```
+    CREATE EXTENSION plv8;
+    CREATE EXTENSION plls;
+    CREATE EXTENSION plcoffee;
 
 Make sure to set `custom_variable_classes = 'plv8'` in your `postgresql.conf` file
 for PostgreSQL versions before 9.2.
 
 In the versions prior to 9.1 run the following to create database objects:
 
-```
-$ psql -f plv8.sql
-```
+    $ psql -f plv8.sql
 
 ### Testing PL/v8 on a database:
 Below are some example queries to test if the extension is working:
 
-```
-  DO $$
-    plv8.elog(WARNING, 'plv8.version = ' + plv8.version); // Will output the PL/v8 installed as a PostgreSQL `WARNING`.
-  $$ LANGUAGE plv8;
-```
+    DO $$
+      plv8.elog(WARNING, 'plv8.version = ' + plv8.version); // Will output the PL/v8 installed as a PostgreSQL `WARNING`.
+    $$ LANGUAGE plv8;
 
 As of 2.0.0, there is a function to determine which version of PL/v8 you have
 installed:
 
-```
-  SELECT plv8_version();
-```
+    SELECT plv8_version();
 
 #### JavaScript Example
 
-```
-  CREATE OR REPLACE FUNCTION plv8_test(keys text[], vals text[])
-  RETURNS text AS $$
-    var o = {};
-    for(var i=0; i<keys.length; i++){
-      o[keys[i]] = vals[i];
-    }
-    return JSON.stringify(o);
-  $$ LANGUAGE plv8 IMMUTABLE STRICT;
-
-  SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-           plv8_test
-  ---------------------------
-   {"name":"Tom","age":"29"}
-  (1 row)
-```
+    CREATE OR REPLACE FUNCTION plv8_test(keys text[], vals text[])
+    RETURNS text AS $$
+      var o = {};
+      for(var i=0; i<keys.length; i++){
+        o[keys[i]] = vals[i];
+      }
+      return JSON.stringify(o);
+    $$ LANGUAGE plv8 IMMUTABLE STRICT;
+    
+    SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
+             plv8_test
+    ---------------------------
+     {"name":"Tom","age":"29"}
+    (1 row)
 
 #### CoffeeScript Example
 
-```
-  CREATE OR REPLACE FUNCTION plcoffee_test(keys text[], vals text[])
-  RETURNS text AS $$
-    return JSON.stringify(keys.reduce(((o, key, idx) ->
-      o[key] = vals[idx]; return o), {}), {})
-  $$ LANGUAGE plcoffee IMMUTABLE STRICT;
-
-  SELECT plcoffee_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-         plcoffee_test
-  ---------------------------
-   {"name":"Tom","age":"29"}
-  (1 row)
-```
+    CREATE OR REPLACE FUNCTION plcoffee_test(keys text[], vals text[])
+    RETURNS text AS $$
+      return JSON.stringify(keys.reduce(((o, key, idx) ->
+        o[key] = vals[idx]; return o), {}), {})
+    $$ LANGUAGE plcoffee IMMUTABLE STRICT;
+    
+    SELECT plcoffee_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
+           plcoffee_test
+    ---------------------------
+     {"name":"Tom","age":"29"}
+    (1 row)
 
 #### LiveScript Example
 
-```
-  CREATE OR REPLACE FUNCTION plls_test(keys text[], vals text[])
-  RETURNS text AS $$
-    return JSON.stringify { [key, vals[idx]] for key, idx in keys }
-  $$ LANGUAGE plls IMMUTABLE STRICT;
-
-  SELECT plls_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-           plls_test
-  ---------------------------
-   {"name":"Tom","age":"29"}
-  (1 row)
-```
+    CREATE OR REPLACE FUNCTION plls_test(keys text[], vals text[])
+    RETURNS text AS $$
+      return JSON.stringify { [key, vals[idx]] for key, idx in keys }
+    $$ LANGUAGE plls IMMUTABLE STRICT;
+    
+    SELECT plls_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
+             plls_test
+    ---------------------------
+     {"name":"Tom","age":"29"}
+    (1 row)
 
 ## Scalar function calls
 In PL/v8, you can write your SQL invoked function in JavaScript. Use the usual
 `CREATE FUNCTION` statement with a JS function body. Here is an example of a
 scalar function call.
 
-```
-  CREATE FUNCTION plv8_test(keys text[], vals text[]) RETURNS text AS $$
-      var o = {};
-      for(var i=0; i<keys.length; i++){
-          o[keys[i]] = vals[i];
-      }
-      return JSON.stringify(o);
-  $$ LANGUAGE plv8 IMMUTABLE STRICT;
-
-  SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-  SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
-           plv8_test
-  ---------------------------
-   {"name":"Tom","age":"29"}
-  (1 row)
-```
+    CREATE FUNCTION plv8_test(keys text[], vals text[]) RETURNS text AS $$
+        var o = {};
+        for(var i=0; i<keys.length; i++){
+            o[keys[i]] = vals[i];
+        }
+        return JSON.stringify(o);
+    $$ LANGUAGE plv8 IMMUTABLE STRICT;
+    
+    SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
+    SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
+             plv8_test
+    ---------------------------
+     {"name":"Tom","age":"29"}
+    (1 row)
 
 The function will be internally defined such that:
 
@@ -277,29 +245,27 @@ or they will be named as `$1`, `$2` if the names are omitted.
 ## Set returning function calls
 PL/v8 supports `SET` returning function calls.
 
-```
-  CREATE TYPE rec AS (i integer, t text);
-  CREATE FUNCTION set_of_records() RETURNS SETOF rec AS
-  $$
-      // plv8.return_next() stores records in an internal tuplestore,
-      // and return all of them at the end of function.
-      plv8.return_next( { "i": 1, "t": "a" } );
-      plv8.return_next( { "i": 2, "t": "b" } );
-
-      // You can also return records with an array of JSON.
-      return [ { "i": 3, "t": "c" }, { "i": 4, "t": "d" } ];
-  $$
-  LANGUAGE plv8;
-
-  SELECT * FROM set_of_records();
-   i | t
-  ---+---
-   1 | a
-   2 | b
-   3 | c
-   4 | d
-  (4 rows)
-```
+    CREATE TYPE rec AS (i integer, t text);
+    CREATE FUNCTION set_of_records() RETURNS SETOF rec AS
+    $$
+        // plv8.return_next() stores records in an internal tuplestore,
+        // and return all of them at the end of function.
+        plv8.return_next( { "i": 1, "t": "a" } );
+        plv8.return_next( { "i": 2, "t": "b" } );
+        
+        // You can also return records with an array of JSON.
+        return [ { "i": 3, "t": "c" }, { "i": 4, "t": "d" } ];
+    $$
+    LANGUAGE plv8;
+    
+    SELECT * FROM set_of_records();
+     i | t
+    ---+---
+     1 | a
+     2 | b
+     3 | c
+     4 | d
+    (4 rows)
 
 If the function is declared as `RETURNS SETOF`, PL/v8 prepares a tuplestore every
 time called. You can call `plv8.return_next()` function to add as many results as
@@ -313,25 +279,23 @@ If the argument object has extra properties that are not defined by the argument
 ## Trigger function calls
 PL/v8 supports trigger function calls.
 
-```
-  CREATE FUNCTION test_trigger() RETURNS trigger AS
-  $$
-      plv8.elog(NOTICE, "NEW = ", JSON.stringify(NEW));
-      plv8.elog(NOTICE, "OLD = ", JSON.stringify(OLD));
-      plv8.elog(NOTICE, "TG_OP = ", TG_OP);
-      plv8.elog(NOTICE, "TG_ARGV = ", TG_ARGV);
-      if (TG_OP == "UPDATE") {
-          NEW.i = 102;
-          return NEW;
-      }
-  $$
-  LANGUAGE "plv8";
-
-  CREATE TRIGGER test_trigger
-      BEFORE INSERT OR UPDATE OR DELETE
-      ON test_tbl FOR EACH ROW
-      EXECUTE PROCEDURE test_trigger('foo', 'bar');
-```
+    CREATE FUNCTION test_trigger() RETURNS trigger AS
+    $$
+        plv8.elog(NOTICE, "NEW = ", JSON.stringify(NEW));
+        plv8.elog(NOTICE, "OLD = ", JSON.stringify(OLD));
+        plv8.elog(NOTICE, "TG_OP = ", TG_OP);
+        plv8.elog(NOTICE, "TG_ARGV = ", TG_ARGV);
+        if (TG_OP == "UPDATE") {
+            NEW.i = 102;
+            return NEW;
+        }
+    $$
+    LANGUAGE "plv8";
+    
+    CREATE TRIGGER test_trigger
+        BEFORE INSERT OR UPDATE OR DELETE
+        ON test_tbl FOR EACH ROW
+        EXECUTE PROCEDURE test_trigger('foo', 'bar');
 
 If the trigger type is an `INSERT` or `UPDATE`, you can assign properties of `NEW`
 variable to change the actual tuple stored by this operation.
@@ -355,9 +319,7 @@ For each variable semantics, see the [trigger section in PostgreSQL manual](http
 ## Inline statement calls
 PL/v8 supports `DO` block with PostgreSQL 9.0 and above.
 
-```
-  DO $$ plv8.elog(NOTICE, 'this', 'is', 'inline', 'code') $$ LANGUAGE plv8;
-```
+    DO $$ plv8.elog(NOTICE, 'this', 'is', 'inline', 'code') $$ LANGUAGE plv8;
 
 ## Auto mapping between JS and database built-in types
 For the result and arguments, database types and JS types are mapped
@@ -393,10 +355,8 @@ returned value is an array of objects. Each hash represents each record.
 Column names are mapped to object properties. For non-SELECT commands, the
 returned value is an integer that represents number of affected rows.
 
-```
-  var json_result = plv8.execute( 'SELECT * FROM tbl' );
-  var num_affected = plv8.execute( 'DELETE FROM tbl WHERE price > $1', [ 1000 ] );
-```
+    var json_result = plv8.execute( 'SELECT * FROM tbl' );
+    var num_affected = plv8.execute( 'DELETE FROM tbl WHERE price > $1', [ 1000 ] );
 
 Note this function and similar are not allowed outside of transaction.
 
@@ -406,17 +366,15 @@ each element is a string to indicate database type name for bind parameters.
 Returned value is an object of `PreparedPlan`. This object must be freed by
 `plan.free()` before leaving the function.
 
-```
-  var plan = plv8.prepare( 'SELECT * FROM tbl WHERE col = $1', ['int'] );
-  var rows = plan.execute( [1] );
-  var sum = 0;
-  for (var i = 0; i < rows.length; i++) {
-    sum += rows[i].num;
-  }
-  plan.free();
-
-  return sum;
-```
+    var plan = plv8.prepare( 'SELECT * FROM tbl WHERE col = $1', ['int'] );
+    var rows = plan.execute( [1] );
+    var sum = 0;
+    for (var i = 0; i < rows.length; i++) {
+      sum += rows[i].num;
+    }
+    plan.free();
+    
+    return sum;
 
 ### `PreparedPlan.execute( [args] )`
 Executes the prepared statement. The `args` parameter is as `plv8.execute()`, and
@@ -429,18 +387,16 @@ Opens a cursor from the prepared statement. The `args` parameter is as
 at all. The returned object is of `Cursor`. This must be closed by `Cursor.close()`
 before leaving the function.
 
-```
-  var plan = plv8.prepare( 'SELECT * FROM tbl WHERE col = $1', ['int'] );
-  var cursor = plan.cursor( [1] );
-  var sum = 0, row;
-  while (row = cursor.fetch()) {
-    sum += row.num;
-  }
-  cursor.close();
-  plan.free();
-
-  return sum;
-```
+    var plan = plv8.prepare( 'SELECT * FROM tbl WHERE col = $1', ['int'] );
+    var cursor = plan.cursor( [1] );
+    var sum = 0, row;
+    while (row = cursor.fetch()) {
+        sum += row.num;
+    }
+    cursor.close();
+    plan.free();
+    
+    return sum;
 
 ### `PreparedPlan.free()`
 Frees the prepared statement.
@@ -463,7 +419,6 @@ Closes the cursor.
 operation, you will need to call `plv8.subtransaction()` to create a subtransaction
 block.
 
-```
     try{
       plv8.subtransaction(function(){
         plv8.execute("INSERT INTO tbl VALUES(1)"); // should be rolled back!
@@ -472,7 +427,6 @@ block.
     } catch(e) {
       ... do fall back plan ...
     }
-```
 
 If one of the SQL execution in the subtransaction block fails, all of operation
 within the block is rolled back. If the process in the block throws a JS
@@ -508,13 +462,11 @@ with the same name.
 In addition, PL/v8 provides a function to access other `plv8` functions that have
 been registered in the database.
 
-```
     CREATE FUNCTION callee(a int) RETURNS int AS $$ return a * a $$ LANGUAGE plv8;
     CREATE FUNCTION caller(a int, t int) RETURNS int AS $$
       var func = plv8.find_function("callee");
       return func(a);
     $$ LANGUAGE plv8;
-```
 
 With `plv8.find_function()`, you can look up other `plv8` functions. If they are
 not a `plv8` function, it errors out. The function signature parameter to
@@ -597,21 +549,19 @@ element. Also, there is currently no way to create such typed array inside
 PL/v8 functions. Only arguments can be typed array. You can modify the element
 and return the value. An example for these types are as follows.
 
-```
-  CREATE FUNCTION int4sum(ary plv8_int4array) RETURNS int8 AS $$
-    var sum = 0;
-    for (var i = 0; i < ary.length; i++) {
-      sum += ary[i];
-    }
-    return sum;
-  $$ LANGUAGE plv8 IMMUTABLE STRICT;
-
-  SELECT int4sum(ARRAY[1, 2, 3, 4, 5]);
-   int4sum
-  ---------
-        15
-  (1 row)
-```
+    CREATE FUNCTION int4sum(ary plv8_int4array) RETURNS int8 AS $$
+      var sum = 0;
+      for (var i = 0; i < ary.length; i++) {
+        sum += ary[i];
+      }
+      return sum;
+    $$ LANGUAGE plv8 IMMUTABLE STRICT;
+    
+    SELECT int4sum(ARRAY[1, 2, 3, 4, 5]);
+     int4sum
+    ---------
+          15
+    (1 row)
 
 ## ES6 Language Features
 PL/v8 enables all shipping feature of the used V8 version. So with V8 4.1+
@@ -646,10 +596,8 @@ object.
 PL/v8 provides a start up facility, which allows you to call a `plv8` runtime
 environment initialization function specified in the `GUC` variable.
 
-```
-  SET plv8.start_proc = 'plv8_init';
-  SELECT plv8_test(10);
-```
+    SET plv8.start_proc = 'plv8_init';
+    SELECT plv8_test(10);
 
 If this variable is set when the runtime is initialized, before the function
 call of `plv8_test()` another `plv8` function `plv8_init()` is invoked. In such
@@ -679,11 +627,9 @@ extension and conversely removes them upon uninstallation, i.e., whenever
 
 You can explore some of the objects that PL/v8 stores under PostgreSQL:
 
-```
-SELECT lanname FROM pg_catalog.pg_language WHERE lanname = 'plv8';
-SELECT proname FROM pg_proc p WHERE p.proname LIKE 'plv8%';
-SELECT typname FROM pg_catalog.pg_type WHERE typname LIKE 'plv8%';
-```
+    SELECT lanname FROM pg_catalog.pg_language WHERE lanname = 'plv8';
+    SELECT proname FROM pg_proc p WHERE p.proname LIKE 'plv8%';
+    SELECT typname FROM pg_catalog.pg_type WHERE typname LIKE 'plv8%';
 
 __When__ and __if__ these objects change, extensions may provide upgrade scripts
 which contemplate different upgrade paths (e.g. going from 1.5 to 2.0 or from
@@ -713,9 +659,7 @@ up.
 
 The best way of finding out which PL/v8 version you're running is by executing:
 
-```
-DO $$ plv8.elog(WARNING, plv8.version) $$ LANGUAGE plv8;
-```
+    DO $$ plv8.elog(WARNING, plv8.version) $$ LANGUAGE plv8;
 
 Even when using PL/v8 2.0.0, `SELECT plv8_version();` is only indicative of the
 upgrade scripts being ran, as mentioned earlier, not of the current PL/v8

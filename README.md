@@ -12,7 +12,7 @@ The documentation covers the following implemented features:
 - [Installing PL/v8](/doc/plv8.md#installing-plv8)
 - [Install the PL/v8 Extensions on a Database](/doc/plv8.md#install-the-plv8-extensions-on-a-database)
 - [Scalar function calls](/doc/plv8.md#scalar-function-calls)
-- [Set returing function calls](/doc/plv8.md#set-returning-function-calls)
+- [Set returning function calls](/doc/plv8.md#set-returning-function-calls)
 - [Trigger function calls](/doc/plv8.md#trigger-function-calls)
 - [Inline statement calls](/doc/plv8.md#inline-statement-calls)
 - [Auto mapping between JS and database built-in types](/doc/plv8.md#auto-mapping-between-js-and-database-built-in-types)

@@ -133,7 +133,7 @@ You can install PL/v8 using `apt-get`, but it will be version `v1.4.8`
 
 This guide assumes you are using the [pgdg yum repository](https://yum.postgresql.org/repopackages.php).
 
-    $ yum install postgresql(your-postgresql-version-here)-server
+    $ yum install postgresql(your-postgresql-version-here)-server postgresql(your-postgresql-version-here)-devel
     $ make static PG_CONFIG=/usr/pgsql-(your-postgresql-version-here)/bin/pg_config
     $ sudo make install
 

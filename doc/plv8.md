@@ -445,7 +445,9 @@ PL/v8 provides the following utility built-in functions.
 - `plv8.quote_literal(str)`
 - `plv8.nullable(str)`
 - `plv8.quote_ident(str)`
+- `plv8.version`
 
+### plv8.elog
 `plv8.elog` emits message to the client or the log file. The `elevel` is one of:
 
 - `DEBUG5`
@@ -459,13 +461,19 @@ PL/v8 provides the following utility built-in functions.
 - `WARNING`
 - `ERROR`
 
+    var msg = 'world';
+    plv8.elog(DEBUG1, 'Hello',`${msg}!`);
+
+
 See the [PostgreSQL manual for each error level](https://www.postgresql.org/docs/current/static/runtime-config-logging.html#RUNTIME-CONFIG-SEVERITY-LEVELS).
 
+
+### plv8.quote_literal, plv8.nullable, and plv8.quote_ident
 Each functionality for quote family is identical to the built-in SQL function
 with the same name.
 
-In addition, PL/v8 provides a function to access other `plv8` functions that have
-been registered in the database.
+### plv8.find_function
+PL/v8 provides a function to access other `plv8` functions that have been registered in the database.
 
     CREATE FUNCTION callee(a int) RETURNS int AS $$ return a * a $$ LANGUAGE plv8;
     CREATE FUNCTION caller(a int, t int) RETURNS int AS $$
@@ -480,6 +488,7 @@ not a `plv8` function, it errors out. The function signature parameter to
 arguments and void type for return type for the pure JavaScript function to
 make sure any invocation from SQL statements should not happen.
 
+### plv8.version
 The `plv8` object provides version string as `plv8.version`. This string
 corresponds to `plv8` module version. Note this is not the extension version.
 

@@ -461,10 +461,9 @@ PL/v8 provides the following utility built-in functions.
 - `WARNING`
 - `ERROR`
 
-```javascript
-var msg = 'world';
-plv8.elog(DEBUG1, 'Hello',`${msg}!`);
-```
+    var msg = 'world';
+    plv8.elog(DEBUG1, 'Hello',`${msg}!`);
+
 
 See the [PostgreSQL manual for each error level](https://www.postgresql.org/docs/current/static/runtime-config-logging.html#RUNTIME-CONFIG-SEVERITY-LEVELS).
 

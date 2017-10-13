@@ -1021,7 +1021,7 @@ plv8_Subtransaction(const FunctionCallbackInfo<v8::Value>& args)
 
 	subtran.enter();
 
-	Handle<v8::Value> emptyargs[] = {};
+	Handle<v8::Value> emptyargs[1] = {};
 	TryCatch try_catch;
 	Handle<v8::Value> result = func->Call(func, 0, emptyargs);
 

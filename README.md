@@ -37,3 +37,10 @@ http://pgxn.org/dist/plv8/doc/plv8.html
 
 Mailing List:
 https://groups.google.com/forum/#!forum/plv8js
+## Installing PL/v8 for Windows(MSVC)
+
+```shell
+bootstrap.bat
+cmake . -G "Visual Studio 14 2015 Win64" -DCMAKE_INSTALL_PREFIX="C:\Program Files\PostgreSQL\9.6" -DPOSTGRESQL_VERSION=9.6
+cmake --build . --config Release --target Package
+```

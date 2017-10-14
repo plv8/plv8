@@ -13,10 +13,8 @@ set(VERSION_FULL "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}")
 
 project("${PROJECT_ID}")
 
-# ↓はユーザーが指定した「%PostgreSQLをインストールしたフォルダー%」になる
 set(POSTGRESQL_DIR "${CMAKE_INSTALL_PREFIX}"
   CACHE PATH "PostgreSQL binary directory")
-# ↓はパッケージを作成するときだけ必要
 set(POSTGRESQL_VERSION "unknown"
   CACHE STRING "PostgreSQL version")
 

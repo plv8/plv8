@@ -59,3 +59,49 @@ target_link_libraries("${LIBRARY_NAME}"
   "vendor/v8/lib/Release/v8"
   "vendor/v8/lib/Release/v8_libbase"
   "vendor/v8/lib/Release/v8_libplatform")
+
+install(TARGETS "${LIBRARY_NAME}"
+  DESTINATION "${EXTENSION_DIR}")
+
+install(FILES
+  "${PROJECT_ID}.control"
+  DESTINATION "${EXTENSION_DATA_DIR}")
+
+install(FILES
+  "${PROJECT_ID}--${VERSION_FULL}.sql"
+  DESTINATION "${EXTENSION_DATA_DIR}")
+
+install(FILES
+  "./vendor/v8-dll/lib/Release/icudtl.dat"
+  DESTINATION "bin")
+install(FILES
+  "./vendor/v8-dll/lib/Release/icui18n.dll"
+  DESTINATION "bin")
+install(FILES
+  "./vendor/v8-dll/lib/Release/icuuc.dll"
+  DESTINATION "bin")
+install(FILES
+  "./vendor/v8-dll/lib/Release/v8.dll"
+  DESTINATION "bin")
+install(FILES
+  "./vendor/v8-dll/lib/Release/v8_libbase.dll"
+  DESTINATION "bin")
+install(FILES
+  "./vendor/v8-dll/lib/Release/v8_libplatform.dll"
+  DESTINATION "bin")
+
+set(CPACK_GENERATOR "ZIP")
+set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)
+set(CPACK_PACKAGE_VERSION_MAJOR "${VERSION_MAJOR}")
+set(CPACK_PACKAGE_VERSION_MINOR "${VERSION_MINOR}")
+set(CPACK_PACKAGE_VERSION_PATCH "${VERSION_MICRO}")
+set(CPACK_PACKAGE_VENDOR "${VENDOR}")
+if(CMAKE_CL_64)
+  set(PLV8_SYSTEM_NAME "x64")
+else()
+  set(PLV8_SYSTEM_NAME "x86")
+endif()
+set(CPACK_PACKAGE_FILE_NAME
+  "${PROJECT_ID}-${VERSION_FULL}-postgresql-${POSTGRESQL_VERSION}-${PLV8_SYSTEM_NAME}")
+
+include(CPack)

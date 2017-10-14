@@ -35,3 +35,8 @@ plv8-*.zip
 /libplv8.dir
 /vendor
 /x64
+/CPackConfig.cmake
+/CPackSourceConfig.cmake
+/_CPack_Packages
+/install_manifest.txt
+/plv8-2.1.0-postgresql-9.6-x64

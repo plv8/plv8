@@ -37,6 +37,7 @@ http://pgxn.org/dist/plv8/doc/plv8.html
 
 Mailing List:
 https://groups.google.com/forum/#!forum/plv8js
+
 ## Installing PL/v8 for Windows(MSVC)
 
 ```shell

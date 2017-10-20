@@ -6,7 +6,11 @@
  *-------------------------------------------------------------------------
  */
 #include "plv8.h"
+
+#ifdef _MSC_VER
 #undef open
+#endif
+
 #include "libplatform/libplatform.h"
 
 #include <new>

@@ -521,7 +521,7 @@ frame. `seektype` can be either of `WindowObject.SEEK_HEAD`,
 the row the argument is fetched from is marked. If the specified row is
 out of the partition/frame, the returned value will be `undefined`.
 
-### `WindowObject.get_func_arg_in_current( argno )`
+### `WindowObject.get_func_arg_current( argno )`
 Returns the value of the argument in `argno` (starting from 0) to this
 function at the current row. Note that the returned value will be the
 same as the argument variable of the function.

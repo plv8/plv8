@@ -1,9 +1,9 @@
 PL/v8 - A Procedural Language in JavaScript powered by V8
 =================================================
 
-PL/v8 is a shared library that provides a PostgreSQL procedural language powered
-by V8 JavaScript Engine.  With this program you can write in JavaScript your
-function that is callable from SQL.
+PL/v8 is a shared library that provides a PostgreSQL procedural language, powered
+by the V8 JavaScript Engine.  With this program, you can write functions in JavaScript,
+callable from SQL.
 
 ## Documentation
 The documentation covers the following implemented features:

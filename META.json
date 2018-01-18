@@ -13,11 +13,11 @@
     "prereqs": {
         "runtime": {
             "requires": {
-                "v8": "5.4.500",
+                "v8": "5.8.301",
                 "PostgreSQL": "8.4.0"
             },
             "recommends": {
-                "PostgreSQL": "9.5.0"
+                "PostgreSQL": "9.6.0"
             }
         }
     },
@@ -25,19 +25,19 @@
         "plv8": {
             "file": "plv8--2.1.0.sql",
             "docfile": "doc/plv8.md",
-            "version": "2.0.3-dev",
+            "version": "2.1.0",
             "abstract": "A procedural language in JavaScript"
          },
         "plcoffee": {
             "file": "plcoffee--2.1.0.sql",
             "docfile": "doc/plv8.md",
-            "version": "2.0.3-dev",
+            "version": "2.1.0",
             "abstract": "A procedural language in CoffeeScript"
          },
         "plls": {
             "file": "plls--2.1.0.sql",
             "docfile": "doc/plv8.md",
-            "version": "2.0.3-dev",
+            "version": "2.1.0",
             "abstract": "A procedural language in LiveScript"
          }
     },

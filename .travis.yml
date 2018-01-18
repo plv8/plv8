@@ -16,6 +16,7 @@ before_install:
   - sudo apt-get install -y clang-3.5 llvm-3.5-dev libedit-dev
   - sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
   - sudo apt-get update -qq
+  - sudo apt-get install -y libc6-dev-i386
   - if [ "$CXX" = "g++" ]; then sudo apt-get install -qq g++-4.8; fi
   - if [ "$CXX" = "g++" ]; then export CXX="g++-4.8" CC="gcc-4.8" LD="g++-4.8"; fi
   - sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.8 90
@@ -46,7 +47,6 @@ before_script:
 
 env:
   matrix:
-    - PGVERSION=10.1 v8=6.4.388.18
     - PGVERSION=9.6 v8=6.4.388.18
     - PGVERSION=9.4 v8=6.4.388.18
     - PGVERSION=9.2 v8=6.4.388.18

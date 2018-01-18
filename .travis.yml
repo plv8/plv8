@@ -46,12 +46,10 @@ before_script:
 
 env:
   matrix:
-    - PGVERSION=9.6 v8=5.4.500.43
-    - PGVERSION=9.6 v8=5.8.301
-    - PGVERSION=9.4 v8=5.4.500.43
-    - PGVERSION=9.4 v8=5.8.301
-    - PGVERSION=9.2 v8=5.4.500.43
-    - PGVERSION=9.2 v8=5.8.301
+    - PGVERSION=10.1 v8=6.4.388.18
+    - PGVERSION=9.6 v8=6.4.388.18
+    - PGVERSION=9.4 v8=6.4.388.18
+    - PGVERSION=9.2 v8=6.4.388.18
 
 
 

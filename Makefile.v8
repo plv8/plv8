@@ -34,7 +34,7 @@ $(AUTOV8_OUT)/third_party/icu/common/icudtb.dat:
 $(AUTOV8_OUT)/third_party/icu/common/icudtl.dat:
 
 v8: $(AUTOV8_DIR)
-	cd $(AUTOV8_DIR) ; env CXXFLAGS=-fPIC CFLAGS=-fPIC ninja -C out.gn/x64.release
+	cd $(AUTOV8_DIR) ; env CXXFLAGS=-fPIC CFLAGS=-fPIC ninja -C out.gn/x64.release d8
 
 include Makefile
 

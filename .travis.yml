@@ -13,7 +13,6 @@ before_install:
   - sudo echo "host    all         all         127.0.0.1/32          trust" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
   - sudo echo "host    all         all         ::1/128               trust" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
   - sudo /etc/init.d/postgresql restart
-  - sudo apt-get install -y clang-3.5 llvm-3.5-dev libedit-dev
   - sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
   - sudo apt-get update -qq
   - sudo apt-get install -y libc6-dev-i386
@@ -22,47 +21,28 @@ before_install:
   - sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.8 90
 
 before_script:
-  - export V=1
   - g++ -v
   - gcc -v
-  - pushd ..
-  - git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
-  - export PATH="$PATH":`pwd`/depot_tools
-  - popd
-  - pushd ..
-  - fetch v8; cd v8
-  - git checkout $v8 && gclient sync > /dev/null
-  - git describe --always
-  - export CXX=clang++
-  - export LD=clang++
-  - make native library=shared -j8 werror=no snapshot=off i18nsupport=off
-  - sudo cp -rf include/* /usr/include
-  - sudo cp -rf include /usr/include
-  - sudo install -v out/native/d8 /usr/bin/
-  - sudo install -v out/native/obj.target/src/*.a /usr/lib
-  - sudo install -v out/native/obj.target/src/*.so /usr/lib
-  - popd
   - createuser -U postgres -s travis
 
 
 env:
   matrix:
-    - PGVERSION=9.6 v8=6.4.388.18
-    - PGVERSION=9.4 v8=6.4.388.18
-    - PGVERSION=9.2 v8=6.4.388.18
+    - PGVERSION=9.6
+    - PGVERSION=9.4
+    - PGVERSION=9.2
 
 
 
 language: cpp
 compiler:
-  - clang
   - gcc
 
 sudo: required
 dist: trusty
 
 script:
-  - make && sudo make install && make installcheck
+  - make static && sudo make install && make installcheck
 
 after_script:
   - cat regression.diffs || true

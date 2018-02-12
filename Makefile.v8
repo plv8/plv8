@@ -7,56 +7,34 @@
 # structure in v8 which may be different from version to another, but user
 # can specify the v8 version by AUTOV8_VERSION, too.
 #-----------------------------------------------------------------------------#
-AUTOV8_VERSION = 6.4.388.18
-AUTOV8_DIR = build/v8-git-mirror-$(AUTOV8_VERSION)
-AUTOV8_OUT = build/v8-git-mirror-$(AUTOV8_VERSION)/out/native
+AUTOV8_VERSION = 6.4.388.40
+AUTOV8_DIR = build/v8
+AUTOV8_OUT = build/v8/out.gn/x64.release/obj
 AUTOV8_DEPOT_TOOLS = build/depot_tools
 AUTOV8_LIB = $(AUTOV8_OUT)/libv8_snapshot.a
-AUTOV8_STATIC_LIBS = libv8_base.a libv8_external_snapshot.a libv8_libplatform.a libv8_libbase.a libv8_libsampler.a libicui18n.a libicuuc.a
+AUTOV8_STATIC_LIBS = -lv8_base -lv8_snapshot -lv8_libplatform -lv8_libbase -lv8_libsampler -licui18n -licuuc
 export PATH := $(abspath $(AUTOV8_DEPOT_TOOLS)):$(PATH)
 
-SHLIB_LINK += $(addprefix $(AUTOV8_OUT)/, $(AUTOV8_STATIC_LIBS))
+SHLIB_LINK += -L$(AUTOV8_OUT) -L$(AUTOV8_OUT)/third_party/icu $(AUTOV8_STATIC_LIBS)
 
-all: $(AUTOV8_LIB)
+all: v8
 
 # For some reason, this solves parallel make dependency.
-plv8_config.h plv8.so: $(AUTOV8_LIB)
+plv8_config.h plv8.so: v8
 
 $(AUTOV8_DEPOT_TOOLS):
 	mkdir -p build
 	cd build; git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
 
 $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
-	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync
-	mv build/v8 $(AUTOV8_DIR)
+	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync ; tools/dev/v8gen.py x64.release -- is_component_build=false v8_static_library=true v8_use_snapshot=true v8_use_external_startup_data=false
 
 $(AUTOV8_OUT)/third_party/icu/common/icudtb.dat:
 
 $(AUTOV8_OUT)/third_party/icu/common/icudtl.dat:
 
-$(AUTOV8_LIB): $(AUTOV8_DIR)
-	env CXXFLAGS=-fPIC CFLAGS=-fPIC $(MAKE) -C build/v8-git-mirror-$(AUTOV8_VERSION) native
-	test -f $(AUTOV8_OUT)/libv8_base.a || \
-		ln -s $(abspath $(AUTOV8_OUT)/obj.target/src/libv8_base.a) \
-			$(AUTOV8_OUT)/libv8_base.a
-	test -f $(AUTOV8_OUT)/libv8_nosnapshot.a || \
-		ln -s $(abspath $(AUTOV8_OUT)/obj.target/src/libv8_nosnapshot.a) \
-			$(AUTOV8_OUT)/libv8_nosnapshot.a
-	test -f $(AUTOV8_OUT)/libv8_libbase.a || \
-		ln -s $(abspath $(AUTOV8_OUT)/obj.target/src/libv8_libbase.a) \
-			$(AUTOV8_OUT)/libv8_libbase.a
-	test -f $(AUTOV8_OUT)/libv8_libplatform.a || \
-		ln -s $(abspath $(AUTOV8_OUT)/obj.target/src/libv8_libplatform.a) \
-			$(AUTOV8_OUT)/libv8_libplatform.a
-	test -f $(AUTOV8_OUT)/libv8_libsampler.a || \
-		ln -s $(abspath $(AUTOV8_OUT)/obj.target/src/libv8_libsampler.a) \
-			$(AUTOV8_OUT)/libv8_libsampler.a
-	test -f $(AUTOV8_OUT)/libicui18n.a || \
-		ln -s $(abspath $(AUTOV8_OUT)/obj.target/third_party/icu/libicui18n.a) \
-			$(AUTOV8_OUT)/libicui18n.a
-	test -f $(AUTOV8_OUT)/libicuuc.a || \
-		ln -s $(abspath $(AUTOV8_OUT)/obj.target/third_party/icu/libicuuc.a) \
-			$(AUTOV8_OUT)/libicuuc.a
+v8: $(AUTOV8_DIR)
+	cd $(AUTOV8_DIR) ; env CXXFLAGS=-fPIC CFLAGS=-fPIC ninja -C out.gn/x64.release
 
 include Makefile
 

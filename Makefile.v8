@@ -52,6 +52,7 @@ else
 		SHLIB_LINK += -stdlib=libc++
 	endif
 	ifeq ($(UNAME_S),Linux)
-		SHLIB_LINK += -lrt
+		CCFLAGS += -std=c++11
+		SHLIB_LINK += -lrt -std=c++11 -lc++
 	endif
 endif

@@ -12,7 +12,7 @@ AUTOV8_DIR = build/v8
 AUTOV8_OUT = build/v8/out.gn/x64.release/obj
 AUTOV8_DEPOT_TOOLS = build/depot_tools
 AUTOV8_LIB = $(AUTOV8_OUT)/libv8_snapshot.a
-AUTOV8_STATIC_LIBS = -lv8_base -lv8_snapshot -lv8_libplatform -lv8_libbase -lv8_libsampler -licui18n -licuuc
+AUTOV8_STATIC_LIBS = -lv8_base -lv8_snapshot -lv8_libplatform -lv8_libbase -lv8_libsampler
 export PATH := $(abspath $(AUTOV8_DEPOT_TOOLS)):$(PATH)
 
 SHLIB_LINK += -L$(AUTOV8_OUT) -L$(AUTOV8_OUT)/third_party/icu $(AUTOV8_STATIC_LIBS)
@@ -27,7 +27,7 @@ $(AUTOV8_DEPOT_TOOLS):
 	cd build; git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
 
 $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
-	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync ; tools/dev/v8gen.py x64.release -- is_component_build=false v8_static_library=true v8_use_snapshot=true v8_use_external_startup_data=false
+	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync ; tools/dev/v8gen.py x64.release -- is_component_build=false v8_static_library=true v8_use_snapshot=true v8_use_external_startup_data=false i18nsupport=off
 
 $(AUTOV8_OUT)/third_party/icu/common/icudtb.dat:
 

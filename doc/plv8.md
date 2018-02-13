@@ -42,32 +42,32 @@ are building those from source.
 ### Build from source:
 Determine the [PL/v8 release](https://github.com/plv8/plv8/releases) you want to download and use it's version and path below.
 
-    $ wget https://github.com/plv8/plv8/archive/v2.0.0.tar.gz
+    $ wget https://github.com/plv8/plv8/archive/v2.2.0.tar.gz
     $ tar -xvzf v2.0.0.tar.gz
     $ cd plv8-2.0.0
-    $ make static
+    $ make
 
 This will build PL/v8 for you linking to Google's v8 as a static library by
 downloading the v8 source at a specific version and building it along with
 PL/v8. The build will be for the highest PostgreSQL version you have installed
-on the system. You can alternatively run just `make` and it will build PL/v8
-dynamically linking to Google's `libv8` library on your system. There are
-some issues with this as several linux distros ship a very old version of
-`libv8`. The `3.x` versions of v8 will work with the `1.4.x` versions of PL/v8,
+on the system. You can alternatively run `make -f Makefile.shared` and it will
+build PL/v8 dynamically linking to Google's `libv8` library on your system.
+There are some issues with this as several linux distros ship a very old version
+of `libv8`. The `3.x` versions of v8 will work with the `1.4.x` versions of PL/v8,
 but to build the later versions of PL/v8 you need a v8 minimum version of
-`4.4.63.31`, but can also use v8 version `5.1.281.14`. PGXN
-install will use the dynamically linked `libv8` library.
+`4.4.63.31`, but can also use v8 version `6.4.388.40`. PGXN
+install will use the statically linked `libv8` library.
 
-If you would like to use `make` and your system does not have a new enough
-version of `libv8` installed, see the `.travis.yml` file in the repo to see
-how our CI test servers build v8 natively.
+If you would like to use `make -f Makefile.shared` and your system does not have
+a new enough version of `libv8` installed, see the `Makefile` file in the repo
+to see how to build v8 natively.
 
 > Note: If you have multiple versions of PostgreSQL installed like 9.5 and 9.6,
-PL/v8 will only be built for PostgreSQL 9.6. This is because `make static` calls
+PL/v8 will only be built for PostgreSQL 9.6. This is because `make` calls
 `pg_config` to get the version number, which will always be the latest version
 installed. If you need to build PL/v8 for PostgreSQL 9.5 while you have 9.6
 installed pass `make` the `PG_CONFIG` variable to your 9.5 version of
-`pg_config`. This works for `make`, `make static`, `make install`. For example
+`pg_config`. This works for `make`, `make -f Makefile.shared`, `make install`. For example
 in Ubuntu:
 
     $ make PG_CONFIG=/usr/lib/postgresql/9.5/bin/pg_config
@@ -92,6 +92,11 @@ correct location for PostgreSQL to find them:
 - `plv8.so`
 - `plv8.control`
 - `plv8--{plv8-build-version-here}.sql`
+
+By default, PL/v8 will not compile v8's ICU support.  If you need ICU support,
+you will need to specify it at build time:
+
+    $ make -DUSE_ICU
 
 The following files will also be built and can be optionally installed if you
 need the CoffeeScript or LiveScript versions:
@@ -139,7 +144,7 @@ This guide assumes you are using the [pgdg yum repository](https://yum.postgresq
 
 ### MacOS:
 
-    $ brew install plv8
+TODO
 
 ### Windows:
 TODO - PL/v8 supports Windows. A Pull Request for installation steps is greatly appreciated
@@ -183,7 +188,7 @@ installed:
       }
       return JSON.stringify(o);
     $$ LANGUAGE plv8 IMMUTABLE STRICT;
-    
+
     SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
              plv8_test
     ---------------------------
@@ -197,7 +202,7 @@ installed:
       return JSON.stringify(keys.reduce(((o, key, idx) ->
         o[key] = vals[idx]; return o), {}), {})
     $$ LANGUAGE plcoffee IMMUTABLE STRICT;
-    
+
     SELECT plcoffee_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
            plcoffee_test
     ---------------------------
@@ -210,7 +215,7 @@ installed:
     RETURNS text AS $$
       return JSON.stringify { [key, vals[idx]] for key, idx in keys }
     $$ LANGUAGE plls IMMUTABLE STRICT;
-    
+
     SELECT plls_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
              plls_test
     ---------------------------
@@ -229,7 +234,7 @@ scalar function call.
         }
         return JSON.stringify(o);
     $$ LANGUAGE plv8 IMMUTABLE STRICT;
-    
+
     SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
     SELECT plv8_test(ARRAY['name', 'age'], ARRAY['Tom', '29']);
              plv8_test
@@ -257,12 +262,12 @@ PL/v8 supports `SET` returning function calls.
         // and return all of them at the end of function.
         plv8.return_next( { "i": 1, "t": "a" } );
         plv8.return_next( { "i": 2, "t": "b" } );
-        
+
         // You can also return records with an array of JSON.
         return [ { "i": 3, "t": "c" }, { "i": 4, "t": "d" } ];
     $$
     LANGUAGE plv8;
-    
+
     SELECT * FROM set_of_records();
      i | t
     ---+---
@@ -296,7 +301,7 @@ PL/v8 supports trigger function calls.
         }
     $$
     LANGUAGE "plv8";
-    
+
     CREATE TRIGGER test_trigger
         BEFORE INSERT OR UPDATE OR DELETE
         ON test_tbl FOR EACH ROW
@@ -378,7 +383,7 @@ Returned value is an object of `PreparedPlan`. This object must be freed by
       sum += rows[i].num;
     }
     plan.free();
-    
+
     return sum;
 
 ### `PreparedPlan.execute( [args] )`
@@ -400,7 +405,7 @@ before leaving the function.
     }
     cursor.close();
     plan.free();
-    
+
     return sum;
 
 ### `PreparedPlan.free()`
@@ -570,7 +575,7 @@ and return the value. An example for these types are as follows.
       }
       return sum;
     $$ LANGUAGE plv8 IMMUTABLE STRICT;
-    
+
     SELECT int4sum(ARRAY[1, 2, 3, 4, 5]);
      int4sum
     ---------

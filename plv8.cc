@@ -124,11 +124,16 @@ extern const unsigned char livescript_binary_data[];
 
 class Plv8ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
  public:
-  virtual void* Allocate(size_t length) {
+  void* Allocate(size_t length) override {
     void* data = AllocateUninitialized(length);
     return data == NULL ? data : memset(data, 0, length);
   }
-  virtual void* AllocateUninitialized(size_t length) {
+
+	void* Reserve(size_t length) override {
+		return AllocateUninitialized(length);
+	}
+
+	void* AllocateUninitialized(size_t length) override {
 			void *data = NULL;
 			MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
@@ -146,7 +151,8 @@ class Plv8ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
 
 			return data;
 	}
-  virtual void Free(void* data, size_t) {
+
+  void Free(void* data, size_t) override {
 			MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
 			PG_TRY();
@@ -160,8 +166,14 @@ class Plv8ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
 			PG_END_TRY();
 
 			MemoryContextSwitchTo(oldcontext);
+}
 
-	}
+void Free(void *data, size_t size, v8::ArrayBuffer::Allocator::AllocationMode) override {
+		Free(data, size);
+}
+
+	void SetProtection(void* data, size_t length,
+									 Protection protection) override {}
 };
 
 /*
@@ -1886,4 +1898,3 @@ pg_error::rethrow() throw()
 	PG_RE_THROW();
 	exit(0);	// keep compiler quiet
 }
-

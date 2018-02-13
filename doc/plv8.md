@@ -93,6 +93,11 @@ correct location for PostgreSQL to find them:
 - `plv8.control`
 - `plv8--{plv8-build-version-here}.sql`
 
+By default, PL/v8 will not compile v8's ICU support.  If you need ICU support,
+you will need to specify it at build time:
+
+    $ make -DUSE_ICU
+
 The following files will also be built and can be optionally installed if you
 need the CoffeeScript or LiveScript versions:
 #### CoffeeScript Extension:

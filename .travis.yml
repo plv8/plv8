@@ -42,7 +42,7 @@ sudo: required
 dist: trusty
 
 script:
-  - make static && sudo make install && make installcheck
+  - make && sudo make install && make installcheck
 
 after_script:
   - cat regression.diffs || true

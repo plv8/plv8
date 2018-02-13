@@ -1,5 +1,10 @@
 Revision history for plv8
 
+2.2.0       2018-02-12
+            - track v8 6.4.388.40
+            - change build system
+            - force static to be default build
+
 2.1.0       2017-07-05
             - track v8 5.8.301
             - better error handling

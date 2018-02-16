@@ -42,9 +42,9 @@ are building those from source.
 ### Build from source:
 Determine the [PL/v8 release](https://github.com/plv8/plv8/releases) you want to download and use it's version and path below.
 
-    $ wget https://github.com/plv8/plv8/archive/v2.2.0.tar.gz
-    $ tar -xvzf v2.0.0.tar.gz
-    $ cd plv8-2.0.0
+    $ wget https://github.com/plv8/plv8/archive/v2.3.0.tar.gz
+    $ tar -xvzf v2.3.0.tar.gz
+    $ cd plv8-2.3.0
     $ make
 
 This will build PL/v8 for you linking to Google's v8 as a static library by

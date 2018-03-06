@@ -312,7 +312,7 @@ _PG_init(void)
 #ifdef EXECUTION_TIMEOUT
 	DefineCustomIntVariable("plv8.execution_timeout",
 							gettext_noop("V8 execution timeout."),
-							gettext_noop("The default value is 60 seconds.  "
+							gettext_noop("The default value is 300 seconds.  "
 										 "This allows you to override the default execution timeout."),
 							&plv8_execution_timeout,
 							300, 1, 65536,

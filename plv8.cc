@@ -28,7 +28,9 @@ extern "C" {
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
+#ifdef EXECUTION_TIMEOUT
 #include <unistd.h>
+#endif
 
 PG_MODULE_MAGIC;
 

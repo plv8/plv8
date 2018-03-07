@@ -1,5 +1,8 @@
 Revision history for plv8
 
+2.3.1       2018-03-07
+            - add optional functionality for execution timeouts
+
 2.3.0       2018-02-12
             - track v8 6.4.388.40
             - change build system

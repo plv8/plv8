@@ -2,7 +2,7 @@
 #
 # Makefile for v8 static link
 #
-# 'make static' will download the v8 source and build it, then build plv8
+# 'make' will download the v8 source and build it, then build plv8
 # with statically link to v8 with snapshot.  This assumes certain directory
 # structure in v8 which may be different from version to another, but user
 # can specify the v8 version by AUTOV8_VERSION, too.
@@ -20,6 +20,10 @@ V8_OPTIONS = is_component_build=false v8_static_library=true v8_use_snapshot=tru
 
 ifndef USE_ICU
 	V8_OPTIONS += v8_enable_i18n_support=false
+endif
+
+ifdef EXECUTION_TIMEOUT
+	CCFLAGS += -DEXECUTION_TIMEOUT
 endif
 
 all: v8

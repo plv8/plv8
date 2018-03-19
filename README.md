@@ -34,3 +34,6 @@ https://github.com/plv8/plv8
 
 PL/v8 is distributed by PGXN.  For more detail, see:
 http://pgxn.org/dist/plv8/doc/plv8.html
+
+Mailing List:
+https://groups.google.com/forum/#!forum/plv8js

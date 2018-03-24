@@ -7,12 +7,12 @@
 #
 # There are two ways to build plv8.
 # 1. Dynamic link to v8 (default)
-#   You need to have libv8.so and header file installed.
+#   You need to have libv8.so and header file installed. `make shared`
 # 2. Static link to v8 with snapshot
-#   'make static' will download v8 and build, then statically link to it.
+#   'make' will download v8 and build, then statically link to it.
 #
 #-----------------------------------------------------------------------------#
-PLV8_VERSION = 2.3.0
+PLV8_VERSION = 2.3.1
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -142,8 +142,7 @@ clean: subclean
 distclean:
 	rm -rf build
 
-static:
-	$(MAKE) -f Makefile.v8
+static: all
 
 # Check if META.json.version and PLV8_VERSION is equal.
 # Ideally we want to have only one place for this number, but parsing META.json

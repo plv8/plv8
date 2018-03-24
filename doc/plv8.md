@@ -85,6 +85,18 @@ https://github.com/plv8/plv8/issues/29
     CUSTOM_CC = gcc
     SHLIB_LINK := $(SHLIB_LINK) -lv8 -Wl,-Bstatic -lstdc++ -Wl,-Bdynamic -lm
 
+### Building with Execution Timeout
+
+PL/v8 allows you to optionally build with an execution timeout for Javascript
+functions, when enabled at compile-time.
+
+    $ make -DEXECUTION_TIMEOUT
+
+By default, the execution timeout is not compiled, but when configured it has
+a timeout of `300 seconds` (5 minutes).  You can override this by setting the
+`plv8.execution_timeout` variable.  It can be set between `1 second` and
+`65536` seconds, but cannot be disabled.
+
 ### Installing the build:
 After running `make` or `make static` the following files must be copied to the
 correct location for PostgreSQL to find them:

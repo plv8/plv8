@@ -161,7 +161,7 @@ TODO
 ### Windows:
 
     $ bootstrap.bat
-    $ cmake . -G "Visual Studio 14 2015 Win64" -DCMAKE_INSTALL_PREFIX="C:\Program Files\PostgreSQL\9.6" -DPOSTGRESQL_VERSION=9.6
+    $ cmake . -G "Visual Studio 15 2017 Win64" -DCMAKE_INSTALL_PREFIX="C:\Program Files\PostgreSQL\9.6" -DPOSTGRESQL_VERSION=9.6
     $ cmake --build . --config Release --target Package
 
 Unzip it, and copy to PostgreSQL directories.

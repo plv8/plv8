@@ -1,6 +1,6 @@
 ## plv8 extension
 comment = 'PL/JavaScript (v8) trusted procedural language'
-default_version = '2.1.0'
+default_version = '2.3.1'
 module_pathname = '$libdir/plv8'
 relocatable = false
 schema = pg_catalog

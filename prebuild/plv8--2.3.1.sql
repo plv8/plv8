@@ -15,5 +15,5 @@ CREATE DOMAIN plv8_float8array AS float8[];
 CREATE OR REPLACE FUNCTION plv8_version ( )
 RETURNS TEXT AS
 $$
- return "2.1.0";
+ return "2.3.1";
 $$ LANGUAGE plv8;

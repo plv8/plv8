@@ -6,6 +6,11 @@
  *-------------------------------------------------------------------------
  */
 #include "plv8.h"
+
+#ifdef _MSC_VER
+#undef open
+#endif
+
 #include "libplatform/libplatform.h"
 
 #include <new>
@@ -34,6 +39,13 @@ extern "C" {
 
 PG_MODULE_MAGIC;
 
+PGDLLEXPORT Datum	plv8_call_handler(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_call_validator(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plcoffee_call_handler(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plcoffee_call_validator(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plls_call_handler(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plls_call_validator(PG_FUNCTION_ARGS);
+
 PG_FUNCTION_INFO_V1(plv8_call_handler);
 PG_FUNCTION_INFO_V1(plv8_call_validator);
 PG_FUNCTION_INFO_V1(plcoffee_call_handler);
@@ -41,22 +53,17 @@ PG_FUNCTION_INFO_V1(plcoffee_call_validator);
 PG_FUNCTION_INFO_V1(plls_call_handler);
 PG_FUNCTION_INFO_V1(plls_call_validator);
 
-Datum	plv8_call_handler(PG_FUNCTION_ARGS);
-Datum	plv8_call_validator(PG_FUNCTION_ARGS);
-Datum	plcoffee_call_handler(PG_FUNCTION_ARGS);
-Datum	plcoffee_call_validator(PG_FUNCTION_ARGS);
-Datum	plls_call_handler(PG_FUNCTION_ARGS);
-Datum	plls_call_validator(PG_FUNCTION_ARGS);
 
-void _PG_init(void);
+PGDLLEXPORT void _PG_init(void);
 
 #if PG_VERSION_NUM >= 90000
+PGDLLEXPORT Datum	plv8_inline_handler(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plcoffee_inline_handler(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plls_inline_handler(PG_FUNCTION_ARGS);
+
 PG_FUNCTION_INFO_V1(plv8_inline_handler);
 PG_FUNCTION_INFO_V1(plcoffee_inline_handler);
 PG_FUNCTION_INFO_V1(plls_inline_handler);
-Datum	plv8_inline_handler(PG_FUNCTION_ARGS);
-Datum	plcoffee_inline_handler(PG_FUNCTION_ARGS);
-Datum	plls_inline_handler(PG_FUNCTION_ARGS);
 #endif
 } // extern "C"
 

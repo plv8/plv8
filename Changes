@@ -1,5 +1,9 @@
 Revision history for plv8
 
+2.3.2       2018-04-13
+            - moved permissions check into a PG_TRY/PG_CATCH block
+            - updated external startup compilation to include v8 >= 5.0
+
 2.3.1       2018-03-07
             - add optional functionality for execution timeouts
 

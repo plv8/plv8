@@ -338,7 +338,7 @@ _PG_init(void)
 		V8::InitializeICU(plv8_icu_data);
 	}
 
-#if V8_MAJOR_VERSION == 4 && V8_MINOR_VERSION >= 6
+#if (V8_MAJOR_VERSION == 4 && V8_MINOR_VERSION >= 6) || V8_MAJOR_VERSION >= 5
 	V8::InitializeExternalStartupData("plv8");
 #endif
 	Platform* platform = platform::CreateDefaultPlatform();

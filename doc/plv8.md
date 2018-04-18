@@ -159,7 +159,13 @@ This guide assumes you are using the [pgdg yum repository](https://yum.postgresq
 TODO
 
 ### Windows:
-TODO - PL/v8 supports Windows. A Pull Request for installation steps is greatly appreciated
+
+    $ bootstrap.bat
+    $ cmake . -G "Visual Studio 15 2017 Win64" -DCMAKE_INSTALL_PREFIX="C:\Program Files\PostgreSQL\9.6" -DPOSTGRESQL_VERSION=9.6
+    $ cmake --build . --config Release --target Package
+
+Unzip it, and copy to PostgreSQL directories.
+
 
 ## Install the PL/v8 Extensions on a Database:
 Once the PL/v8 extensions have been added to the server, you should restart the

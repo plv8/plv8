@@ -5,9 +5,9 @@ set(PROJECT_ID "plv8")
 
 set(VENDOR "")
 
-set(VERSION_MAJOR "2") 
-set(VERSION_MINOR "3") 
-set(VERSION_PATCH "1") 
+set(VERSION_MAJOR "2")
+set(VERSION_MINOR "3")
+set(VERSION_PATCH "1")
 
 set(VERSION_FULL "${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}")
 
@@ -25,12 +25,12 @@ set(EXTENSION_DATA_DIR "share/extension")
 set(DOCUMENT_DIR "share/${PROJECT_ID}")
 
 set(SOURCES
-  "coffee-script.cc"
-  "livescript.cc"
-  "plv8.cc"
-  "plv8_func.cc"
-  "plv8_param.cc"
-  "plv8_type.cc")
+  "../coffee-script.cc"
+  "../livescript.cc"
+  "../plv8.cc"
+  "../plv8_func.cc"
+  "../plv8_param.cc"
+  "../plv8_type.cc")
 
 
 include_directories(

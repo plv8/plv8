@@ -25,8 +25,8 @@ set(EXTENSION_DATA_DIR "share/extension")
 set(DOCUMENT_DIR "share/${PROJECT_ID}")
 
 set(SOURCES
-  "../coffee-script.cc"
-  "../livescript.cc"
+  "coffee-script.cc"
+  "livescript.cc"
   "../plv8.cc"
   "../plv8_func.cc"
   "../plv8_param.cc"
@@ -38,7 +38,8 @@ include_directories(
   "${POSTGRESQL_DIR}/include/server/port/win32"
   "${POSTGRESQL_DIR}/include/server"
   "${POSTGRESQL_DIR}/include"
-  "vendor/v8/include")
+  "vendor/v8/include"
+  ".")
 
 link_directories(
   "${POSTGRESQL_DIR}/lib")

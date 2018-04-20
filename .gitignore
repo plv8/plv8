@@ -23,3 +23,20 @@
 
 # For packaging
 plv8-*.zip
+
+# For MSVC
+/windows/*.vcxproj
+/windows/*.vcxproj.filters
+/windows/*.sln
+/windows/CMakeCache.txt
+/windows/CMakeFiles
+/windows/Release
+/windows/cmake_install.cmake
+/windows/libplv8.dir
+/windows/vendor
+/windows/x64
+/windows/CPackConfig.cmake
+/windows/CPackSourceConfig.cmake
+/windows/_CPack_Packages
+/windows/install_manifest.txt
+/windows/plv8*.zip

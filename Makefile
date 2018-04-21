@@ -36,14 +36,14 @@ $(AUTOV8_DEPOT_TOOLS):
 	cd build; git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
 
 $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
-	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync ; tools/dev/v8gen.py x64.release -- $(V8_OPTIONS)
+	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync ; tools/dev/v8gen.py $(PLATFORM) -- $(V8_OPTIONS)
 
 $(AUTOV8_OUT)/third_party/icu/common/icudtb.dat:
 
 $(AUTOV8_OUT)/third_party/icu/common/icudtl.dat:
 
 v8: $(AUTOV8_DIR)
-	cd $(AUTOV8_DIR) ; env CXXFLAGS=-fPIC CFLAGS=-fPIC ninja -C out.gn/x64.release d8
+	cd $(AUTOV8_DIR) ; env CXXFLAGS=-fPIC CFLAGS=-fPIC ninja -C out.gn/$(PLATFORM) d8
 
 include Makefile.shared
 
@@ -59,8 +59,15 @@ else
 	ifeq ($(UNAME_S),Darwin)
 		CCFLAGS += -stdlib=libc++ -std=c++11
 		SHLIB_LINK += -stdlib=libc++
+		PLATFORM = x64.release
 	endif
 	ifeq ($(UNAME_S),Linux)
+		ifeq ($(shell uname -m | grep -o arm),arm)
+			PLATFORM = arm64.release
+		endif
+		ifeq ($(shell uname -m),x86_64)
+			PLATFORM = x64.release
+		endif
 		CCFLAGS += -std=c++11
 		SHLIB_LINK += -lrt -std=c++11 -lc++
 	endif

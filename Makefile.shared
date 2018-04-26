@@ -12,7 +12,7 @@
 #   'make' will download v8 and build, then statically link to it.
 #
 #-----------------------------------------------------------------------------#
-PLV8_VERSION = 2.3.2
+PLV8_VERSION = 2.3.3
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -27,9 +27,9 @@ JSS  = coffee-script.js livescript.js
 JSCS = $(JSS:.js=.cc)
 SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc $(JSCS)
 OBJS = $(SRCS:.cc=.o)
-MODULE_big = plv8
+MODULE_big = plv8-$(PLV8_VERSION)
 EXTENSION = plv8
-PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql
+PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql $(wildcard upgrade/*.sql)
 
 DATA = $(PLV8_DATA)
 ifndef DISABLE_DIALECT

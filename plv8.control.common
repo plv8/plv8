@@ -9,7 +9,7 @@ comment = 'PL/CoffeeScript (v8) trusted procedural language'
 comment = 'PL/LiveScript (v8) trusted procedural language'
 #endif
 default_version = '@PLV8_VERSION@'
-module_pathname = '$libdir/plv8'
+module_pathname = '$libdir/plv8-@PLV8_VERSION@'
 relocatable = false
 schema = pg_catalog
 superuser = true

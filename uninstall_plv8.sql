@@ -4,6 +4,7 @@ DROP LANGUAGE plv8;
 DROP FUNCTION plv8_call_handler();
 DROP FUNCTION plv8_inline_handler(internal);
 DROP FUNCTION plv8_call_validator(oid);
+DROP FUNCTION plv8_version();
 
 DROP DOMAIN plv8_int2array;
 DROP DOMAIN plv8_int4array;

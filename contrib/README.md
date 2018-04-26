@@ -2,7 +2,7 @@
 
 ## ICU
 
-Data files for ICU's i18n support when compiling with `make static`.  Copy one
+Data files for ICU's i18n support when compiling with `make`.  Copy one
 of the files, depending on your platform, and set the `plv8.icu_data` variable
 in `postgresql.conf`.
 

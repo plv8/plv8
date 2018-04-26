@@ -137,24 +137,24 @@ DO $$ plv8.elog(NOTICE, 'this', 'is', 'inline', 'code'); $$ LANGUAGE plv8;
 For the result and arguments, PostgreSQL types and Javascript types are mapped
 automatically, if the desired PostgreSQL type is one of:
 
-* `oid`
+* `OID`
 * `bool`
-* `int2`
-* `int4`
-* `int8`
-* `float4`
-* `float8`
-* `numeric`
-* `date`
-* `timestamp`
-* `timestamptz`
-* `bytea`
-* `json` (>= 9.2)
-* `jsonb` (>= 9.4)
+* `INT3 `
+* `INT4`
+* `INT8`
+* `FLOAT4`
+* `FLOAT8`
+* `NUMERIC`
+* `DATE`
+* `TIMESTAMP`
+* `TIMESTAMPTZ`
+* `BYTEA`
+* `JSON` (>= 9.2)
+* `JSONB` (>= 9.4)
 
 and the Javascript value looks compatible, then the conversion succeeds.
 Otherwise, PLV8 tries to convert them via the `cstring` representation. An
 `array` type is supported only if the dimension is one. A Javascript `object`
 will be mapped to a `tuple` when applicable. In addition to these types, PLV8
 supports polymorphic types such like `ANYELEMENT` and `ANYARRAY`. Conversion of
-`BYTEA` is a little different story. See the [TypedArray section](https://pgxn.org/dist/plv8/doc/plv8.html#typed-array).
+`BYTEA` is a little different story. See the [TypedArray section](TYPED-ARRAY.md).

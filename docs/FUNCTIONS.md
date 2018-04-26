@@ -157,4 +157,42 @@ Otherwise, PLV8 tries to convert them via the `cstring` representation. An
 `array` type is supported only if the dimension is one. A Javascript `object`
 will be mapped to a `tuple` when applicable. In addition to these types, PLV8
 supports polymorphic types such like `ANYELEMENT` and `ANYARRAY`. Conversion of
-`BYTEA` is a little different story. See the [TypedArray section](TYPED-ARRAY.md).
+`BYTEA` is a little different story. See the [TypedArray section](#Typed%20Array).
+
+
+## Typed Array
+
+The `typed array` is something `v8` provides to allow fast access to native
+memory, mainly for the purpose of their canvas support in browsers. PLV8 uses
+this to map `BYTEA` and various array types to a Javascript `array`. In the case
+of `BYTEA`, you can access each byte as an array of unsigned bytes. For
+`int2`/`int4`/`float4`/`float8` array types, PLV8 provides direct access to each
+element by using PLV8 domain types.
+
+* `plv8_int2array` maps `int2[]`
+* `plv8_int4array` maps `int4[]`
+* `plv8_float4array` maps `float4[]`
+* `plv8_float8array` maps `float8[]`
+
+These are only annotations that tell PLV8 to use the fast access method instead
+of the regular one. For these typed arrays, only 1-dimensional arrays without
+any `NULL` elements.  There is currently no way to create such typed array inside
+PLV8 functions, only arguments can be typed array. You can modify the element and
+return the value. An example for these types are as follows:
+
+```
+CREATE FUNCTION int4sum(ary plv8_int4array) RETURNS int8 AS $$
+  var sum = 0;
+  for (var i = 0; i < ary.length; i++) {
+    sum += ary[i];
+  }
+  return sum;
+$$ LANGUAGE plv8 IMMUTABLE STRICT;
+
+SELECT int4sum(ARRAY[1, 2, 3, 4, 5]);
+
+ int4sum
+---------
+      15
+(1 row)
+```

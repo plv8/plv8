@@ -80,3 +80,41 @@ Install the new version, and `CREATE` the extension:
 ```
 
 Alternately, you can backup and restore your database.
+
+## Runtime Environment Separation
+
+In PLV8, each session has one global JS runtime context. This enables function
+invocations at low cost, and sharing common object among the functions. However,
+for the security reasons, if the user switches to another with SET ROLE command,
+a new JS runtime context is initialized and used separately. This prevents the
+risk of unexpected information leaking.
+
+Each `plv8` function is invoked as if the function is the property of other
+object. This means this in each function is a Javascript `object` that is created
+every time the function is executed in a query. In other words, the life time and
+the visibility of this object in a function is only a series of function calls in
+a query. If you need to share some value among different functions, keep it in the
+global `plv8` object because each function invocation has a different this object.
+
+## Start-up Procedure
+
+PLV8 provides a start up facility, which allows you to call a `plv8` runtime
+environment initialization function specified in the GUC variable.  This can
+only be set by someone with administrator access to the database you are
+accessing.
+
+```
+SET plv8.start_proc = 'plv8_init';
+SELECT plv8_test(10);
+```
+
+If this variable is set when the runtime is initialized, before the function
+call of `plv8_test()` another `plv8` function `plv8_init()` is invoked. In such
+initialization function, you can add any properties to `plv8` object to expose
+common values or assign them to the this property. In the initialization function,
+the receiver this is specially pointing to the global object, so the variables
+that are assigned to the this property in this initialization are visible from
+any subsequent function as global variables.
+
+Remember `CREATE FUNCTION` also starts the `plv8` runtime environment, so make
+sure to `SET` this GUC before any `plv8` actions including `CREATE FUNCTION`.

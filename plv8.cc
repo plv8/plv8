@@ -294,7 +294,7 @@ _PG_init(void)
 								 NULL);
 
 	DefineCustomStringVariable("plv8.v8_flags",
-							   gettext_noop("V8 engine initialization flags (e.g. --es_staging for additional ES6 features)."),
+							   gettext_noop("V8 engine initialization flags (e.g. --harmony for all current harmony features)."),
 							   NULL,
 							   &plv8_v8_flags,
 							   NULL,

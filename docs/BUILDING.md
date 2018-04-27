@@ -114,7 +114,7 @@ Additional requirements to build V8:
 * unzip.exe
 * patch.exe - part of the Git install
 
-## Patching Postgres
+### Patching Postgres
 
 Currently, Postgres requires a patch of one or more `include` files in order to
 compile PLV8.

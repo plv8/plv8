@@ -14,3 +14,7 @@ configured for.
 
 NOTE: it is important that the user that Postgres is started with has read
 access to the file.
+
+## Web
+
+Node.js scripts to create and maintain the PLV8 web site.

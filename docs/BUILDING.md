@@ -47,7 +47,7 @@ PL/v8 allows you to optionally build with an execution timeout for Javascript
 functions, when enabled at compile-time.
 
 ```
-$ make -DEXECUTION_TIMEOUT
+$ make EXECUTION_TIMEOUT=1
 ```
 
 By default, the execution timeout is not compiled, but when configured it has a
@@ -60,7 +60,7 @@ seconds, but cannot be disabled.
 Building with ICU requires you to enable ICU in your build process:
 
 ```
-$ make -DUSE_ICU
+$ make USE_ICU=1
 ```
 
 If you build with ICU, you will need to install the correct ICU file, located in

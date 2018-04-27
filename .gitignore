@@ -24,6 +24,10 @@
 # For packaging
 plv8-*.zip
 
+# Web
+/contrib/web/node_modules
+/contrib/web/index.html
+
 # For MSVC
 /windows/*.vcxproj
 /windows/*.vcxproj.filters

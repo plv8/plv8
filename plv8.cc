@@ -33,6 +33,8 @@ extern "C" {
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
+#include <signal.h>
+
 #ifdef EXECUTION_TIMEOUT
 #include <unistd.h>
 #endif
@@ -522,6 +524,20 @@ Breakout (void *d)
 }
 #endif
 
+void *int_handler = NULL;
+void *term_handler = NULL;
+
+/*
+ * signal handler
+ *
+ * This function kills the execution of the v8 process if a signal is called
+ */
+void
+signal_handler (int sig) {
+	elog(DEBUG1, "cancelling execution");
+	v8::V8::TerminateExecution(plv8_isolate);
+}
+
 /*
  * DoCall -- Call a JS function with SPI support.
  *
@@ -540,6 +556,10 @@ DoCall(Handle<Function> fn, Handle<Object> receiver,
 	if (SPI_connect() != SPI_OK_CONNECT)
 		throw js_error("could not connect to SPI manager");
 
+	// set up the signal handlers
+	int_handler = (void *) signal(SIGINT, signal_handler);
+	term_handler = (void *) signal(SIGTERM, signal_handler);
+
 #ifdef EXECUTION_TIMEOUT
 	// set up the thread to break out the execution if needed
 	pthread_create(&breakout_thread, NULL, Breakout, NULL);
@@ -553,10 +573,12 @@ DoCall(Handle<Function> fn, Handle<Object> receiver,
 	pthread_join(breakout_thread, &thread_result);
 
 	if (thread_result == NULL) {
-		//elog(ERROR, "PLV8 Execution Timeout exceeded");
 		throw js_error("execution timeout exceeded");
 	}
 #endif
+
+	signal(SIGINT, (void (*)(int)) int_handler);
+	signal(SIGTERM, (void (*)(int)) term_handler);
 
 	if (result.IsEmpty())
 		throw js_error(try_catch);

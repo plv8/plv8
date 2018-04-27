@@ -22,10 +22,6 @@ ifndef USE_ICU
 	V8_OPTIONS += v8_enable_i18n_support=false
 endif
 
-ifdef EXECUTION_TIMEOUT
-	CCFLAGS += -DEXECUTION_TIMEOUT
-endif
-
 all: v8
 
 # For some reason, this solves parallel make dependency.
@@ -46,6 +42,10 @@ v8: $(AUTOV8_DIR)
 	cd $(AUTOV8_DIR) ; env CXXFLAGS=-fPIC CFLAGS=-fPIC ninja -C out.gn/$(PLATFORM) d8
 
 include Makefile.shared
+
+ifdef EXECUTION_TIMEOUT
+	CCFLAGS += -DEXECUTION_TIMEOUT
+endif
 
 CCFLAGS += -I$(AUTOV8_DIR)/include -I$(AUTOV8_DIR)
 # We're gonna build static link.  Rip it out after include Makefile

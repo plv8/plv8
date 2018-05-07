@@ -77,7 +77,11 @@ else
 	endif
 endif
 
-all:
+generate_upgrades:
+	mkdir -p upgrade
+	./generate_upgrade.sh $(PLV8_VERSION)
+
+all: generate_upgrades
 
 plv8_config.h: plv8_config.h.in Makefile
 	sed -e 's/^#undef PLV8_VERSION/#define PLV8_VERSION "$(PLV8_VERSION)"/' $< > $@

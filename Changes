@@ -3,6 +3,7 @@ Revision history for plv8
 2.3.4       2018-05-07
             - add execution timeout support to windows
             - add automatic creation of update files on macos/linux/unix
+            - add automatic creation of setup files on windows
 
 2.3.3       2018-04-27
             - added upgrade scripts

@@ -1,0 +1,6 @@
+comment = 'PL/@LANG_NAME@ (v8) trusted procedural language'
+default_version = '@PLV8_VERSION@'
+module_pathname = '$libdir/plv8'
+relocatable = false
+schema = pg_catalog
+superuser = true

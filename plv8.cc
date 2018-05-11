@@ -36,7 +36,11 @@ extern "C" {
 #include <signal.h>
 
 #ifdef EXECUTION_TIMEOUT
+#ifdef _MSC_VER
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 #endif
 
 PG_MODULE_MAGIC;
@@ -513,6 +517,16 @@ plls_inline_handler(PG_FUNCTION_ARGS)
  *
  * This function breaks out of a javascript execution context.
  */
+#ifdef _MSC_VER // windows
+DWORD WINAPI
+Breakout (LPVOID lpParam)
+{
+	Sleep(plv8_execution_timeout * 1000);
+	v8::V8::TerminateExecution(plv8_isolate);
+
+	return 0;
+}
+#else // posix
 void *
 Breakout (void *d)
 {
@@ -523,7 +537,7 @@ Breakout (void *d)
 	return NULL;
 }
 #endif
-
+#endif
 void *int_handler = NULL;
 void *term_handler = NULL;
 
@@ -549,8 +563,13 @@ DoCall(Handle<Function> fn, Handle<Object> receiver,
 {
 	TryCatch		try_catch;
 #ifdef EXECUTION_TIMEOUT
+#ifdef _MSC_VER
+	HANDLE  hThread;
+	DWORD dwThreadId;
+#else
 	pthread_t breakout_thread;
 	void *thread_result;
+#endif
 #endif
 
 	if (SPI_connect() != SPI_OK_CONNECT)
@@ -561,20 +580,32 @@ DoCall(Handle<Function> fn, Handle<Object> receiver,
 	term_handler = (void *) signal(SIGTERM, signal_handler);
 
 #ifdef EXECUTION_TIMEOUT
+#ifdef _MSC_VER // windows
+	hThread = CreateThread(NULL, 0, Breakout, NULL, 0, &dwThreadId);
+#else
 	// set up the thread to break out the execution if needed
 	pthread_create(&breakout_thread, NULL, Breakout, NULL);
+#endif
 #endif
 
 	Local<v8::Value> result = fn->Call(receiver, nargs, args);
 	int	status = SPI_finish();
 
 #ifdef EXECUTION_TIMEOUT
+#ifdef _MSC_VER
+	BOOL cancel_state = TerminateThread(hThread, NULL);
+
+	if (cancel_state == 0) {
+		throw js_error("execution timeout exceeded");
+	}
+#else
 	pthread_cancel(breakout_thread);
 	pthread_join(breakout_thread, &thread_result);
 
 	if (thread_result == NULL) {
 		throw js_error("execution timeout exceeded");
 	}
+#endif
 #endif
 
 	signal(SIGINT, (void (*)(int)) int_handler);

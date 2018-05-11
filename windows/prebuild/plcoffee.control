@@ -1,7 +1,0 @@
-## plcoffee extension
-comment = 'PL/CoffeeScript (v8) trusted procedural language'
-default_version = '2.3.1'
-module_pathname = '$libdir/plv8'
-relocatable = false
-schema = pg_catalog
-superuser = true

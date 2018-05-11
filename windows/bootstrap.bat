@@ -1,8 +1,4 @@
-copy prebuild\plv8_config.h .
-copy prebuild\coffee-script.cc .
-copy prebuild\livescript.cc .
-copy prebuild\pl*.control .
-copy prebuild\pl*.sql .
+powershell -File generate_upgrade.ps1
 mkdir vendor
 cd vendor
 powershell -File ..\wget_depot_tools.ps1

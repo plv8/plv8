@@ -72,3 +72,12 @@ else
 		SHLIB_LINK += -lrt -std=c++11 -lc++
 	endif
 endif
+
+expected/init-local.out: expected/init-local.out.in
+	sed  "s|MODULE_PATHNAME|$(shell pwd)/plv8|g" $< > $@
+
+sql/init-local.sql: plv8.sql.common
+	sed -e 's/@LANG_NAME@/plv8/g' $< | sed -e "s|MODULE_PATHNAME|$(shell pwd)/plv8|g" | $(CC) -E -P $(CPPFLAGS) -DLANG_plv8 - > $@
+
+test: sql/init-local.sql expected/init-local.out $(EXTENSION).so
+	$(pg_regress_check) $(REGRESS_OPTS) init-local $(filter-out init-extension dialect, $(REGRESS))

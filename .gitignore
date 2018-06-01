@@ -21,6 +21,10 @@
 # Test results
 /results
 
+# Test helpers
+init-local.sql
+init-local.out
+
 # For packaging
 plv8-*.zip
 

@@ -489,7 +489,7 @@ ToValue(Datum datum, bool isnull, plv8_type *type)
 {
 	if (isnull)
 		return Local<v8::Value>::New(plv8_isolate, Null(plv8_isolate));
-	else if (type->category == TYPCATEGORY_ARRAY || type->typid == RECORDARRAYOID || type->typid == BYTEAOID)
+	else if (type->category == TYPCATEGORY_ARRAY || type->typid == RECORDARRAYOID)
 		return ToArrayValue(datum, isnull, type);
 	else if (type->category == TYPCATEGORY_COMPOSITE || type->typid == RECORDOID)
 		return ToRecordValue(datum, isnull, type);

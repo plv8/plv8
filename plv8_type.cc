@@ -331,6 +331,18 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 				return PointerGetDatum(result);
 			}
 
+			if (value->IsArrayBuffer()) {
+				v8::Handle<v8::ArrayBuffer> array = v8::Handle<v8::ArrayBuffer>::Cast(value);
+				void *data = array->GetContents().Data();
+				int		len = array->ByteLength();
+				size_t		size = len + VARHDRSZ;
+				void	   *result = (void *) palloc(size);
+
+				SET_VARSIZE(result, size);
+				memcpy(VARDATA(result), data, len);
+				return PointerGetDatum(result);
+			}
+
 			void *datum_p = ExtractExternalArrayDatum(value);
 
 			if (datum_p)

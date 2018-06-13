@@ -1,5 +1,8 @@
 Revision history for plv8
 
+2.3.5       2018-06-13
+            - better bytea handling for arrays
+
 2.3.4       2018-05-07
             - add execution timeout support to windows
             - add automatic creation of update files on macos/linux/unix

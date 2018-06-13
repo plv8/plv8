@@ -294,7 +294,56 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 		break;
 	case BYTEAOID:
 		{
+			if (value->IsUint8Array() || value->IsInt8Array()) {
+				v8::Handle<v8::Uint8Array> array = v8::Handle<v8::Uint8Array>::Cast(value);
+				void *data = array->Buffer()->GetContents().Data();
+				int		len = array->Length();
+				size_t		size = len + VARHDRSZ;
+				void	   *result = (void *) palloc(size);
+
+				SET_VARSIZE(result, size);
+				memcpy(VARDATA(result), data, len);
+				return PointerGetDatum(result);
+			}
+
+			if (value->IsUint16Array() || value->IsInt16Array()) {
+				v8::Handle<v8::Uint16Array> array = v8::Handle<v8::Uint16Array>::Cast(value);
+				void *data = array->Buffer()->GetContents().Data();
+				int		len = array->Length();
+				size_t		size = (len * 2) + VARHDRSZ;
+				void	   *result = (void *) palloc(size);
+
+				SET_VARSIZE(result, size);
+				memcpy(VARDATA(result), data, len * 2);
+				return PointerGetDatum(result);
+			}
+
+			if (value->IsUint32Array() || value->IsInt32Array()) {
+				v8::Handle<v8::Uint32Array> array = v8::Handle<v8::Uint32Array>::Cast(value);
+				void *data = array->Buffer()->GetContents().Data();
+				int		len = array->Length();
+				size_t		size = (len * 4) + VARHDRSZ;
+				void	   *result = (void *) palloc(size);
+
+				SET_VARSIZE(result, size);
+				memcpy(VARDATA(result), data, len * 4);
+				return PointerGetDatum(result);
+			}
+
+			if (value->IsArrayBuffer()) {
+				v8::Handle<v8::ArrayBuffer> array = v8::Handle<v8::ArrayBuffer>::Cast(value);
+				void *data = array->GetContents().Data();
+				int		len = array->ByteLength();
+				size_t		size = len + VARHDRSZ;
+				void	   *result = (void *) palloc(size);
+
+				SET_VARSIZE(result, size);
+				memcpy(VARDATA(result), data, len);
+				return PointerGetDatum(result);
+			}
+
 			void *datum_p = ExtractExternalArrayDatum(value);
+
 			if (datum_p)
 			{
 				return PointerGetDatum(datum_p);

@@ -1,5 +1,8 @@
 Revision history for plv8
 
+2.1.1       2018-06-13
+            - better bytea support, backported from 2.3.5
+
 2.0.0       2017-02-02
             - track v8 5.4.500.43
 

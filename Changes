@@ -1,5 +1,9 @@
 Revision history for plv8
 
+2.3.6       2018-06-21
+            - change v8 to use its default array buffer allocator rather than
+              using pg's memory contexts
+
 2.3.5       2018-06-13
             - better bytea handling for arrays
 

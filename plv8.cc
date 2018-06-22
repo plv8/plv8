@@ -139,60 +139,6 @@ static plv8_exec_env		   *exec_env_head = NULL;
 extern const unsigned char coffee_script_binary_data[];
 extern const unsigned char livescript_binary_data[];
 
-class Plv8ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
- public:
-  void* Allocate(size_t length) override {
-    void* data = AllocateUninitialized(length);
-    return data == NULL ? data : memset(data, 0, length);
-  }
-
-	void* Reserve(size_t length) override {
-		return AllocateUninitialized(length);
-	}
-
-	void* AllocateUninitialized(size_t length) override {
-			void *data = NULL;
-			MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-
-			PG_TRY();
-			{
-					data = palloc(length);
-			}
-			PG_CATCH();
-			{
-					throw pg_error();
-			}
-			PG_END_TRY();
-
-			MemoryContextSwitchTo(oldcontext);
-
-			return data;
-	}
-
-  void Free(void* data, size_t) override {
-			MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-
-			PG_TRY();
-			{
-					pfree(data);
-			}
-			PG_CATCH();
-			{
-					throw pg_error();
-			}
-			PG_END_TRY();
-
-			MemoryContextSwitchTo(oldcontext);
-}
-
-void Free(void *data, size_t size, v8::ArrayBuffer::Allocator::AllocationMode) override {
-		Free(data, size);
-}
-
-	void SetProtection(void* data, size_t length,
-									 Protection protection) override {}
-};
-
 /*
  * lower_case_functions are postgres-like C functions.
  * They could raise errors with elog/ereport(ERROR).
@@ -361,7 +307,7 @@ _PG_init(void)
 	      V8::SetFlagsFromString(plv8_v8_flags, strlen(plv8_v8_flags));
 	}
 	Isolate::CreateParams params;
-	params.array_buffer_allocator = new Plv8ArrayBufferAllocator();
+	params.array_buffer_allocator = v8::ArrayBuffer::Allocator::NewDefaultAllocator();;
 	plv8_isolate = Isolate::New(params);
 	plv8_isolate->Enter();
 

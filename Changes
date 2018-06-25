@@ -1,5 +1,8 @@
 Revision history for plv8
 
+2.1.2       2018-06-24
+            - backported array buffer allocator change from 2.3.6
+
 2.1.1       2018-06-13
             - better bytea support, backported from 2.3.5
 

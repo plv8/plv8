@@ -359,8 +359,12 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			Handle<v8::Value> result = JSON.Stringify(value);
 			CString str(result);
 
+#if PG_VERSION_NUM < 110000
 			// lots of casting, but it ends up working - there is no CStringGetJsonb exposed
 			return (Datum) DatumGetJsonb(DirectFunctionCall1(jsonb_in, (Datum) (char *) str));
+#else
+			return (Datum) DatumGetJsonbP(DirectFunctionCall1(jsonb_in, (Datum) (char *) str));
+#endif
 		}
 		break;
 #endif

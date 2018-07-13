@@ -1695,14 +1695,15 @@ Converter::Init()
 {
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
-		if (m_tupdesc->attrs[c]->attisdropped)
+		if (TupleDescAttr(m_tupdesc, c)->attisdropped)
 			continue;
 
-		m_colnames[c] = ToString(NameStr(m_tupdesc->attrs[c]->attname));
+		m_colnames[c] = ToString(NameStr(TupleDescAttr(m_tupdesc, c)->attname));
 
 		PG_TRY();
 		{
 			if (m_memcontext == NULL)
+#if PG_VERSION_NUM < 110000
 				m_memcontext = AllocSetContextCreate(
 									CurrentMemoryContext,
 									"ConverterContext",
@@ -1712,6 +1713,15 @@ Converter::Init()
 			plv8_fill_type(&m_coltypes[c],
 						   m_tupdesc->attrs[c]->atttypid,
 						   m_memcontext);
+#else
+				m_memcontext = AllocSetContextCreate(
+									CurrentMemoryContext,
+									"ConverterContext",
+									ALLOCSET_DEFAULT_SIZES);
+			plv8_fill_type(&m_coltypes[c],
+						   m_tupdesc->attrs[c].atttypid,
+						   m_memcontext);
+#endif
 		}
 		PG_CATCH();
 		{
@@ -1733,7 +1743,7 @@ Converter::ToValue(HeapTuple tuple)
 		Datum		datum;
 		bool		isnull;
 
-		if (m_tupdesc->attrs[c]->attisdropped)
+		if (TupleDescAttr(m_tupdesc, c)->attisdropped)
 			continue;
 
 #if PG_VERSION_NUM >= 90000
@@ -1781,7 +1791,7 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 
 		for (int c = 0; c < m_tupdesc->natts; c++)
 		{
-			if (m_tupdesc->attrs[c]->attisdropped)
+			if (TupleDescAttr(m_tupdesc, c)->attisdropped)
 				continue;
 
 			bool found = false;
@@ -1803,7 +1813,11 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
 		/* Make sure dropped columns are skipped by backend code. */
+#if PG_VERSION_NUM < 110000
 		if (m_tupdesc->attrs[c]->attisdropped)
+#else
+		if (m_tupdesc->attrs[c].attisdropped)
+#endif
 		{
 			nulls[c] = true;
 			continue;

@@ -7,6 +7,7 @@ Building PLV8 for MacOS or Linux has some specific requirements:
 * Git
 * g++ or clang++
 * Python 2 (for v8)
+* pgk-config (linux only for v8)
 
 ### Downloading Source
 
@@ -35,7 +36,7 @@ shared module:
 $ make -f Makefile.shared
 ```
 
-| Note: If you have multiple versions of PostgreSQL installed like 9.5 and 9.6, PL/v8 will only be built for PostgreSQL 9.6. This is because make calls pg_config to get the version number, which will always be the latest version installed. If you need to build PL/v8 for PostgreSQL 9.5 while you have 9.6 installed pass make the PG_CONFIG variable to your 9.5 version of pg_config. This works for `make`, `make -f Makefile.shared`, and `make install`. For example in Ubuntu:
+| Note: If you have multiple versions of PostgreSQL installed like 9.5 and 9.6, Plv8 will only be built for PostgreSQL 9.6. This is because make calls pg_config to get the version number, which will always be the latest version installed. If you need to build Plv8 for PostgreSQL 9.5 while you have 9.6 installed pass make the PG_CONFIG variable to your 9.5 version of pg_config. This works for `make`, `make -f Makefile.shared`, and `make install`. For example in Ubuntu:
 
 ```
 $ make PG_CONFIG=/usr/lib/postgresql/9.5/bin/pg_config
@@ -43,7 +44,7 @@ $ make PG_CONFIG=/usr/lib/postgresql/9.5/bin/pg_config
 
 ### Building with Execution Timeout
 
-PL/v8 allows you to optionally build with an execution timeout for Javascript
+Plv8 allows you to optionally build with an execution timeout for Javascript
 functions, when enabled at compile-time.
 
 ```

@@ -3,7 +3,7 @@
 PLV8 has the ability to execute multiple types of function calls inside of
 PostgreSQL.
 
-## Scale Function Calls
+## Scalar Function Calls
 
 In PLV8, you can write your invoked function call in Javascript, using the usual
 `CREATE FUNCTION` statement.  Here is an example of a `scalar` function call:

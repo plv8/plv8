@@ -818,6 +818,7 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 	subtran.exit(true);
 
 	args.GetReturnValue().Set(SPIResultToValue(status));
+	SPI_freetuptable(SPI_tuptable);
 }
 
 /*

@@ -1,5 +1,9 @@
 Revision history for plv8
 
+2.3.8       2018-09-28
+            - earlier cleanup of spi
+            - support in v8 of xcode 10
+
 2.3.7       2018-07-13
             - support pg 11
             - support procedures

@@ -101,6 +101,9 @@ endif
 # VERSION specific definitions
 ifeq ($(shell test $(PG_VERSION_NUM) -ge 90100 && echo yes), yes)
 
+%.bc : %.cc
+	$(COMPILE.cxx.bc) $(CCFLAGS) $(CPPFLAGS) -fPIC -c -o $@ $<
+
 DATA_built =
 all: $(DATA)
 %--$(PLV8_VERSION).sql: plv8.sql.common

@@ -182,7 +182,7 @@ JSONObject::JSONObject()
 {
 	Handle<Context> context = plv8_isolate->GetCurrentContext();
 	Handle<Object> global = context->Global();
-	m_json = global->Get(String::NewFromUtf8(plv8_isolate, "JSON", String::kInternalizedString))->ToObject();
+	m_json = global->Get(String::NewFromUtf8(plv8_isolate, "JSON", String::kInternalizedString))->ToObject(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 	if (m_json.IsEmpty())
 		throw js_error("JSON not found");
 }
@@ -289,7 +289,7 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 		FlushErrorState();
 		FreeErrorData(edata);
 
-		Handle<v8::Object> err = Exception::Error(message)->ToObject();
+		Handle<v8::Object> err = Exception::Error(message)->ToObject(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 		err->Set(String::NewFromUtf8(plv8_isolate, "sqlerrcode"), sqlerrcode);
 #if PG_VERSION_NUM >= 90300
 		err->Set(String::NewFromUtf8(plv8_isolate, "schema_name"), schema_name);
@@ -321,7 +321,7 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 		return;
 	}
 
-	int	elevel = args[0]->Int32Value();
+	int	elevel = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
 	switch (elevel)
 	{
 	case DEBUG5:
@@ -868,7 +868,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 	if (args.Length() >= 1)
 	{
 		wantarray = true;
-		nfetch = args[0]->Int32Value();
+		nfetch = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
 
 		if (nfetch < 0)
 		{
@@ -933,7 +933,7 @@ plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args)
 		return;
 	}
 
-	nmove = args[0]->Int32Value();
+	nmove = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
 	if (nmove < 0)
 	{
 		nmove = -nmove;
@@ -1023,7 +1023,7 @@ plv8_Subtransaction(const FunctionCallbackInfo<v8::Value>& args)
 	subtran.enter();
 
 	Handle<v8::Value> emptyargs[1] = {};
-	TryCatch try_catch;
+	TryCatch try_catch(plv8_isolate);
 	Handle<v8::Value> result = func->Call(func, 0, emptyargs);
 
 	subtran.exit(!result.IsEmpty());
@@ -1164,7 +1164,7 @@ plv8_WinGetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args)
 	if (args.Length() < 1)
 		size = 1000; /* default 1K */
 	else
-		size = args[0]->Int32Value();
+		size = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
 
 	size += sizeof(size_t) * 2;
 
@@ -1299,7 +1299,7 @@ plv8_WinSetMarkPosition(const FunctionCallbackInfo<v8::Value>& args)
                 args.GetReturnValue().Set(Undefined(plv8_isolate));
 		return;
         }
-	int64		markpos = args[0]->IntegerValue();
+	int64		markpos = args[0]->IntegerValue(plv8_isolate->GetCurrentContext()).ToChecked();
 
 	PG_TRY();
 	{
@@ -1325,8 +1325,8 @@ plv8_WinRowsArePeers(const FunctionCallbackInfo<v8::Value>& args)
                 args.GetReturnValue().Set(Undefined(plv8_isolate));
 		return;
 	}
-	int64		pos1 = args[0]->IntegerValue();
-	int64		pos2 = args[1]->IntegerValue();
+	int64		pos1 = args[0]->IntegerValue(plv8_isolate->GetCurrentContext()).ToChecked();
+	int64		pos2 = args[1]->IntegerValue(plv8_isolate->GetCurrentContext()).ToChecked();
 	bool		res = false;
 
 	PG_TRY();
@@ -1352,10 +1352,10 @@ plv8_WinGetFuncArgInPartition(const FunctionCallbackInfo<v8::Value>& args)
 	/* Since we return undefined in "isout" case, throw if arg isn't enough. */
 	if (args.Length() < 4)
 		throw js_error("argument not enough");
-	int			argno = args[0]->Int32Value();
-	int			relpos = args[1]->Int32Value();
-	int			seektype = args[2]->Int32Value();
-	bool		set_mark = args[3]->BooleanValue();
+	int			argno = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+	int			relpos = args[1]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+	int			seektype = args[2]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+	bool		set_mark = args[3]->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked();
 	bool		isnull, isout;
 	Datum		res;
 
@@ -1396,10 +1396,10 @@ plv8_WinGetFuncArgInFrame(const FunctionCallbackInfo<v8::Value>& args)
 	/* Since we return undefined in "isout" case, throw if arg isn't enough. */
 	if (args.Length() < 4)
 		throw js_error("argument not enough");
-	int			argno = args[0]->Int32Value();
-	int			relpos = args[1]->Int32Value();
-	int			seektype = args[2]->Int32Value();
-	bool		set_mark = args[3]->BooleanValue();
+	int			argno = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+	int			relpos = args[1]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+	int			seektype = args[2]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+	bool		set_mark = args[3]->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked();
 	bool		isnull, isout;
 	Datum		res;
 
@@ -1441,7 +1441,7 @@ plv8_WinGetFuncArgCurrent(const FunctionCallbackInfo<v8::Value>& args)
                 args.GetReturnValue().Set(Undefined(plv8_isolate));
 		return;
         }
-	int			argno = args[0]->Int32Value();
+	int			argno = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
 	bool		isnull;
 	Datum		res;
 

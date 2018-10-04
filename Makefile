@@ -7,7 +7,7 @@
 # structure in v8 which may be different from version to another, but user
 # can specify the v8 version by AUTOV8_VERSION, too.
 #-----------------------------------------------------------------------------#
-AUTOV8_VERSION = 6.4.388.40
+AUTOV8_VERSION = 7.0.276.20
 AUTOV8_DIR = build/v8
 AUTOV8_OUT = build/v8/out.gn/x64.release/obj
 AUTOV8_DEPOT_TOOLS = build/depot_tools
@@ -32,7 +32,7 @@ $(AUTOV8_DEPOT_TOOLS):
 	cd build; git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
 
 $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
-	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync ; cd build/config ; git cherry-pick 4287a0d364541583a50cc91465330251460d489a ; cd ../.. ; tools/dev/v8gen.py $(PLATFORM) -- $(V8_OPTIONS)
+	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync ; cd ../.. ; tools/dev/v8gen.py $(PLATFORM) -- $(V8_OPTIONS)
 
 $(AUTOV8_OUT)/third_party/icu/common/icudtb.dat:
 

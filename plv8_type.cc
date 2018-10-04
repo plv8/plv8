@@ -243,11 +243,11 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	{
 	case OIDOID:
 		if (value->IsNumber())
-			return ObjectIdGetDatum(value->Uint32Value());
+			return ObjectIdGetDatum(value->Uint32Value(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case BOOLOID:
 		if (value->IsBoolean())
-			return BoolGetDatum(value->BooleanValue());
+			return BoolGetDatum(value->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case INT2OID:
 		if (value->IsNumber())
@@ -255,7 +255,7 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			return DirectFunctionCall1(int82,
 					Int64GetDatum(value->IntegerValue()));
 #else
-			return Int16GetDatum((int16) value->Int32Value());
+			return Int16GetDatum((int16) value->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked());
 #endif
 		break;
 	case INT4OID:
@@ -264,34 +264,34 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			return DirectFunctionCall1(int84,
 					Int64GetDatum(value->IntegerValue()));
 #else
-			return Int32GetDatum((int32) value->Int32Value());
+			return Int32GetDatum((int32) value->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked());
 #endif
 		break;
 	case INT8OID:
 		if (value->IsNumber())
-			return Int64GetDatum((int64) value->IntegerValue());
+			return Int64GetDatum((int64) value->IntegerValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case FLOAT4OID:
 		if (value->IsNumber())
-			return Float4GetDatum((float4) value->NumberValue());
+			return Float4GetDatum((float4) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case FLOAT8OID:
 		if (value->IsNumber())
-			return Float8GetDatum((float8) value->NumberValue());
+			return Float8GetDatum((float8) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case NUMERICOID:
 		if (value->IsNumber())
 			return DirectFunctionCall1(float8_numeric,
-					Float8GetDatum((float8) value->NumberValue()));
+					Float8GetDatum((float8) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked()));
 		break;
 	case DATEOID:
 		if (value->IsDate())
-			return EpochToDate(value->NumberValue());
+			return EpochToDate(value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case TIMESTAMPOID:
 	case TIMESTAMPTZOID:
 		if (value->IsDate())
-			return EpochToTimestampTz(value->NumberValue());
+			return EpochToTimestampTz(value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case BYTEAOID:
 		{
@@ -852,7 +852,7 @@ EpochToDate(double epoch)
 	PG_RETURN_DATEADT((DateADT) epoch);
 }
 
-CString::CString(Handle<v8::Value> value) : m_utf8(value)
+CString::CString(Handle<v8::Value> value) : m_utf8(plv8_isolate, value)
 {
 	m_str = ToCString(m_utf8);
 }
@@ -866,8 +866,11 @@ CString::~CString()
 bool CString::toStdString(v8::Handle<v8::Value> value, std::string &out)
 {
 	if(value.IsEmpty()) return false;
-	auto obj = value->ToString();
-	String::Utf8Value utf8(obj);
+	String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+
+  // convert it to string
+	//auto obj = value->ToString(plv8_isolate);
+	//String::Utf8Value utf8(val);
 	if(*utf8) {
 		out = *utf8;
 		return true;

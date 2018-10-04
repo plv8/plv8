@@ -13,6 +13,7 @@
 #ifdef ENABLE_DEBUGGER_SUPPORT
 #include <v8-debug.h>
 #endif  // ENABLE_DEBUGGER_SUPPORT
+#include <v8-version-string.h>
 #include <vector>
 
 extern "C" {

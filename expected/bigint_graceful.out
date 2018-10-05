@@ -1,0 +1,31 @@
+-- BigInt precedures
+-- a BigInt that will work on BigInt
+CREATE OR REPLACE FUNCTION bigint_graceful1(val BIGINT)
+   RETURNS BIGINT AS $$
+    return val - 1n;
+   $$ LANGUAGE plv8 STABLE STRICT;
+SELECT bigint_graceful1(9223372036854775807);
+  bigint_graceful1   
+---------------------
+ 9223372036854775806
+(1 row)
+
+-- this will fail
+SELECT bigint_graceful1(32);
+ERROR:  TypeError: Cannot mix BigInt and other types, use explicit conversions
+CONTEXT:  bigint_graceful1() LINE 2:     return val - 1n;
+-- a BigInt that will fail on BigInt
+CREATE OR REPLACE FUNCTION bigint_graceful2(val BIGINT)
+   RETURNS BIGINT AS $$
+    return val - 1;
+   $$ LANGUAGE plv8 STABLE STRICT;
+SELECT bigint_graceful2(32);
+ bigint_graceful2 
+------------------
+               31
+(1 row)
+
+-- this will fail
+SELECT bigint_graceful2(9223372036854775807);
+ERROR:  TypeError: Cannot mix BigInt and other types, use explicit conversions
+CONTEXT:  bigint_graceful2() LINE 2:     return val - 1;

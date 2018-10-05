@@ -81,7 +81,9 @@ typedef enum plv8_external_array_type
 	kExternalIntArray,
 	kExternalUnsignedIntArray,
 	kExternalFloatArray,
-	kExternalDoubleArray
+	kExternalDoubleArray,
+	kExternalUnsignedInt64Array,
+	kExternalInt64Array
 } plv8_external_array_type;
 
 /*

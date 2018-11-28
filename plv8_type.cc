@@ -852,7 +852,7 @@ EpochToDate(double epoch)
 	PG_RETURN_DATEADT((DateADT) epoch);
 }
 
-CString::CString(Handle<v8::Value> value) : m_utf8(value)
+CString::CString(Handle<v8::Value> value) : m_utf8(plv8_isolate, value)
 {
 	m_str = ToCString(m_utf8);
 }
@@ -867,7 +867,7 @@ bool CString::toStdString(v8::Handle<v8::Value> value, std::string &out)
 {
 	if(value.IsEmpty()) return false;
 	auto obj = value->ToString();
-	String::Utf8Value utf8(obj);
+	String::Utf8Value utf8(plv8_isolate, obj);
 	if(*utf8) {
 		out = *utf8;
 		return true;

@@ -8,15 +8,16 @@ Building PLV8 for MacOS or Linux has some specific requirements:
 * g++ or clang++
 * Python 2 (for v8)
 * pgk-config (linux only for v8)
+* libc++-dev (linux only)
 
 ### Downloading Source
 
 Downloading the source code is very straightforward:
 
 ```
-$ wget https://github.com/plv8/plv8/archive/v2.3.3.tar.gz
-$ tar -xvzf v2.3.3.tar.gz
-$ cd plv8-2.3.3
+$ wget https://github.com/plv8/plv8/archive/v2.3.8.tar.gz
+$ tar -xvzf v2.3.8.tar.gz
+$ cd plv8-2.3.8
 $ make
 ```
 
@@ -28,13 +29,7 @@ Building is simple:
 $ make
 ```
 
-This will download `v8` and compile it as well.  If you have a shared modern
-version of `v8` available (6.4.388.40 or above), you can compile it against a
-shared module:
-
-```
-$ make -f Makefile.shared
-```
+This will download `v8` and compile it as well.
 
 | Note: If you have multiple versions of PostgreSQL installed like 9.5 and 9.6, Plv8 will only be built for PostgreSQL 9.6. This is because make calls pg_config to get the version number, which will always be the latest version installed. If you need to build Plv8 for PostgreSQL 9.5 while you have 9.6 installed pass make the PG_CONFIG variable to your 9.5 version of pg_config. This works for `make`, `make -f Makefile.shared`, and `make install`. For example in Ubuntu:
 
@@ -172,9 +167,3 @@ This will build and package the extension for installation.
 To install, you simply need to `unzip` the file created.  The name will depend
 on the version of PLV8 and the version of Postgres.  An example is
 `plv8-2.3.1-postgresql-10-x64.zip`.
-
-### TODO
-
-* Generate configuration files
-* Generate control files
-* Generate sql files

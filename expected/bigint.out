@@ -1,0 +1,26 @@
+-- BigInt precedures
+-- a BigInt that will work on any value
+CREATE OR REPLACE FUNCTION bigint_working(val BIGINT)
+   RETURNS BIGINT AS $$
+    return val - 1n;
+   $$ LANGUAGE plv8 STABLE STRICT;
+SELECT bigint_working(9223372036854775807);
+   bigint_working    
+---------------------
+ 9223372036854775806
+(1 row)
+
+SELECT bigint_working(32);
+ bigint_working 
+----------------
+             31
+(1 row)
+
+-- a BigInt that will fail on any value
+CREATE OR REPLACE FUNCTION bigint_failing(val BIGINT)
+   RETURNS BIGINT AS $$
+    return val - 1;
+   $$ LANGUAGE plv8 STABLE STRICT;
+SELECT bigint_failing(9223372036854775807);
+ERROR:  TypeError: Cannot mix BigInt and other types, use explicit conversions
+CONTEXT:  bigint_failing() LINE 2:     return val - 1;

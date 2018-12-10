@@ -94,6 +94,11 @@ plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt)
 			{
 				type->ext_array = kExternalDoubleArray;
 			}
+			else if (strcmp(NameStr(typtup->typname),
+						"plv8_int8array") == 0)
+			{
+				type->ext_array = kExternalInt64Array;
+			}
 
 			ReleaseSysCache(tp);
 		}
@@ -135,6 +140,8 @@ inferred_datum_type(Handle<v8::Value> value)
 	else if (value->IsInt32())
 		return INT4OID;
 	else if (value->IsUint32())
+		return INT8OID;
+	else if (value->IsBigInt())
 		return INT8OID;
 	else if (value->IsNumber())
 		return FLOAT8OID;
@@ -189,13 +196,14 @@ CreateExternalArray(void *data, plv8_external_array_type array_type,
 	case kExternalDoubleArray:
 		array = v8::Float64Array::New(buffer, 0, byte_size / sizeof(float8));
 		break;
+	case kExternalInt64Array:
+		array = v8::BigInt64Array::New(buffer, 0, byte_size / sizeof(int64));
 	default:
 		throw js_error("unexpected array type");
 	}
 	array->SetInternalField(0, External::New(plv8_isolate, DatumGetPointer(datum)));
-	// FIXME(bnoordhuis) Could create an ArrayBuffer directly from |data|
-	// but as it's unclear who owns that memory and what its life span is,
-	// let's just copy it over.
+
+	// needs to be a copy, as the data could go away
 	memcpy(buffer->GetContents().Data(), data, byte_size);
 
 	return array;
@@ -243,11 +251,11 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	{
 	case OIDOID:
 		if (value->IsNumber())
-			return ObjectIdGetDatum(value->Uint32Value());
+			return ObjectIdGetDatum(value->Uint32Value(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case BOOLOID:
 		if (value->IsBoolean())
-			return BoolGetDatum(value->BooleanValue());
+			return BoolGetDatum(value->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case INT2OID:
 		if (value->IsNumber())
@@ -255,7 +263,7 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			return DirectFunctionCall1(int82,
 					Int64GetDatum(value->IntegerValue()));
 #else
-			return Int16GetDatum((int16) value->Int32Value());
+			return Int16GetDatum((int16) value->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked());
 #endif
 		break;
 	case INT4OID:
@@ -264,34 +272,38 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			return DirectFunctionCall1(int84,
 					Int64GetDatum(value->IntegerValue()));
 #else
-			return Int32GetDatum((int32) value->Int32Value());
+			return Int32GetDatum((int32) value->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked());
 #endif
 		break;
 	case INT8OID:
+		if (value->IsBigInt()) {
+			BigInt *b = BigInt::Cast(*value);
+			return Int64GetDatum((int64) b->Int64Value());
+		}
 		if (value->IsNumber())
-			return Int64GetDatum((int64) value->IntegerValue());
+			return Int64GetDatum((int64) value->IntegerValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case FLOAT4OID:
 		if (value->IsNumber())
-			return Float4GetDatum((float4) value->NumberValue());
+			return Float4GetDatum((float4) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case FLOAT8OID:
 		if (value->IsNumber())
-			return Float8GetDatum((float8) value->NumberValue());
+			return Float8GetDatum((float8) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case NUMERICOID:
 		if (value->IsNumber())
 			return DirectFunctionCall1(float8_numeric,
-					Float8GetDatum((float8) value->NumberValue()));
+					Float8GetDatum((float8) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked()));
 		break;
 	case DATEOID:
 		if (value->IsDate())
-			return EpochToDate(value->NumberValue());
+			return EpochToDate(value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case TIMESTAMPOID:
 	case TIMESTAMPTZOID:
 		if (value->IsDate())
-			return EpochToTimestampTz(value->NumberValue());
+			return EpochToTimestampTz(value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case BYTEAOID:
 		{
@@ -514,8 +526,17 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 		return Int32::New(plv8_isolate, DatumGetInt16(datum));
 	case INT4OID:
 		return Int32::New(plv8_isolate, DatumGetInt32(datum));
-	case INT8OID:
-		return Number::New(plv8_isolate, DatumGetInt64(datum));
+	case INT8OID: {
+#if BIGINT_GRACEFUL
+		int64 v = DatumGetInt64(datum);
+
+		if (v > INT32_MAX || v < INT32_MIN)
+			return BigInt::New(plv8_isolate, v);
+		return Number::New(plv8_isolate, v);
+#else
+		return BigInt::New(plv8_isolate, DatumGetInt64(datum));
+#endif
+	}
 	case FLOAT4OID:
 		return Number::New(plv8_isolate, DatumGetFloat4(datum));
 	case FLOAT8OID:
@@ -852,7 +873,7 @@ EpochToDate(double epoch)
 	PG_RETURN_DATEADT((DateADT) epoch);
 }
 
-CString::CString(Handle<v8::Value> value) : m_utf8(value)
+CString::CString(Handle<v8::Value> value) : m_utf8(plv8_isolate, value)
 {
 	m_str = ToCString(m_utf8);
 }
@@ -866,8 +887,11 @@ CString::~CString()
 bool CString::toStdString(v8::Handle<v8::Value> value, std::string &out)
 {
 	if(value.IsEmpty()) return false;
-	auto obj = value->ToString();
-	String::Utf8Value utf8(obj);
+	String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+
+  // convert it to string
+	//auto obj = value->ToString(plv8_isolate);
+	//String::Utf8Value utf8(val);
 	if(*utf8) {
 		out = *utf8;
 		return true;

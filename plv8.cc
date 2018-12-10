@@ -495,7 +495,7 @@ void *term_handler = NULL;
 void
 signal_handler (int sig) {
 	elog(DEBUG1, "cancelling execution");
-	v8::V8::TerminateExecution(plv8_isolate);
+	plv8_isolate->TerminateExecution();
 }
 
 /*
@@ -507,7 +507,7 @@ static Local<v8::Value>
 DoCall(Handle<Function> fn, Handle<Object> receiver,
 	int nargs, Handle<v8::Value> args[])
 {
-	TryCatch		try_catch;
+	TryCatch		try_catch(plv8_isolate);
 #ifdef EXECUTION_TIMEOUT
 #ifdef _MSC_VER
 	HANDLE  hThread;
@@ -825,7 +825,7 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 		tgargs->Set(i, ToString(trig->tg_trigger->tgargs[i]));
 	args[9] = tgargs;
 
-	TryCatch			try_catch;
+	TryCatch			try_catch(plv8_isolate);
 	Local<Object> recv = Local<Object>::New(plv8_isolate, xenv->recv);
 	Local<Function>		fn =
 		Local<Function>::Cast(recv->GetInternalField(0));
@@ -1168,7 +1168,7 @@ CompileDialect(const char *src, Dialect dialect)
 	}
 	Local<Context> ctx = Local<Context>::New(plv8_isolate, context);
 	Context::Scope	context_scope(ctx);
-	TryCatch		try_catch;
+	TryCatch		try_catch(plv8_isolate);
 	Local<String>	key;
 	char		   *cresult;
 	const char	   *dialect_binary_data;
@@ -1194,11 +1194,15 @@ CompileDialect(const char *src, Dialect dialect)
 	if (ctx->Global()->Get(key)->IsUndefined())
 	{
 		HandleScope		handle_scope(plv8_isolate);
-		Local<Script>	script =
-			Script::Compile(ToString(dialect_binary_data), key);
+		v8::ScriptOrigin origin(key);
+		v8::Local<v8::Script> script;
+		if (!Script::Compile(plv8_isolate->GetCurrentContext(), ToString(dialect_binary_data), &origin).ToLocal(&script))
+			throw js_error(try_catch);
 		if (script.IsEmpty())
 			throw js_error(try_catch);
-		Local<v8::Value>	result = script->Run();
+		v8::Local<v8::Value> result;
+		if (!script->Run(plv8_isolate->GetCurrentContext()).ToLocal(&result))
+			throw js_error(try_catch);
 		if (result.IsEmpty())
 			throw js_error(try_catch);
 	}
@@ -1342,13 +1346,18 @@ CompileFunction(
 
 	Local<Context> context = Local<Context>::New(plv8_isolate, global_context);
 	Context::Scope	context_scope(context);
-	TryCatch		try_catch;
-	Local<Script>	script = Script::Compile(source, Handle<String>::Cast(name));
+	TryCatch		try_catch(plv8_isolate);
+	v8::ScriptOrigin origin(name);
+	v8::Local<v8::Script> script;
+  if (!Script::Compile(plv8_isolate->GetCurrentContext(), source, &origin).ToLocal(&script))
+		throw js_error(try_catch);
 
 	if (script.IsEmpty())
 		throw js_error(try_catch);
 
-	Local<v8::Value>	result = script->Run();
+	v8::Local<v8::Value> result;
+	if (!script->Run(plv8_isolate->GetCurrentContext()).ToLocal(&result))
+		throw js_error(try_catch);
 	if (result.IsEmpty())
 		throw js_error(try_catch);
 
@@ -1401,7 +1410,7 @@ find_js_function(Oid fn_oid)
 										   true, false,
 										   (Dialect) (PLV8_DIALECT_NONE + langno));
 
-		TryCatch			try_catch;
+		TryCatch			try_catch(plv8_isolate);
 
 		func = Local<Function>::New(plv8_isolate, proc->cache->function);
 	}
@@ -1530,7 +1539,7 @@ GetGlobalContext(Persistent<Context>& global_context)
 
 			HandleScope			handle_scope(plv8_isolate);
 			Context::Scope		context_scope(my_context->localContext());
-			TryCatch			try_catch;
+			TryCatch			try_catch(plv8_isolate);
 			MemoryContext		ctx = CurrentMemoryContext;
 			text *arg;
 			FunctionCallInfoData fake_fcinfo;
@@ -1609,7 +1618,7 @@ GetGlobalObjectTemplate()
 	{
 		HandleScope				handle_scope(plv8_isolate);
 
-		Local<ObjectTemplate> templ = ObjectTemplate::New();
+		Local<ObjectTemplate> templ = ObjectTemplate::New(plv8_isolate);
 		// ERROR levels for elog
 		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG5", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG5));
 		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG4", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG4));
@@ -1624,10 +1633,11 @@ GetGlobalObjectTemplate()
 		templ->Set(String::NewFromUtf8(plv8_isolate, "ERROR", String::kInternalizedString), Int32::New(plv8_isolate, ERROR));
 		global.Reset(plv8_isolate, templ);
 
-		Handle<ObjectTemplate>	plv8 = ObjectTemplate::New();
+		Handle<ObjectTemplate>	plv8 = ObjectTemplate::New(plv8_isolate);
 
 		SetupPlv8Functions(plv8);
 		plv8->Set(String::NewFromUtf8(plv8_isolate, "version", String::kInternalizedString), String::NewFromUtf8(plv8_isolate, PLV8_VERSION));
+		plv8->Set(String::NewFromUtf8(plv8_isolate, "v8_version", String::kInternalizedString), String::NewFromUtf8(plv8_isolate, V8_VERSION_STRING));
 
 		templ->Set(String::NewFromUtf8(plv8_isolate, "plv8", String::kInternalizedString), plv8);
 	}
@@ -1766,7 +1776,7 @@ Datum
 Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 {
 	Datum			result;
-	TryCatch		try_catch;
+	TryCatch		try_catch(plv8_isolate);
 	Handle<Object>	obj;
 
 	if (!m_is_scalar)
@@ -1863,7 +1873,7 @@ js_error::js_error(const char *msg) throw()
 js_error::js_error(TryCatch &try_catch) throw()
 {
 	HandleScope		handle_scope(plv8_isolate);
-	String::Utf8Value	exception(try_catch.Exception());
+	String::Utf8Value	exception(plv8_isolate, try_catch.Exception());
 	Handle<Message>		message = try_catch.Message();
 
 	m_msg = NULL;
@@ -1875,7 +1885,7 @@ js_error::js_error(TryCatch &try_catch) throw()
 	try
 	{
 		m_msg = ToCStringCopy(exception);
-		Handle<v8::Object> err = try_catch.Exception()->ToObject();
+		Handle<v8::Object> err = try_catch.Exception()->ToObject(plv8_isolate);
 		StringInfoData	detailStr;
 		StringInfoData	hintStr;
 		StringInfoData	contextStr;
@@ -1888,7 +1898,7 @@ js_error::js_error(TryCatch &try_catch) throw()
 			v8::Local<v8::Value> errCode = err->Get(String::NewFromUtf8(plv8_isolate, "code"));
 			if (!errCode->IsUndefined() && !errCode->IsNull())
 			{
-				int32_t code = errCode->Int32Value();
+				int32_t code = errCode->Int32Value(plv8_isolate->GetCurrentContext()).FromJust();
 				m_code = code;
 			}
 
@@ -1920,8 +1930,8 @@ js_error::js_error(TryCatch &try_catch) throw()
 		if (!message.IsEmpty())
 		{
 			CString		script(message->GetScriptResourceName());
-			int		lineno = message->GetLineNumber();
-			CString		source(message->GetSourceLine());
+			int		lineno = message->GetLineNumber(plv8_isolate->GetCurrentContext()).FromJust();
+			CString		source(message->GetSourceLine(plv8_isolate->GetCurrentContext()).ToLocalChecked());
 			// TODO: Get stack trace?
 			//Handle<StackTrace> stackTrace(message->GetStackTrace());
 

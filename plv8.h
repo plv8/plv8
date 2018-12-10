@@ -13,6 +13,7 @@
 #ifdef ENABLE_DEBUGGER_SUPPORT
 #include <v8-debug.h>
 #endif  // ENABLE_DEBUGGER_SUPPORT
+#include <v8-version-string.h>
 #include <vector>
 
 extern "C" {
@@ -80,7 +81,9 @@ typedef enum plv8_external_array_type
 	kExternalIntArray,
 	kExternalUnsignedIntArray,
 	kExternalFloatArray,
-	kExternalDoubleArray
+	kExternalDoubleArray,
+	kExternalUnsignedInt64Array,
+	kExternalInt64Array
 } plv8_external_array_type;
 
 /*

@@ -12,7 +12,7 @@
 #   'make' will download v8 and build, then statically link to it.
 #
 #-----------------------------------------------------------------------------#
-PLV8_VERSION = 2.3.9
+PLV8_VERSION = 3.0alpha
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
@@ -43,6 +43,12 @@ ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif
 
+ifndef BIGINT_GRACEFUL
+	REGRESS += bigint
+else
+	REGRESS += bigint_graceful
+endif
+
 SHLIB_LINK += -lv8
 ifdef V8_OUTDIR
 SHLIB_LINK += -L$(V8_OUTDIR)
@@ -60,7 +66,7 @@ endif
 # for older g++ (e.g. 4.6.x), which do not support c++11
 #OPTFLAGS = -O2 -std=gnu++0x -fno-rtti
 
-OPTFLAGS = -O2 -std=c++11 -fno-rtti
+OPTFLAGS = -std=c++11 -fno-rtti -O2
 
 CCFLAGS = -Wall $(OPTFLAGS) $(OPT_ENABLE_DEBUGGER_SUPPORT)
 

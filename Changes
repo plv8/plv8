@@ -5,6 +5,9 @@ Revision history for plv8
             - add Bigint support
             - add BigInt64Array support
 
+2.3.9       2018-12-09
+            - work around pg11 forced filename endings
+
 2.3.8       2018-09-28
             - earlier cleanup of spi
             - support in v8 of xcode 10

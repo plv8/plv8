@@ -28,11 +28,8 @@ before_script:
 
 env:
   matrix:
-    - PGVERSION=9.6
-    - PGVERSION=9.4
-    - PGVERSION=9.2
-
-
+    - PGVERSION=11.2
+    - PGVERSION=10.7
 
 language: cpp
 compiler:

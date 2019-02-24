@@ -14,6 +14,7 @@
 # Generic build files
 *.o
 *.so
+docker-build*.out
 
 # For static build
 /build
@@ -44,3 +45,8 @@ plv8-*.zip
 /windows/_CPack_Packages
 /windows/install_manifest.txt
 /windows/plv8*.zip
+
+# emacs
+[#]*
+.[#]*
+*~

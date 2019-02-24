@@ -10,6 +10,7 @@ function that is callable from SQL.
     =# CREATE EXTENSION plv8;
 
 This will install PLV8 into your database if it exists as an extension.
+If it does not exist (e.g. "ERROR:  could not open extension control file...") then you will need to build and install plv8, which requires access to the Postgres installation ([learn more](docs/BUILDING.md)).
 
 ## Testing
 

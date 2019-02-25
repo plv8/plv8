@@ -33,7 +33,6 @@ RUN buildDependencies="build-essential \
   && rm -rf /tmp/build /var/lib/apt/lists/*
 
 # note: based on an older Dockerfile from https://github.com/shady77/plv8-docker/
-LABEL maintainer "plv8.docker@gmail.com"
 LABEL plv8_version $PLV8_VERSION
 LABEL postgres_version $PG_VERSION
 LABEL postgres_major_version ${PG_MAJOR}

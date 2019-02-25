@@ -9,7 +9,7 @@ function that is callable from SQL.
 
     =# CREATE EXTENSION plv8;
 
-This will install PLV8 into your database if it exists as an extension.
+This will install PLV8 into your database if it exists as an extension. If it doesn't, then you should ask your administrator to [add plv8](/docs/BUILDING.md).
 
 ## Testing
 

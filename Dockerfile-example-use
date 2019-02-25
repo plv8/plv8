@@ -1,0 +1,19 @@
+# example for how to use a pre-built plv8 docker hub image in your (Debian/Ubuntu) Dockerfile.
+# NOTE: this will NOT work for Alpine Linux - we tried that already. sorry.
+
+FROM plv8user/plv8:2.3.9-pg11 as plv8
+
+FROM postgres:11 as base
+
+COPY --from=plv8 /usr/share/postgresql/11/extension/plcoffee* /usr/share/postgresql/11/extension/
+COPY --from=plv8 /usr/share/postgresql/11/extension/plls* /usr/share/postgresql/11/extension/
+COPY --from=plv8 /usr/share/postgresql/11/extension/plv8* /usr/share/postgresql/11/extension/
+COPY --from=plv8 /usr/lib/postgresql/11/lib/plv8*.so /usr/lib/postgresql/11/lib/
+RUN chmod 644 /usr/share/postgresql/11/extension/plcoffee* \
+    && chmod 644 /usr/share/postgresql/11/extension/plls* \
+    && chmod 644 /usr/share/postgresql/11/extension/plv8* \
+    && chmod 755 /usr/lib/postgresql/11/lib/plv8*.so
+# plv8 is dynamically linked
+RUN apt update && apt install libc++1
+
+# example: su - postgres -c "/usr/lib/postgresql/11/bin/pg_ctl init -D data; /usr/lib/postgresql/11/bin/pg_ctl -D data -l logfile start; psql -c \"create extension plv8\""

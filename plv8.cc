@@ -468,7 +468,7 @@ DWORD WINAPI
 Breakout (LPVOID lpParam)
 {
 	Sleep(plv8_execution_timeout * 1000);
-	v8::V8::TerminateExecution(plv8_isolate);
+	plv8_isolate->TerminateExecution();
 
 	return 0;
 }
@@ -478,7 +478,7 @@ Breakout (void *d)
 {
 	sleep(plv8_execution_timeout);
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	v8::V8::TerminateExecution(plv8_isolate);
+	plv8_isolate->TerminateExecution();
 
 	return NULL;
 }

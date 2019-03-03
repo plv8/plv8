@@ -7,7 +7,7 @@ Building PLV8 for MacOS or Linux has some specific requirements:
 * Git
 * g++ or clang++
 * Python 2 (for v8)
-* pgk-config (linux only for v8)
+* pkg-config (linux only for v8)
 * libc++-dev (linux only)
 
 ### Downloading Source

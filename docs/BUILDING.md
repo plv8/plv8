@@ -167,3 +167,27 @@ This will build and package the extension for installation.
 To install, you simply need to `unzip` the file created.  The name will depend
 on the version of PLV8 and the version of Postgres.  An example is
 `plv8-2.3.1-postgresql-10-x64.zip`.
+
+# Build FAQ
+
+## pg_config build error / mb.py returns non-zero exit status
+
+If you get this error, you need to install pkg-config (e.g. on Ubuntu, apt-get install pkg-config)
+```
+Traceback (most recent call last):
+  File "tools/dev/v8gen.py", line 304, in <module>
+    sys.exit(gen.main())
+  File "tools/dev/v8gen.py", line 298, in main
+    return self._options.func()
+  File "tools/dev/v8gen.py", line 166, in cmd_gen
+    gn_outdir,
+  File "tools/dev/v8gen.py", line 208, in _call_cmd
+    stderr=subprocess.STDOUT,
+  File "/usr/lib/python2.7/subprocess.py", line 223, in check_output
+    raise CalledProcessError(retcode, cmd, output=output)
+subprocess.CalledProcessError: Command '['/usr/bin/python', '-u', 'tools/mb/mb.py', 'gen', '-f', 'infra/mb/mb_config.pyl', '-m', 'developer_default', '-b', 'x64.release', 'out.gn/x64.release']' returned non-zero exit status 1
+Makefile:35: recipe for target 'build/v8' failed
+make: *** [build/v8] Error 1
+ERROR: command returned 2: make PG_CONFIG=/usr/bin/pg_config all
+```
+

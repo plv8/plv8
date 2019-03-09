@@ -194,9 +194,9 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
     case WJB_BEGIN_OBJECT:
 			obj = v8::Object::New(plv8_isolate);
 			if (container->IsObject()) {
-				container->Set(key, obj);
+				container->Set(key, JsonbIterate(it, obj));
 			} else {
-				container->Set(count, obj);
+				container->Set(count, JsonbIterate(it, obj));
 				count++;
 			}
       break;
@@ -209,9 +209,9 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
     case WJB_BEGIN_ARRAY:
 			obj = v8::Array::New(plv8_isolate);
 			if (container->IsObject()) {
-				container->Set(key, obj);
+				container->Set(key, JsonbIterate(it, obj));
 			} else {
-				container->Set(count, obj);
+				container->Set(count, JsonbIterate(it, obj));
 				count++;
 			}
       break;

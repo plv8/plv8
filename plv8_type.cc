@@ -8,6 +8,9 @@
 #include "plv8.h"
 
 extern "C" {
+#if JSONB_DIRECT_CONVERSION
+#include <time.h>
+#endif
 #if PG_VERSION_NUM >= 90300
 #include "access/htup_details.h"
 #endif
@@ -368,6 +371,22 @@ static void LogType(Local<v8::Value> val, bool asError = true) {
 	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Shared Buffer Array");
 }
 
+static char *
+TimeAs8601 (double millis) {
+	char tmp[100];
+	char *buf = (char *)palloc(25);
+
+	time_t t = (time_t) (millis / 1000);
+	strftime (tmp, 25, "%Y-%m-%dT%H:%M:%S", gmtime(&t));
+
+	double integral;
+	double fractional = modf(millis / 1000, &integral);
+
+	sprintf(buf, "%s.%03dZ", tmp, (int) (fractional * 1000));
+
+	return buf;
+}
+
 static JsonbValue *
 JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorToken type) {
 	JsonbValue val;
@@ -398,9 +417,9 @@ JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorTo
 			val.type = jbvNumeric;
 		}
 	} else if (value->IsDate()) {
-		String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
-		val.val.string.val = ToCStringCopy(utf8);
-		val.val.string.len = utf8.length();
+		double t = value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked();
+		val.val.string.val = TimeAs8601(t);
+		val.val.string.len = 24;
 		val.type = jbvString;
 	} else {
 		LogType(value);

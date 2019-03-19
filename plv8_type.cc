@@ -26,13 +26,8 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
-
-#if PG_VERSION_NUM >= 90400
-#include "utils/jsonb.h"
-#endif
 } // extern "C"
 
-//#define CHECK_INTEGER_OVERFLOW
 
 using namespace v8;
 
@@ -161,6 +156,16 @@ inferred_datum_type(Handle<v8::Value> value)
 }
 
 #if PG_VERSION_NUM >= 90400 && JSONB_DIRECT_CONVERSION
+
+// jsonb types moved in pg10
+#if PG_VERSION_NUM < 100000
+#define jbvString JsonbValue::jbvString
+#define jbvNumeric JsonbValue::jbvNumeric
+#define jbvBool JsonbValue::jbvBool
+#define jbvObject JsonbValue::jbvObject
+#define jbvArray JsonbValue::jbvArray
+#define jbvNull JsonbValue::jbvNull
+#endif
 
 static Local<v8::Value>
 GetJsonbValue(JsonbValue *scalarVal) {

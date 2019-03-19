@@ -391,38 +391,50 @@ static JsonbValue *
 JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorToken type) {
 	JsonbValue val;
 
-	if (value->IsBoolean()) {
-		val.type = jbvBool;
-		val.val.boolean = value->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked();
-	} else if (value->IsNull()) {
-		val.type = jbvNull;
-	} else if (value->IsString()) {
+	// if the token type is a key, the only valid value is jbvString
+	if (type == WJB_KEY) {
 		val.type = jbvString;
 		String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
 		val.val.string.val = ToCStringCopy(utf8);
 		val.val.string.len = utf8.length();
-	} else if (value->IsNumber()) {
-		if (value->IsInt32()) {
-			int32 iv = value->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
-			val.val.numeric = DatumGetNumeric(DirectFunctionCall1(int4_numeric, Int32GetDatum(iv)));
-			val.type = jbvNumeric;
-		} else if (value->IsUint32()) {
-			int64 iv = (int64) value->Uint32Value(plv8_isolate->GetCurrentContext()).ToChecked();
-			val.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric, Int64GetDatum(iv)));
-			val.type = jbvNumeric;
-		} else {
-			float8 fv = (float8) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked();
-
-			val.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric, Float8GetDatum(fv)));
-			val.type = jbvNumeric;
-		}
-	} else if (value->IsDate()) {
-		double t = value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked();
-		val.val.string.val = TimeAs8601(t);
-		val.val.string.len = 24;
-		val.type = jbvString;
 	} else {
-		LogType(value);
+		if (value->IsBoolean()) {
+			val.type = jbvBool;
+			val.val.boolean = value->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked();
+		} else if (value->IsNull()) {
+			val.type = jbvNull;
+		} else if (value->IsString()) {
+			val.type = jbvString;
+			String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+			val.val.string.val = ToCStringCopy(utf8);
+			val.val.string.len = utf8.length();
+		} else if (value->IsNumber()) {
+			if (value->IsInt32()) {
+				int32 iv = value->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+				val.val.numeric = DatumGetNumeric(DirectFunctionCall1(int4_numeric, Int32GetDatum(iv)));
+				val.type = jbvNumeric;
+			} else if (value->IsUint32()) {
+				int64 iv = (int64) value->Uint32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+				val.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric, Int64GetDatum(iv)));
+				val.type = jbvNumeric;
+			} else {
+				float8 fv = (float8) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked();
+
+				val.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric, Float8GetDatum(fv)));
+				val.type = jbvNumeric;
+			}
+		} else if (value->IsDate()) {
+			double t = value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked();
+			val.val.string.val = TimeAs8601(t);
+			val.val.string.len = 24;
+			val.type = jbvString;
+		} else {
+			LogType(value, false);
+			val.type = jbvString;
+			String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+			val.val.string.val = ToCStringCopy(utf8);
+			val.val.string.len = utf8.length();
+		}
 	}
 
 	return pushJsonbValue(pstate, type, &val);

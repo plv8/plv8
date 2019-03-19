@@ -8,6 +8,9 @@
 #include "plv8.h"
 
 extern "C" {
+#if JSONB_DIRECT_CONVERSION
+#include <time.h>
+#endif
 #if PG_VERSION_NUM >= 90300
 #include "access/htup_details.h"
 #endif
@@ -23,13 +26,8 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
-
-#if PG_VERSION_NUM >= 90400
-#include "utils/jsonb.h"
-#endif
 } // extern "C"
 
-//#define CHECK_INTEGER_OVERFLOW
 
 using namespace v8;
 
@@ -156,6 +154,360 @@ inferred_datum_type(Handle<v8::Value> value)
 
 	return InvalidOid;
 }
+
+#if PG_VERSION_NUM >= 90400 && JSONB_DIRECT_CONVERSION
+
+// jsonb types moved in pg10
+#if PG_VERSION_NUM < 100000
+#define jbvString JsonbValue::jbvString
+#define jbvNumeric JsonbValue::jbvNumeric
+#define jbvBool JsonbValue::jbvBool
+#define jbvObject JsonbValue::jbvObject
+#define jbvArray JsonbValue::jbvArray
+#define jbvNull JsonbValue::jbvNull
+#endif
+
+static Local<v8::Value>
+GetJsonbValue(JsonbValue *scalarVal) {
+  if (scalarVal->type == jbvNull) {
+		return Local<v8::Value>::New(plv8_isolate, Null(plv8_isolate));
+  } else if (scalarVal->type == jbvString) {
+    char t[ scalarVal->val.string.len + 1 ];
+    strncpy(t, scalarVal->val.string.val, scalarVal->val.string.len);
+    t[ scalarVal->val.string.len ] = '\0';
+
+		return Local<v8::Value>::New(plv8_isolate, String::NewFromUtf8(plv8_isolate, t));
+  } else if (scalarVal->type == jbvNumeric) {
+		return Local<v8::Value>::New(plv8_isolate, Number::New(plv8_isolate, DatumGetFloat8(DirectFunctionCall1(numeric_float8, PointerGetDatum(scalarVal->val.numeric)))));
+  } else if (scalarVal->type == jbvBool) {
+		return Local<v8::Value>::New(plv8_isolate, Boolean::New(plv8_isolate, scalarVal->val.boolean));
+  } else {
+    elog(ERROR, "unknown jsonb scalar type");
+    return Local<v8::Value>::New(plv8_isolate, Null(plv8_isolate));
+  }
+}
+
+static Local<v8::Object>
+JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
+  JsonbValue val;
+	Local<v8::Value> out;
+	int32 count = 0;
+  JsonbIteratorToken token;
+	Local<v8::Value> key;
+	Local<v8::Object> obj;
+
+  token = JsonbIteratorNext(it, &val, false);
+  while (token != WJB_DONE) {
+    switch (token) {
+    case WJB_BEGIN_OBJECT:
+			obj = v8::Object::New(plv8_isolate);
+			if (container->IsArray()) {
+				container->Set(count, JsonbIterate(it, obj));
+			} else {
+				container->Set(key, JsonbIterate(it, obj));
+				count++;
+			}
+      break;
+
+    case WJB_END_OBJECT:
+      return container;
+
+      break;
+
+    case WJB_BEGIN_ARRAY:
+			obj = v8::Array::New(plv8_isolate);
+			if (container->IsArray()) {
+				container->Set(count, JsonbIterate(it, obj));
+			} else {
+				container->Set(key, JsonbIterate(it, obj));
+				count++;
+			}
+      break;
+
+    case WJB_END_ARRAY:
+      return container;
+
+      break;
+
+    case WJB_KEY:
+			key = GetJsonbValue(&val);
+
+      break;
+
+    case WJB_VALUE:
+      // object value
+			container->Set(key, GetJsonbValue(&val));
+      break;
+
+    case WJB_ELEM:
+      // array element
+			container->Set(count, GetJsonbValue(&val));
+			count++;
+      break;
+
+    case WJB_DONE:
+      return container;
+      break;
+
+    default:
+      elog(ERROR, "unknown jsonb iterator value");
+    }
+
+    token = JsonbIteratorNext(it, &val, false);
+  }
+
+  return container;
+}
+
+static Local<Object>
+ConvertJsonb(JsonbContainer *in) {
+	JsonbValue val;
+	JsonbIterator *it = JsonbIteratorInit(in);
+	JsonbIteratorToken token = JsonbIteratorNext(&it, &val, false);
+
+	Local<Object> container;
+
+	if (token == WJB_BEGIN_ARRAY) {
+		container = v8::Array::New(plv8_isolate);
+	} else {
+		container = v8::Object::New(plv8_isolate);
+	}
+
+	return JsonbIterate(&it, container);
+}
+
+static JsonbValue *
+JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object);
+static JsonbValue *
+JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object);
+
+static void LogType(Local<v8::Value> val, bool asError = true) {
+	if( val->IsUndefined() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Undefined");
+	if( val->IsNull() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Null");
+	if( val->IsTrue() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: True");
+	if( val->IsFalse() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: False");
+	if( val->IsName() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Name");
+	if( val->IsString() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: String");
+	if( val->IsSymbol() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Symbol");
+	if( val->IsFunction() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Function");
+	if( val->IsArray() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Array");
+	if( val->IsObject() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Object");
+	if( val->IsBoolean() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Boolean");
+	if( val->IsNumber() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Number");
+	if( val->IsExternal() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: External");
+	if( val->IsInt32() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Int32");
+	if( val->IsUint32() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Uint32");
+	if( val->IsDate() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Date");
+	if( val->IsArgumentsObject() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Arguments Object");
+	if( val->IsBooleanObject() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Boolean Object");
+	if( val->IsNumberObject() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Number Object");
+	if( val->IsStringObject() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: String Object");
+	if( val->IsSymbolObject() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Symbol Object");
+	if( val->IsNativeError() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Native Error");
+	if( val->IsRegExp() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: RegExp");
+	if( val->IsGeneratorFunction() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Generator Function");
+	if( val->IsGeneratorObject() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Generator Object");
+	if( val->IsPromise() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Promise");
+	if( val->IsMap() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Map");
+	if( val->IsSet() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Set");
+	if( val->IsMapIterator() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Map Iterator");
+	if( val->IsSetIterator() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Set Iterator");
+	if( val->IsWeakMap() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Weak Map");
+	if( val->IsWeakSet() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Weak Set");
+	if( val->IsArrayBuffer() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Array Buffer");
+	if( val->IsArrayBufferView() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Array Buffer View");
+	if( val->IsTypedArray() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Typed Array");
+	if( val->IsUint8Array() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Uint8 Array");
+	if( val->IsUint8ClampedArray() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Uint8 Clamped Array");
+	if( val->IsInt8Array() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Int8 Array");
+	if( val->IsUint16Array() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Uint16 Array");
+	if( val->IsInt16Array() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Int16 Array");
+	if( val->IsUint32Array() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Uint32 Array");
+	if( val->IsInt32Array() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Int32 Array");
+	if( val->IsFloat32Array() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Float32 Array");
+	if( val->IsFloat64Array() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Float64 Array");
+	if( val->IsDataView() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Data View");
+	if( val->IsSharedArrayBuffer() )
+	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Shared Buffer Array");
+}
+
+static char *
+TimeAs8601 (double millis) {
+	char tmp[100];
+	char *buf = (char *)palloc(25);
+
+	time_t t = (time_t) (millis / 1000);
+	strftime (tmp, 25, "%Y-%m-%dT%H:%M:%S", gmtime(&t));
+
+	double integral;
+	double fractional = modf(millis / 1000, &integral);
+
+	sprintf(buf, "%s.%03dZ", tmp, (int) (fractional * 1000));
+
+	return buf;
+}
+
+static JsonbValue *
+JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorToken type) {
+	JsonbValue val;
+
+	// if the token type is a key, the only valid value is jbvString
+	if (type == WJB_KEY) {
+		val.type = jbvString;
+		String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+		val.val.string.val = ToCStringCopy(utf8);
+		val.val.string.len = utf8.length();
+	} else {
+		if (value->IsBoolean()) {
+			val.type = jbvBool;
+			val.val.boolean = value->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked();
+		} else if (value->IsNull()) {
+			val.type = jbvNull;
+		} else if (value->IsString()) {
+			val.type = jbvString;
+			String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+			val.val.string.val = ToCStringCopy(utf8);
+			val.val.string.len = utf8.length();
+		} else if (value->IsNumber()) {
+			if (value->IsInt32()) {
+				int32 iv = value->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+				val.val.numeric = DatumGetNumeric(DirectFunctionCall1(int4_numeric, Int32GetDatum(iv)));
+				val.type = jbvNumeric;
+			} else if (value->IsUint32()) {
+				int64 iv = (int64) value->Uint32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+				val.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric, Int64GetDatum(iv)));
+				val.type = jbvNumeric;
+			} else {
+				float8 fv = (float8) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked();
+
+				val.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric, Float8GetDatum(fv)));
+				val.type = jbvNumeric;
+			}
+		} else if (value->IsDate()) {
+			double t = value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked();
+			val.val.string.val = TimeAs8601(t);
+			val.val.string.len = 24;
+			val.type = jbvString;
+		} else {
+			LogType(value, false);
+			val.type = jbvString;
+			String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+			val.val.string.val = ToCStringCopy(utf8);
+			val.val.string.len = utf8.length();
+		}
+	}
+
+	return pushJsonbValue(pstate, type, &val);
+}
+
+static JsonbValue *
+JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object) {
+	JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_ARRAY, NULL);
+	Local<v8::Array> a = Local<v8::Array>::Cast(object);
+	for (int32 i = 0; i < a->Length(); i++) {
+		Local<v8::Value> o = a->Get(i);
+
+		if (o->IsArray()) {
+			val = JsonbArrayFromArray(pstate, Local<v8::Array>::Cast(o));
+		} else if (o->IsObject()) {
+			val = JsonbObjectFromObject(pstate, Local<v8::Object>::Cast(o));
+		} else {
+			val = JsonbFromValue(pstate, o, WJB_ELEM);
+		}
+	}
+
+	val = pushJsonbValue(pstate, WJB_END_ARRAY, NULL);
+
+	return val;
+}
+
+static JsonbValue *
+JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object) {
+	JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_OBJECT, NULL);
+	Local<Array> arr = object->GetOwnPropertyNames();
+
+	for (int32 i = 0; i < arr->Length(); i++) {
+		Local<v8::Value> v = arr->Get(i);
+		val = JsonbFromValue(pstate, v, WJB_KEY);
+		Local<v8::Value> o = object->Get(v);
+
+		if (o->IsDate()) {
+			val = JsonbFromValue(pstate, o, WJB_VALUE);
+		} else if (o->IsArray()) {
+			val = JsonbArrayFromArray(pstate, Local<v8::Array>::Cast(o));
+		} else if (o->IsObject()) {
+			val = JsonbObjectFromObject(pstate, Local<v8::Object>::Cast(o));
+		} else {
+			val = JsonbFromValue(pstate, o, WJB_VALUE);
+		}
+	}
+	val = pushJsonbValue(pstate, WJB_END_OBJECT, NULL);
+	return val;
+}
+
+static Jsonb *
+ConvertObject(Local<v8::Object> object) {
+  JsonbParseState *pstate = NULL;
+  JsonbValue *val;
+
+	if (object->IsArray()) {
+		val = JsonbArrayFromArray(&pstate, object);
+	} else if (object->IsObject()) {
+		val = JsonbObjectFromObject(&pstate, object);
+	} else {
+		val = pushJsonbValue(&pstate, WJB_BEGIN_ARRAY, NULL);
+		val = JsonbFromValue(&pstate, object, WJB_ELEM);
+		val = pushJsonbValue(&pstate, WJB_END_ARRAY, NULL);
+	}
+
+  return JsonbValueToJsonb(val);
+}
+#endif
 
 static Local<Object>
 CreateExternalArray(void *data, plv8_external_array_type array_type,
@@ -364,6 +716,16 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 		}
 #if PG_VERSION_NUM >= 90400
 	case JSONBOID:
+#if JSONB_DIRECT_CONVERSION
+		{
+			Jsonb *obj = ConvertObject(Local<v8::Object>::Cast(value));
+#if PG_VERSION_NUM < 110000
+			PG_RETURN_JSONB(DatumGetJsonb(obj));
+#else
+			PG_RETURN_JSONB_P(DatumGetJsonbP(obj));
+#endif // PG_VERSION_NUM < 110000
+		}
+#else // JSONB_DIRECT_CONVERSION
 		if (value->IsObject() || value->IsArray())
 		{
 			JSONObject JSON;
@@ -378,6 +740,7 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			return (Datum) DatumGetJsonbP(DirectFunctionCall1(jsonb_in, (Datum) (char *) str));
 #endif
 		}
+#endif // JSONB_DIRECT_CONVERSION
 		break;
 #endif
 #if PG_VERSION_NUM >= 90200
@@ -592,9 +955,14 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 #if PG_VERSION_NUM >= 90400
 	case JSONBOID:
 	{
+#if JSONB_DIRECT_CONVERSION
+		Jsonb *jsonb = (Jsonb *) PG_DETOAST_DATUM(datum);
+		Local<v8::Value> result = ConvertJsonb(&jsonb->root);
+#else
 		Local<v8::Value>	jsonString = ToString(datum, type);
 		JSONObject JSON;
 		Local<v8::Value> result = Local<v8::Value>::New(plv8_isolate, JSON.Parse(jsonString));
+#endif
 
 		return result;
 	}

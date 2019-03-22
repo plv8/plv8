@@ -1558,26 +1558,13 @@ plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args)
 	Local<v8::Value>	result;
 	Local<v8::Object> obj = v8::Object::New(plv8_isolate);
 
-	Local<v8::Object> v8obj = v8::Object::New(plv8_isolate);
+	Local<v8::Value> total = Local<v8::Value>::New(plv8_isolate, Number::New(plv8_isolate, v8_heap_stats.total_heap_size()));
+	Local<v8::Value> used = Local<v8::Value>::New(plv8_isolate, Number::New(plv8_isolate, v8_heap_stats.used_heap_size()));
+	Local<v8::Value> external = Local<v8::Value>::New(plv8_isolate, Number::New(plv8_isolate, v8_heap_stats.external_memory()));
 
-	Local<v8::Value> total = Local<v8::Value>::New(plv8_isolate, Uint32::New(plv8_isolate, v8_heap_stats.total_heap_size()));
-	Local<v8::Value> used = Local<v8::Value>::New(plv8_isolate, Uint32::New(plv8_isolate, v8_heap_stats.used_heap_size()));
-	Local<v8::Value> external = Local<v8::Value>::New(plv8_isolate, Uint32::New(plv8_isolate, v8_heap_stats.external_memory()));
-
-	v8obj->Set(String::NewFromUtf8(plv8_isolate, "total_heap_size"), total);
-	v8obj->Set(String::NewFromUtf8(plv8_isolate, "used_heap_size"), used);
-	v8obj->Set(String::NewFromUtf8(plv8_isolate, "external_memory"), external);
-
-	// pg memory usage
-	MemoryContextCounters totals;
-	(*CurrentMemoryContext->methods->stats) (CurrentMemoryContext, 0, 0, &totals);
-
-	Local<v8::Object> pgobj = v8::Object::New(plv8_isolate);
-	pgobj->Set(String::NewFromUtf8(plv8_isolate, "totalspace"), Uint32::New(plv8_isolate, totals.totalspace));
-	pgobj->Set(String::NewFromUtf8(plv8_isolate, "freespace"), Uint32::New(plv8_isolate, totals.freespace));
-
-	obj->Set(String::NewFromUtf8(plv8_isolate, "v8"), v8obj);
-	obj->Set(String::NewFromUtf8(plv8_isolate, "postgres"), pgobj);
+	obj->Set(String::NewFromUtf8(plv8_isolate, "total_heap_size"), total);
+	obj->Set(String::NewFromUtf8(plv8_isolate, "used_heap_size"), used);
+	obj->Set(String::NewFromUtf8(plv8_isolate, "external_memory"), external);
 
 	result = obj;
 	args.GetReturnValue().Set(result);

@@ -16,6 +16,7 @@ extern "C" {
 #include "parser/parse_type.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "nodes/memnodes.h"
 } // extern "C"
 
 using namespace v8;
@@ -46,6 +47,7 @@ static void plv8_WinGetFuncArgCurrent(const FunctionCallbackInfo<v8::Value>& arg
 static void plv8_QuoteLiteral(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_QuoteNullable(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_QuoteIdent(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args);
 
 /*
  * Window function API allows to store partition-local memory, but
@@ -233,6 +235,7 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	SetCallback(plv8, "quote_literal", plv8_QuoteLiteral, attrFull);
 	SetCallback(plv8, "quote_nullable", plv8_QuoteNullable, attrFull);
 	SetCallback(plv8, "quote_ident", plv8_QuoteIdent, attrFull);
+	SetCallback(plv8, "memory_usage", plv8_MemoryUsage, attrFull);
 
 	plv8->SetInternalFieldCount(PLV8_INTNL_MAX);
 }
@@ -1543,4 +1546,39 @@ plv8_QuoteIdent(const FunctionCallbackInfo<v8::Value>& args)
 	PG_END_TRY();
 
 	args.GetReturnValue().Set(ToString(result));
+}
+
+static void
+plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args)
+{
+	// V8 memory usage
+  HeapStatistics v8_heap_stats;
+  plv8_isolate->GetHeapStatistics(&v8_heap_stats);
+
+	Local<v8::Value>	result;
+	Local<v8::Object> obj = v8::Object::New(plv8_isolate);
+
+	Local<v8::Object> v8obj = v8::Object::New(plv8_isolate);
+
+	Local<v8::Value> total = Local<v8::Value>::New(plv8_isolate, Uint32::New(plv8_isolate, v8_heap_stats.total_heap_size()));
+	Local<v8::Value> used = Local<v8::Value>::New(plv8_isolate, Uint32::New(plv8_isolate, v8_heap_stats.used_heap_size()));
+	Local<v8::Value> external = Local<v8::Value>::New(plv8_isolate, Uint32::New(plv8_isolate, v8_heap_stats.external_memory()));
+
+	v8obj->Set(String::NewFromUtf8(plv8_isolate, "total_heap_size"), total);
+	v8obj->Set(String::NewFromUtf8(plv8_isolate, "used_heap_size"), used);
+	v8obj->Set(String::NewFromUtf8(plv8_isolate, "external_memory"), external);
+
+	// pg memory usage
+	MemoryContextCounters totals;
+	(*CurrentMemoryContext->methods->stats) (CurrentMemoryContext, 0, 0, &totals);
+
+	Local<v8::Object> pgobj = v8::Object::New(plv8_isolate);
+	pgobj->Set(String::NewFromUtf8(plv8_isolate, "totalspace"), Uint32::New(plv8_isolate, totals.totalspace));
+	pgobj->Set(String::NewFromUtf8(plv8_isolate, "freespace"), Uint32::New(plv8_isolate, totals.freespace));
+
+	obj->Set(String::NewFromUtf8(plv8_isolate, "v8"), v8obj);
+	obj->Set(String::NewFromUtf8(plv8_isolate, "postgres"), pgobj);
+
+	result = obj;
+	args.GetReturnValue().Set(result);
 }

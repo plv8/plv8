@@ -52,7 +52,7 @@ ifdef BIGINT_GRACEFUL
 endif
 
 # enable direct jsonb conversion by default
-CCFLAGS += -DJSONB_DIRECT_CONVERSION -g
+CCFLAGS += -DJSONB_DIRECT_CONVERSION 
 
 CCFLAGS += -I$(AUTOV8_DIR)/include -I$(AUTOV8_DIR)
 # We're gonna build static link.  Rip it out after include Makefile

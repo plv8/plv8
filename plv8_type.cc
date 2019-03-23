@@ -26,6 +26,8 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
+#include "nodes/memnodes.h"
+#include "utils/memutils.h"
 } // extern "C"
 
 
@@ -492,6 +494,25 @@ JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object) {
 
 static Jsonb *
 ConvertObject(Local<v8::Object> object) {
+	// create a new memory context for conversion
+	MemoryContext oldcontext = CurrentMemoryContext;
+	MemoryContext conversion_context;
+
+#if PG_VERSION_NUM < 110000
+	conversion_context = AllocSetContextCreate(
+						CurrentMemoryContext,
+						"JSONB Conversion Context",
+						ALLOCSET_SMALL_MINSIZE,
+						ALLOCSET_SMALL_INITSIZE,
+						ALLOCSET_SMALL_MAXSIZE);
+#else
+	conversion_context = AllocSetContextCreate(CurrentMemoryContext,
+						"JSONB Conversion Context",
+						ALLOCSET_SMALL_SIZES);
+#endif
+
+	MemoryContextSwitchTo(conversion_context);
+
   JsonbParseState *pstate = NULL;
   JsonbValue *val;
 
@@ -505,7 +526,11 @@ ConvertObject(Local<v8::Object> object) {
 		val = pushJsonbValue(&pstate, WJB_END_ARRAY, NULL);
 	}
 
-  return JsonbValueToJsonb(val);
+	MemoryContextSwitchTo(oldcontext);
+
+	Jsonb *ret = JsonbValueToJsonb(val);
+	MemoryContextDelete(conversion_context);
+  return ret;
 }
 #endif
 

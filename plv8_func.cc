@@ -115,6 +115,18 @@ Persistent<ObjectTemplate> PlanTemplate;
 Persistent<ObjectTemplate> CursorTemplate;
 Persistent<ObjectTemplate> WindowObjectTemplate;
 
+static text *
+charToText(char *string)
+{
+	int len = strlen(string);
+	text *result = (text *) palloc(len + 1 + VARHDRSZ);
+
+	SET_VARSIZE(result, len + VARHDRSZ);
+	memcpy(VARDATA(result), string, len + 1);
+
+	return result;
+}
+
 
 static Handle<v8::Value>
 SPIResultToValue(int status)
@@ -1049,9 +1061,46 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 	CString				signature(args[0]);
 	Local<Function>		func;
 
+	FunctionCallInfoData fake_fcinfo;
+	FmgrInfo	flinfo;
+	text *arg;
+
+	char perm[16];
+	strcpy(perm, "EXECUTE");
+	arg = charToText(perm);
+	Oid funcoid;
+
 	PG_TRY();
 	{
-		func = find_js_function_by_name(signature.str());
+		if (strchr(signature, '(') == NULL)
+			funcoid = DatumGetObjectId(
+					DirectFunctionCall1(regprocin, CStringGetDatum(signature.str())));
+		else
+			funcoid = DatumGetObjectId(
+					DirectFunctionCall1(regprocedurein, CStringGetDatum(signature.str())));
+
+		MemSet(&fake_fcinfo, 0, sizeof(fake_fcinfo));
+		MemSet(&flinfo, 0, sizeof(flinfo));
+		fake_fcinfo.flinfo = &flinfo;
+		flinfo.fn_oid = InvalidOid;
+		flinfo.fn_mcxt = CurrentMemoryContext;
+		fake_fcinfo.nargs = 2;
+		fake_fcinfo.arg[0] = ObjectIdGetDatum(funcoid);
+		fake_fcinfo.arg[1] = CStringGetDatum(arg);
+
+		Datum ret = has_function_privilege_id(&fake_fcinfo);
+
+		if (ret == 0) {
+			elog(WARNING, "failed to find or no permission for js function %s", signature.str());
+		} else {
+			if (DatumGetBool(ret)) {
+				func = find_js_function(funcoid);
+				if (func.IsEmpty())
+					elog(ERROR, "javascript function is not found for \"%s\"", signature.str());
+			} else {
+				elog(WARNING, "no permission to execute js function %s", signature.str());
+			}
+		}
 	}
 	PG_CATCH();
 	{

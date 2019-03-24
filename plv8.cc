@@ -1421,28 +1421,6 @@ find_js_function(Oid fn_oid)
 }
 
 /*
- * The signature can be either of regproc or regprocedure format.
- */
-Local<Function>
-find_js_function_by_name(const char *signature)
-{
-	Oid					funcoid;
-	Local<Function>		func;
-
-	if (strchr(signature, '(') == NULL)
-		funcoid = DatumGetObjectId(
-				DirectFunctionCall1(regprocin, CStringGetDatum(signature)));
-	else
-		funcoid = DatumGetObjectId(
-				DirectFunctionCall1(regprocedurein, CStringGetDatum(signature)));
-	func = find_js_function(funcoid);
-	if (func.IsEmpty())
-		elog(ERROR, "javascript function is not found for \"%s\"", signature);
-
-	return func;
-}
-
-/*
  * NOTICE: the returned buffer could be an internal static buffer.
  */
 const char *
@@ -1568,7 +1546,7 @@ GetGlobalContext(Persistent<Context>& global_context)
 					elog(WARNING, "failed to find js function %s", plv8_start_proc);
 				} else {
 					if (DatumGetBool(ret)) {
-						func = find_js_function_by_name(plv8_start_proc);
+						func = find_js_function(funcoid);
 					} else {
 						elog(WARNING, "no permission to execute js function %s", plv8_start_proc);
 					}

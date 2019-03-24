@@ -1,5 +1,13 @@
 Revision history for plv8
 
+2.3.10      2019-03-23
+            - add direct jsonb conversion option
+            - add memory context for jsonb conversion
+
+2.3.9       2018-12-09
+            - add tuple freeing to execute
+            - add XCode 10 fixes
+
 2.3.8       2018-09-28
             - earlier cleanup of spi
             - support in v8 of xcode 10

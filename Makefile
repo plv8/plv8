@@ -47,6 +47,10 @@ ifdef EXECUTION_TIMEOUT
 	CCFLAGS += -DEXECUTION_TIMEOUT
 endif
 
+ifdef JSONB_DIRECT_CONVERSION
+	CCFLAGS += -DJSONB_DIRECT_CONVERSION
+endif
+
 CCFLAGS += -I$(AUTOV8_DIR)/include -I$(AUTOV8_DIR)
 # We're gonna build static link.  Rip it out after include Makefile
 SHLIB_LINK := $(filter-out -lv8, $(SHLIB_LINK))

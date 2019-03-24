@@ -14,3 +14,10 @@ CREATE OR REPLACE FUNCTION bigint_failing(val BIGINT)
     return val - 1;
    $$ LANGUAGE plv8 STABLE STRICT;
 SELECT bigint_failing(9223372036854775807);
+
+-- BigInt as Numeric
+CREATE OR REPLACE FUNCTION bigint_numeric(a INT8, b INT8)
+   RETURNS NUMERIC AS $$
+    return a ** b;
+   $$ LANGUAGE plv8 STABLE STRICT;
+SELECT bigint_numeric(20, 200);

@@ -24,3 +24,14 @@ CREATE OR REPLACE FUNCTION bigint_failing(val BIGINT)
 SELECT bigint_failing(9223372036854775807);
 ERROR:  TypeError: Cannot mix BigInt and other types, use explicit conversions
 CONTEXT:  bigint_failing() LINE 2:     return val - 1;
+-- BigInt as Numeric
+CREATE OR REPLACE FUNCTION bigint_numeric(a INT8, b INT8)
+   RETURNS NUMERIC AS $$
+    return a ** b;
+   $$ LANGUAGE plv8 STABLE STRICT;
+SELECT bigint_numeric(20, 200);
+                                                                                                                            bigint_numeric                                                                                                                             
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 160693804425899027554196209234116260252220299378279283530137600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+(1 row)
+

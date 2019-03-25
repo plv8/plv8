@@ -28,6 +28,7 @@ extern "C" {
 #include "utils/typcache.h"
 #include "nodes/memnodes.h"
 #include "utils/memutils.h"
+#include "fmgr.h"
 } // extern "C"
 
 
@@ -669,6 +670,10 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			return Float8GetDatum((float8) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
 		break;
 	case NUMERICOID:
+		if (value->IsBigInt()) {
+			String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+			return DirectFunctionCall3(numeric_in, (Datum) *utf8, NULL, Int32GetDatum((int32) -1));
+		}
 		if (value->IsNumber())
 			return DirectFunctionCall1(float8_numeric,
 					Float8GetDatum((float8) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked()));

@@ -1,5 +1,9 @@
 Revision history for plv8
 
+2.3.11	    2019-03-24
+            - add permissions check for find-function
+            - add better upgrade script
+
 2.3.10      2019-03-23
             - add direct jsonb conversion option
             - add memory context for jsonb conversion

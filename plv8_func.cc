@@ -213,7 +213,7 @@ JSONObject::Parse(Handle<v8::Value> str)
 	if (parse_func.IsEmpty())
 		throw js_error("JSON.parse() not found");
 
-	return parse_func->Call(m_json, 1, &str);
+	return parse_func->Call(plv8_isolate->GetCurrentContext(), m_json, 1, &str).ToLocalChecked();
 }
 
 /*
@@ -228,7 +228,7 @@ JSONObject::Stringify(Handle<v8::Value> val)
 	if (stringify_func.IsEmpty())
 		throw js_error("JSON.stringify() not found");
 
-	return stringify_func->Call(m_json, 1, &val);
+	return stringify_func->Call(plv8_isolate->GetCurrentContext(), m_json, 1, &val).ToLocalChecked();
 }
 
 void
@@ -611,7 +611,7 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 	}
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, PlanTemplate);
 
-	Local<v8::Object> result = templ->NewInstance();
+	Local<v8::Object> result = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 	result->SetInternalField(0, External::New(plv8_isolate, saved));
 	result->SetInternalField(1, External::New(plv8_isolate, parstate));
 
@@ -733,7 +733,7 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 	}
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, CursorTemplate);
 
-	Local<v8::Object> result = templ->NewInstance();
+	Local<v8::Object> result = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 	result->SetInternalField(0, cname);
 
 	args.GetReturnValue().Set(result);
@@ -1039,7 +1039,7 @@ plv8_Subtransaction(const FunctionCallbackInfo<v8::Value>& args)
 
 	Handle<v8::Value> emptyargs[1] = {};
 	TryCatch try_catch(plv8_isolate);
-	Handle<v8::Value> result = func->Call(func, 0, emptyargs);
+	Handle<v8::Value> result = func->Call(plv8_isolate->GetCurrentContext(), func, 0, emptyargs).ToLocalChecked();
 
 	subtran.exit(!result.IsEmpty());
 
@@ -1155,7 +1155,7 @@ plv8_GetWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 	}
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, WindowObjectTemplate);
 
-	Local<v8::Object> js_winobj = templ->NewInstance();
+	Local<v8::Object> js_winobj = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 	js_winobj->SetInternalField(0, fcinfo_value);
 
 	args.GetReturnValue().Set(js_winobj);

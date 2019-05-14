@@ -300,8 +300,8 @@ _PG_init(void)
 #if (V8_MAJOR_VERSION == 4 && V8_MINOR_VERSION >= 6) || V8_MAJOR_VERSION >= 5
 	V8::InitializeExternalStartupData("plv8");
 #endif
-	Platform* platform = platform::CreateDefaultPlatform();
-	V8::InitializePlatform(platform);
+	std::unique_ptr<v8::Platform> platform = v8::platform::NewDefaultPlatform();
+	V8::InitializePlatform(platform.get());
 	V8::Initialize();
 	if (plv8_v8_flags != NULL) {
 	      V8::SetFlagsFromString(plv8_v8_flags, strlen(plv8_v8_flags));
@@ -425,8 +425,8 @@ common_pl_inline_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 		char			   *source_text = codeblock->source_text;
 
 		Persistent<Context>	global_context;
-		GetGlobalContext(global_context);
-		Local<Function>	function = CompileFunction(global_context,
+		//GetGlobalContext(global_context);
+		Local<Function>	function = CompileFunction(&plv8_isolate->GetCurrentContext(),
 										NULL, 0, NULL,
 										source_text, false, false, dialect);
 		plv8_exec_env	   *xenv = CreateExecEnv(function);
@@ -534,7 +534,7 @@ DoCall(Handle<Function> fn, Handle<Object> receiver,
 #endif
 #endif
 
-	Local<v8::Value> result = fn->Call(receiver, nargs, args);
+	Local<v8::Value> result = fn->Call(plv8_isolate->GetCurrentContext(), receiver, nargs, args).ToLocalChecked();
 	int	status = SPI_finish();
 
 #ifdef EXECUTION_TIMEOUT
@@ -1111,7 +1111,7 @@ CreateExecEnv(Persistent<Function>& function)
 		recv_templ.Reset(plv8_isolate, templ);
 	}
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, recv_templ);
-	Local<Object> obj = templ->NewInstance();
+	Local<Object> obj = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 	Local<Function> f = Local<Function>::New(plv8_isolate, function);
 	obj->SetInternalField(0, f);
 	xenv->recv.Reset(plv8_isolate, obj);
@@ -1147,7 +1147,7 @@ CreateExecEnv(Handle<Function> function)
 		recv_templ.Reset(plv8_isolate, templ);
 	}
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, recv_templ);
-	Local<Object> obj = templ->NewInstance();
+	Local<Object> obj = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 	Local<Function> f = Local<Function>::New(plv8_isolate, function);
 	obj->SetInternalField(0, f);
 	xenv->recv.Reset(plv8_isolate, obj);
@@ -1214,7 +1214,7 @@ CompileDialect(const char *src, Dialect dialect)
 	Handle<v8::Value>	args[nargs];
 
 	args[0] = ToString(src);
-	Local<v8::Value>	value = func->Call(compiler, nargs, args);
+	Local<v8::Value>	value = func->Call(plv8_isolate->GetCurrentContext(), compiler, nargs, args).ToLocalChecked();
 
 	if (value.IsEmpty())
 		throw js_error(try_catch);
@@ -1775,7 +1775,7 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 
 	if (!m_is_scalar)
 	{
-		Handle<Array> names = obj->GetPropertyNames();
+		Handle<Array> names = obj->GetPropertyNames(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 
 		for (int c = 0; c < m_tupdesc->natts; c++)
 		{

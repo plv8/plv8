@@ -472,7 +472,7 @@ JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object) {
 static JsonbValue *
 JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object) {
 	JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_OBJECT, NULL);
-	Local<Array> arr = object->GetOwnPropertyNames();
+	Local<Array> arr = object->GetOwnPropertyNames(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 
 	for (int32 i = 0; i < arr->Length(); i++) {
 		Local<v8::Value> v = arr->Get(i);
@@ -938,10 +938,10 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 		return Number::New(plv8_isolate, DatumGetFloat8(
 			DirectFunctionCall1(numeric_float8, datum)));
 	case DATEOID:
-		return Date::New(plv8_isolate, DateToEpoch(DatumGetDateADT(datum)));
+		return Date::New(plv8_isolate->GetCurrentContext(), DateToEpoch(DatumGetDateADT(datum))).ToLocalChecked();
 	case TIMESTAMPOID:
 	case TIMESTAMPTZOID:
-		return Date::New(plv8_isolate, TimestampTzToEpoch(DatumGetTimestampTz(datum)));
+		return Date::New(plv8_isolate->GetCurrentContext(), TimestampTzToEpoch(DatumGetTimestampTz(datum))).ToLocalChecked();
 	case TEXTOID:
 	case VARCHAROID:
 	case BPCHAROID:

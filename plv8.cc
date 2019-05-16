@@ -425,8 +425,8 @@ common_pl_inline_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 		char			   *source_text = codeblock->source_text;
 
 		Persistent<Context>	global_context;
-		//GetGlobalContext(global_context);
-		Local<Function>	function = CompileFunction(&plv8_isolate->GetCurrentContext(),
+		GetGlobalContext(global_context);
+		Local<Function>	function = CompileFunction(global_context,
 										NULL, 0, NULL,
 										source_text, false, false, dialect);
 		plv8_exec_env	   *xenv = CreateExecEnv(function);

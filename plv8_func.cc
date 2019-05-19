@@ -196,9 +196,10 @@ JSONObject::JSONObject()
 {
 	Handle<Context> context = plv8_isolate->GetCurrentContext();
 	Handle<Object> global = context->Global();
-	m_json = global->Get(String::NewFromUtf8(plv8_isolate, "JSON", String::kInternalizedString))->ToObject(plv8_isolate->GetCurrentContext()).ToLocalChecked();
-	if (m_json.IsEmpty())
+	MaybeLocal<v8::Object> maybeJson = global->Get(String::NewFromUtf8(plv8_isolate, "JSON", String::kInternalizedString))->ToObject(plv8_isolate->GetCurrentContext());
+	if (maybeJson.IsEmpty())
 		throw js_error("JSON not found");
+	m_json = maybeJson.ToLocalChecked();
 }
 
 /*
@@ -213,7 +214,11 @@ JSONObject::Parse(Handle<v8::Value> str)
 	if (parse_func.IsEmpty())
 		throw js_error("JSON.parse() not found");
 
-	return parse_func->Call(m_json, 1, &str);
+	TryCatch try_catch(plv8_isolate);
+	MaybeLocal<v8::Value> value = parse_func->Call(plv8_isolate->GetCurrentContext(), m_json, 1, &str);
+	if (value.IsEmpty())
+		throw js_error(try_catch);
+	return value.ToLocalChecked();
 }
 
 /*
@@ -228,7 +233,11 @@ JSONObject::Stringify(Handle<v8::Value> val)
 	if (stringify_func.IsEmpty())
 		throw js_error("JSON.stringify() not found");
 
-	return stringify_func->Call(m_json, 1, &val);
+	TryCatch try_catch(plv8_isolate);
+	MaybeLocal<v8::Value> value = stringify_func->Call(plv8_isolate->GetCurrentContext(), m_json, 1, &val);
+	if (value.IsEmpty())
+		throw js_error(try_catch);
+	return value.ToLocalChecked();
 }
 
 void
@@ -611,7 +620,7 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 	}
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, PlanTemplate);
 
-	Local<v8::Object> result = templ->NewInstance();
+	Local<v8::Object> result = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 	result->SetInternalField(0, External::New(plv8_isolate, saved));
 	result->SetInternalField(1, External::New(plv8_isolate, parstate));
 
@@ -733,7 +742,7 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 	}
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, CursorTemplate);
 
-	Local<v8::Object> result = templ->NewInstance();
+	Local<v8::Object> result = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 	result->SetInternalField(0, cname);
 
 	args.GetReturnValue().Set(result);
@@ -1039,13 +1048,13 @@ plv8_Subtransaction(const FunctionCallbackInfo<v8::Value>& args)
 
 	Handle<v8::Value> emptyargs[1] = {};
 	TryCatch try_catch(plv8_isolate);
-	Handle<v8::Value> result = func->Call(func, 0, emptyargs);
+	MaybeLocal<v8::Value> result = func->Call(plv8_isolate->GetCurrentContext(), func, 0, emptyargs);
 
 	subtran.exit(!result.IsEmpty());
 
 	if (result.IsEmpty())
 		throw js_error(try_catch);
-	args.GetReturnValue().Set(result);
+	args.GetReturnValue().Set(result.ToLocalChecked());
 }
 
 /*
@@ -1155,7 +1164,7 @@ plv8_GetWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 	}
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, WindowObjectTemplate);
 
-	Local<v8::Object> js_winobj = templ->NewInstance();
+	Local<v8::Object> js_winobj = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 	js_winobj->SetInternalField(0, fcinfo_value);
 
 	args.GetReturnValue().Set(js_winobj);

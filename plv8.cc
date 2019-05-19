@@ -300,14 +300,17 @@ _PG_init(void)
 #if (V8_MAJOR_VERSION == 4 && V8_MINOR_VERSION >= 6) || V8_MAJOR_VERSION >= 5
 	V8::InitializeExternalStartupData("plv8");
 #endif
-	std::unique_ptr<v8::Platform> platform = v8::platform::NewDefaultPlatform();
-	V8::InitializePlatform(platform.get());
+	Isolate::CreateParams params;
+	params.array_buffer_allocator = v8::ArrayBuffer::Allocator::NewDefaultAllocator();;
+	v8::Platform *platform = v8::platform::NewDefaultPlatform(
+      8,
+			v8::platform::IdleTaskSupport::kEnabled,
+      v8::platform::InProcessStackDumping::kEnabled, nullptr).release();
+	V8::InitializePlatform(platform);
 	V8::Initialize();
 	if (plv8_v8_flags != NULL) {
 	      V8::SetFlagsFromString(plv8_v8_flags, strlen(plv8_v8_flags));
 	}
-	Isolate::CreateParams params;
-	params.array_buffer_allocator = v8::ArrayBuffer::Allocator::NewDefaultAllocator();;
 	plv8_isolate = Isolate::New(params);
 	plv8_isolate->Enter();
 

@@ -7,7 +7,7 @@
 # structure in v8 which may be different from version to another, but user
 # can specify the v8 version by AUTOV8_VERSION, too.
 #-----------------------------------------------------------------------------#
-AUTOV8_VERSION = 7.4.288.13
+AUTOV8_VERSION = 7.4.288.28
 AUTOV8_DIR = build/v8
 AUTOV8_OUT = build/v8/out.gn/x64.release/obj
 AUTOV8_DEPOT_TOOLS = build/depot_tools

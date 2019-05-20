@@ -1,7 +1,7 @@
 Revision history for plv8
 
 3.0alpha
-            - update to v8 7.0
+            - update to v8 7.4
             - add Bigint support
             - add BigInt64Array support
             - add direct JSONB conversion to and from v8 objects

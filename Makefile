@@ -76,6 +76,6 @@ else
 			PLATFORM = x64.release
 		endif
 		CCFLAGS += -std=c++11
-		SHLIB_LINK += -lrt -std=c++11 -lc++
+		SHLIB_LINK += -lrt -std=c++11
 	endif
 endif

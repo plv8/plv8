@@ -196,9 +196,10 @@ JSONObject::JSONObject()
 {
 	Handle<Context> context = plv8_isolate->GetCurrentContext();
 	Handle<Object> global = context->Global();
-	m_json = global->Get(String::NewFromUtf8(plv8_isolate, "JSON", String::kInternalizedString))->ToObject(plv8_isolate->GetCurrentContext()).ToLocalChecked();
-	if (m_json.IsEmpty())
+	MaybeLocal<v8::Object> maybeJson = global->Get(String::NewFromUtf8(plv8_isolate, "JSON", String::kInternalizedString))->ToObject(plv8_isolate->GetCurrentContext());
+	if (maybeJson.IsEmpty())
 		throw js_error("JSON not found");
+	m_json = maybeJson.ToLocalChecked();
 }
 
 /*
@@ -213,7 +214,11 @@ JSONObject::Parse(Handle<v8::Value> str)
 	if (parse_func.IsEmpty())
 		throw js_error("JSON.parse() not found");
 
-	return parse_func->Call(plv8_isolate->GetCurrentContext(), m_json, 1, &str).ToLocalChecked();
+	TryCatch try_catch(plv8_isolate);
+	MaybeLocal<v8::Value> value = parse_func->Call(plv8_isolate->GetCurrentContext(), m_json, 1, &str);
+	if (value.IsEmpty())
+		throw js_error(try_catch);
+	return value.ToLocalChecked();
 }
 
 /*
@@ -228,7 +233,11 @@ JSONObject::Stringify(Handle<v8::Value> val)
 	if (stringify_func.IsEmpty())
 		throw js_error("JSON.stringify() not found");
 
-	return stringify_func->Call(plv8_isolate->GetCurrentContext(), m_json, 1, &val).ToLocalChecked();
+	TryCatch try_catch(plv8_isolate);
+	MaybeLocal<v8::Value> value = stringify_func->Call(plv8_isolate->GetCurrentContext(), m_json, 1, &val);
+	if (value.IsEmpty())
+		throw js_error(try_catch);
+	return value.ToLocalChecked();
 }
 
 void
@@ -1039,13 +1048,13 @@ plv8_Subtransaction(const FunctionCallbackInfo<v8::Value>& args)
 
 	Handle<v8::Value> emptyargs[1] = {};
 	TryCatch try_catch(plv8_isolate);
-	Handle<v8::Value> result = func->Call(plv8_isolate->GetCurrentContext(), func, 0, emptyargs).ToLocalChecked();
+	MaybeLocal<v8::Value> result = func->Call(plv8_isolate->GetCurrentContext(), func, 0, emptyargs);
 
 	subtran.exit(!result.IsEmpty());
 
 	if (result.IsEmpty())
 		throw js_error(try_catch);
-	args.GetReturnValue().Set(result);
+	args.GetReturnValue().Set(result.ToLocalChecked());
 }
 
 /*

@@ -234,16 +234,16 @@ _PG_init(void)
 							   NULL);
 
 	DefineCustomStringVariable("plv8.icu_data",
-								 gettext_noop("ICU data file directory."),
-								 NULL,
-								 &plv8_icu_data,
-								 NULL,
-								 PGC_USERSET, 0,
+							   gettext_noop("ICU data file directory."),
+							   NULL,
+							   &plv8_icu_data,
+							   NULL,
+							   PGC_USERSET, 0,
 #if PG_VERSION_NUM >= 90100
-								 NULL,
+							   NULL,
 #endif
-								 NULL,
-								 NULL);
+							   NULL,
+							   NULL);
 
 	DefineCustomStringVariable("plv8.v8_flags",
 							   gettext_noop("V8 engine initialization flags (e.g. --harmony for all current harmony features)."),
@@ -309,7 +309,7 @@ _PG_init(void)
 	V8::InitializePlatform(platform);
 	V8::Initialize();
 	if (plv8_v8_flags != NULL) {
-	      V8::SetFlagsFromString(plv8_v8_flags, strlen(plv8_v8_flags));
+		V8::SetFlagsFromString(plv8_v8_flags, strlen(plv8_v8_flags));
 	}
 	plv8_isolate = Isolate::New(params);
 	plv8_isolate->Enter();
@@ -507,7 +507,7 @@ signal_handler (int sig) {
  * This function could throw C++ exceptions, but must not throw PG exceptions.
  */
 static Local<v8::Value>
-DoCall(Handle<Function> fn, Handle<Object> receiver,
+DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 	int nargs, Handle<v8::Value> args[])
 {
 	TryCatch		try_catch(plv8_isolate);
@@ -537,7 +537,7 @@ DoCall(Handle<Function> fn, Handle<Object> receiver,
 #endif
 #endif
 
-	Local<v8::Value> result = fn->Call(plv8_isolate->GetCurrentContext(), receiver, nargs, args).ToLocalChecked();
+	MaybeLocal<v8::Value> result = fn->Call(ctx, receiver, nargs, args);
 	int	status = SPI_finish();
 
 #ifdef EXECUTION_TIMEOUT
@@ -566,7 +566,7 @@ DoCall(Handle<Function> fn, Handle<Object> receiver,
 	if (status < 0)
 		throw js_error(FormatSPIStatus(status));
 
-	return result;
+	return result.ToLocalChecked();
 }
 
 static Datum
@@ -604,7 +604,7 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Local<Function>		fn =
 		Local<Function>::Cast(recv->GetInternalField(0));
 	Local<v8::Value> result =
-		DoCall(fn, recv, nargs, args);
+		DoCall(context, fn, recv, nargs, args);
 
 	if (rettype)
 		return ToDatum(result, &fcinfo->isnull, rettype);
@@ -700,7 +700,7 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Local<Function>		fn =
 		Local<Function>::Cast(recv->GetInternalField(0));
 
-	Handle<v8::Value> result = DoCall(fn, recv, nargs, args);
+	Handle<v8::Value> result = DoCall(context, fn, recv, nargs, args);
 
 	if (result->IsUndefined())
 	{
@@ -833,7 +833,7 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	Local<Function>		fn =
 		Local<Function>::Cast(recv->GetInternalField(0));
 	Handle<v8::Value> newtup =
-		DoCall(fn, recv, lengthof(args), args);
+		DoCall(context, fn, recv, lengthof(args), args);
 
 	if (newtup.IsEmpty())
 		throw js_error(try_catch);
@@ -1104,7 +1104,8 @@ CreateExecEnv(Persistent<Function>& function)
 	PG_END_TRY();
 
 	GetGlobalContext(xenv->context);
-	Context::Scope		scope(xenv->localContext());
+	Local<Context>		ctx = xenv->localContext();
+	Context::Scope		scope(ctx);
 
 	static Persistent<ObjectTemplate> recv_templ;
 	if (recv_templ.IsEmpty())
@@ -1114,7 +1115,7 @@ CreateExecEnv(Persistent<Function>& function)
 		recv_templ.Reset(plv8_isolate, templ);
 	}
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, recv_templ);
-	Local<Object> obj = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
+	Local<Object> obj = templ->NewInstance(ctx).ToLocalChecked();
 	Local<Function> f = Local<Function>::New(plv8_isolate, function);
 	obj->SetInternalField(0, f);
 	xenv->recv.Reset(plv8_isolate, obj);
@@ -1140,7 +1141,8 @@ CreateExecEnv(Handle<Function> function)
 	PG_END_TRY();
 
 	GetGlobalContext(xenv->context);
-	Context::Scope		scope(xenv->localContext());
+	Local<Context>		ctx = xenv->localContext();
+	Context::Scope		scope(ctx);
 
 	static Persistent<ObjectTemplate> recv_templ;
 	if (recv_templ.IsEmpty())
@@ -1150,7 +1152,7 @@ CreateExecEnv(Handle<Function> function)
 		recv_templ.Reset(plv8_isolate, templ);
 	}
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, recv_templ);
-	Local<Object> obj = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
+	Local<Object> obj = templ->NewInstance(ctx).ToLocalChecked();
 	Local<Function> f = Local<Function>::New(plv8_isolate, function);
 	obj->SetInternalField(0, f);
 	xenv->recv.Reset(plv8_isolate, obj);
@@ -1217,11 +1219,11 @@ CompileDialect(const char *src, Dialect dialect)
 	Handle<v8::Value>	args[nargs];
 
 	args[0] = ToString(src);
-	Local<v8::Value>	value = func->Call(plv8_isolate->GetCurrentContext(), compiler, nargs, args).ToLocalChecked();
+	MaybeLocal<v8::Value>	value = func->Call(ctx, compiler, nargs, args);
 
 	if (value.IsEmpty())
 		throw js_error(try_catch);
-	CString		result(value);
+	CString		result(value.ToLocalChecked());
 
 	PG_TRY();
 	{
@@ -1519,7 +1521,8 @@ GetGlobalContext(Persistent<Context>& global_context)
 			Local<Function>		func;
 
 			HandleScope			handle_scope(plv8_isolate);
-			Context::Scope		context_scope(my_context->localContext());
+			Local<Context>		context = my_context->localContext();
+			Context::Scope		context_scope(context);
 			TryCatch			try_catch(plv8_isolate);
 			MemoryContext		ctx = CurrentMemoryContext;
 			text *arg;
@@ -1572,7 +1575,7 @@ GetGlobalContext(Persistent<Context>& global_context)
 			if (!func.IsEmpty())
 			{
 				Handle<v8::Value>	result =
-					DoCall(func, my_context->localContext()->Global(), 0, NULL);
+					DoCall(context, func, my_context->localContext()->Global(), 0, NULL);
 				if (result.IsEmpty())
 					throw js_error(try_catch);
 			}

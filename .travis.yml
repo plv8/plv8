@@ -4,7 +4,7 @@ before_install:
   - sudo apt-get -y --purge remove postgresql libpq-dev libpq5 postgresql-client-common postgresql-common
   - sudo rm -rf /var/lib/postgresql
   - wget --no-check-certificate  --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-  - sudo sh -c "echo deb http://apt.postgresql.org/pub/repos/apt/ trusty-pgdg main $PGVERSION >> /etc/apt/sources.list.d/postgresql.list"
+  - sudo sh -c "echo deb http://apt.postgresql.org/pub/repos/apt/ xenial-pgdg main $PGVERSION >> /etc/apt/sources.list.d/postgresql.list"
   - sudo apt-get update -qq
   - sudo apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::="--force-confnew" install postgresql-$PGVERSION postgresql-server-dev-$PGVERSION
   - sudo chmod 777 /etc/postgresql/$PGVERSION/main/pg_hba.conf
@@ -13,18 +13,11 @@ before_install:
   - sudo echo "host    all         all         127.0.0.1/32          trust" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
   - sudo echo "host    all         all         ::1/128               trust" >> /etc/postgresql/$PGVERSION/main/pg_hba.conf
   - sudo /etc/init.d/postgresql restart
-  - sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
-  - sudo apt-get update -qq
-  - sudo apt-get install -y libc6-dev-i386 libc++-dev libstdc++-4.9-dev
-  - if [ "$CXX" = "g++" ]; then sudo apt-get install -qq g++-4.9; fi
-  - if [ "$CXX" = "g++" ]; then export CXX="g++-4.9" CC="gcc-4.9" LD="g++-4.9"; fi
-  - sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.9 90
 
 before_script:
   - g++ -v
   - gcc -v
   - createuser -U postgres -s travis
-
 
 env:
   matrix:
@@ -34,14 +27,12 @@ env:
     - PGVERSION=9.4
     - PGVERSION=9.2
 
-
-
 language: cpp
 compiler:
   - gcc
 
 sudo: required
-dist: trusty
+dist: xenial
 
 script:
   - make && sudo make install && make installcheck

@@ -12,6 +12,7 @@
 #endif
 
 #include "libplatform/libplatform.h"
+#include "plv8_allocator.h"
 
 #include <new>
 
@@ -94,6 +95,7 @@ typedef struct plv8_proc_cache
 } plv8_proc_cache;
 
 Isolate* plv8_isolate = NULL;
+size_t plv8_memory_limit = 0;
 
 /*
  * The function and context are created at the first invocation.  Their
@@ -183,6 +185,8 @@ static int plv8_debugger_port;
 static int plv8_execution_timeout = 300;
 #endif
 
+static std::unique_ptr<v8::Platform> v8_platform = NULL;
+
 /*
  * We use vector instead of hash since the size of this array
  * is expected to be short in most cases.
@@ -209,6 +213,19 @@ void DispatchDebugMessages() {
   v8::Debug::ProcessDebugMessages();
 }
 #endif  // ENABLE_DEBUGGER_SUPPORT
+
+void OOMErrorHandler(const char* location, bool is_heap_oom) {
+	elog(FATAL, "plv8: OOM error: %s, is_heap_oom=%d", location, static_cast<int>(is_heap_oom));
+}
+
+void GCEpilogueCallback(Isolate* isolate, GCType type, GCCallbackFlags /* flags */) {
+	HeapStatistics heap_statistics;
+	plv8_isolate->GetHeapStatistics(&heap_statistics);
+	if (type != GCType::kGCTypeIncrementalMarking
+		&& heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB) {
+		elog(FATAL, "plv8: OOM error in GC");
+	}
+}
 
 void
 _PG_init(void)
@@ -285,6 +302,18 @@ _PG_init(void)
 							NULL);
 #endif
 
+	DefineCustomIntVariable("plv8.memory_limit",
+							gettext_noop("Per-isolate memory limit in MBytes"),
+							gettext_noop("The default value is 256 MB"),
+							(int*)&plv8_memory_limit,
+							256, 256, 3096, // hardcoded v8 limits for isolates
+							PGC_SUSET, 0,
+#if PG_VERSION_NUM >= 90100
+							NULL,
+#endif
+							NULL,
+							NULL);
+
 	RegisterXactCallback(plv8_xact_cb, NULL);
 
 	EmitWarningsOnPlaceholders("plv8");
@@ -300,15 +329,22 @@ _PG_init(void)
 #if (V8_MAJOR_VERSION == 4 && V8_MINOR_VERSION >= 6) || V8_MAJOR_VERSION >= 5
 	V8::InitializeExternalStartupData("plv8");
 #endif
-	Platform* platform = platform::NewDefaultPlatform().release();
-	V8::InitializePlatform(platform);
+	if (!v8_platform) {
+		v8_platform = platform::NewDefaultPlatform();
+	}
+	V8::InitializePlatform(v8_platform.get());
 	V8::Initialize();
 	if (plv8_v8_flags != NULL) {
 		V8::SetFlagsFromString(plv8_v8_flags, strlen(plv8_v8_flags));
 	}
 	Isolate::CreateParams params;
-	params.array_buffer_allocator = v8::ArrayBuffer::Allocator::NewDefaultAllocator();;
+	params.array_buffer_allocator = new ArrayAllocator(plv8_memory_limit * 1_MB);
+	ResourceConstraints rc;
+	rc.ConfigureDefaults(plv8_memory_limit * 1_MB * 2, plv8_memory_limit * 1_MB * 2);
+	params.constraints = rc;
 	plv8_isolate = Isolate::New(params);
+	plv8_isolate->SetOOMErrorHandler(OOMErrorHandler);
+	plv8_isolate->AddGCEpilogueCallback(GCEpilogueCallback);
 	plv8_isolate->Enter();
 
 }

@@ -20,12 +20,7 @@ bool ArrayAllocator::check(const size_t length) {
 			plv8_isolate->LowMemoryNotification();
 			heap_size = heap_statistics.total_heap_size();
 			if (heap_size + allocated + length > heap_limit) {
-				if (length <= 64) {
-					// we need to bail out here, otherwise v8 itself will abort
-					elog(FATAL, "plv8: OOM in ArrayAllocator");
-				} else {
-					return false;
-				}
+				return false;
 			}
 		}
 		next_size = heap_size + allocated + length + RECHECK_INCREMENT;

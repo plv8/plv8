@@ -96,6 +96,7 @@ typedef struct plv8_proc_cache
 
 Isolate* plv8_isolate = NULL;
 size_t plv8_memory_limit = 0;
+size_t plv8_last_heap_size = 0;
 
 /*
  * The function and context are created at the first invocation.  Their
@@ -215,16 +216,31 @@ void DispatchDebugMessages() {
 #endif  // ENABLE_DEBUGGER_SUPPORT
 
 void OOMErrorHandler(const char* location, bool is_heap_oom) {
-	elog(FATAL, "plv8: OOM error: %s, is_heap_oom=%d", location, static_cast<int>(is_heap_oom));
+	plv8_isolate->TerminateExecution();
+	throw js_error("OOM error");
 }
 
 void GCEpilogueCallback(Isolate* isolate, GCType type, GCCallbackFlags /* flags */) {
 	HeapStatistics heap_statistics;
-	plv8_isolate->GetHeapStatistics(&heap_statistics);
+	isolate->GetHeapStatistics(&heap_statistics);
 	if (type != GCType::kGCTypeIncrementalMarking
 		&& heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB) {
-		elog(FATAL, "plv8: OOM error in GC");
+		isolate->TerminateExecution();
+		throw js_error("OOM error in GC");
 	}
+	if (heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB / 0.9
+		&& plv8_last_heap_size < plv8_memory_limit * 1_MB / 0.9) {
+		isolate->LowMemoryNotification();
+	}
+	plv8_last_heap_size = heap_statistics.used_heap_size();
+}
+
+size_t NearHeapLimitHandler(void* data, size_t current_heap_limit,
+								size_t initial_heap_limit) {
+	plv8_isolate->TerminateExecution();
+	// need to give back more space
+	// to make sure it can unwind the stack and process exceptions
+	return current_heap_limit + 1_MB;
 }
 
 void
@@ -345,6 +361,7 @@ _PG_init(void)
 	plv8_isolate = Isolate::New(params);
 	plv8_isolate->SetOOMErrorHandler(OOMErrorHandler);
 	plv8_isolate->AddGCEpilogueCallback(GCEpilogueCallback);
+	plv8_isolate->AddNearHeapLimitCallback(NearHeapLimitHandler, NULL);
 	plv8_isolate->Enter();
 
 }

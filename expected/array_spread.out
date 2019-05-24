@@ -6,8 +6,15 @@ do $$
   };
   [...({})];
 $$ language plv8;
-FATAL:  plv8: OOM error in GC
-server closed the connection unexpectedly
-	This probably means the server terminated abnormally
-	before or while processing the request.
-connection to server was lost
+ERROR:  missing error text
+CONTEXT:  
+do $$
+  Object.prototype[Symbol.iterator] = function() {
+     return {
+       next:() => this
+     }
+  };
+  [...({})];
+$$ language plv8;
+ERROR:  missing error text
+CONTEXT:  

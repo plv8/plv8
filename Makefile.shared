@@ -25,7 +25,7 @@ CUSTOM_CC = g++
 JSS  = coffee-script.js livescript.js
 # .cc created from .js
 JSCS = $(JSS:.js=.cc)
-SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc $(JSCS)
+SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc $(JSCS)
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8-$(PLV8_VERSION)
 EXTENSION = plv8
@@ -38,7 +38,8 @@ DATA += plcoffee.control plcoffee--$(PLV8_VERSION).sql \
 endif
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 plv8-errors inline json startup_pre startup varparam json_conv \
- 		  jsonb_conv window guc es6 arraybuffer composites currentresource startup_perms bytea find_function_perms
+		  jsonb_conv window guc es6 arraybuffer composites currentresource startup_perms bytea find_function_perms \
+		  memory_limits array_spread
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif

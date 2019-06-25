@@ -452,7 +452,7 @@ static JsonbValue *
 JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object) {
 	JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_ARRAY, NULL);
 	Local<v8::Array> a = Local<v8::Array>::Cast(object);
-	for (int32 i = 0; i < a->Length(); i++) {
+	for (size_t i = 0; i < a->Length(); i++) {
 		Local<v8::Value> o = a->Get(i);
 
 		if (o->IsArray()) {
@@ -472,9 +472,9 @@ JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object) {
 static JsonbValue *
 JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object) {
 	JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_OBJECT, NULL);
-	Local<Array> arr = object->GetOwnPropertyNames();
+	Local<Array> arr = object->GetOwnPropertyNames(plv8_isolate->GetCurrentContext()).ToLocalChecked();
 
-	for (int32 i = 0; i < arr->Length(); i++) {
+	for (size_t i = 0; i < arr->Length(); i++) {
 		Local<v8::Value> v = arr->Get(i);
 		val = JsonbFromValue(pstate, v, WJB_KEY);
 		Local<v8::Value> o = object->Get(v);
@@ -672,7 +672,7 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	case NUMERICOID:
 		if (value->IsBigInt()) {
 			String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
-			return DirectFunctionCall3(numeric_in, (Datum) *utf8, NULL, Int32GetDatum((int32) -1));
+			return DirectFunctionCall3(numeric_in, (Datum) *utf8, ObjectIdGetDatum(InvalidOid), Int32GetDatum((int32) -1));
 		}
 		if (value->IsNumber())
 			return DirectFunctionCall1(float8_numeric,
@@ -938,10 +938,10 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 		return Number::New(plv8_isolate, DatumGetFloat8(
 			DirectFunctionCall1(numeric_float8, datum)));
 	case DATEOID:
-		return Date::New(plv8_isolate, DateToEpoch(DatumGetDateADT(datum)));
+		return Date::New(plv8_isolate->GetCurrentContext(), DateToEpoch(DatumGetDateADT(datum))).ToLocalChecked();
 	case TIMESTAMPOID:
 	case TIMESTAMPTZOID:
-		return Date::New(plv8_isolate, TimestampTzToEpoch(DatumGetTimestampTz(datum)));
+		return Date::New(plv8_isolate->GetCurrentContext(), TimestampTzToEpoch(DatumGetTimestampTz(datum))).ToLocalChecked();
 	case TEXTOID:
 	case VARCHAROID:
 	case BPCHAROID:

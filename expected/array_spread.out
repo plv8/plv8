@@ -1,0 +1,20 @@
+do $$
+  Object.prototype[Symbol.iterator] = function() {
+     return {
+       next:() => this
+     }
+  };
+  [...({})];
+$$ language plv8;
+ERROR:  missing error text
+CONTEXT:  
+do $$
+  Object.prototype[Symbol.iterator] = function() {
+     return {
+       next:() => this
+     }
+  };
+  [...({})];
+$$ language plv8;
+ERROR:  missing error text
+CONTEXT:  

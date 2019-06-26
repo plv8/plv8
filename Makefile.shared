@@ -110,6 +110,7 @@ ifeq ($(shell test $(PG_VERSION_NUM) -ge 90100 && echo yes), yes)
 
 %.bc : %.cc
 	$(COMPILE.cxx.bc) $(CCFLAGS) $(CPPFLAGS) -fPIC -c -o $@ $<
+	$(LLVM_BINPATH)/opt -module-summary -f $@ -o $@
 
 DATA_built =
 all: $(DATA)

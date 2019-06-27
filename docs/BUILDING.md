@@ -31,7 +31,7 @@ $ make
 
 This will download `v8` and compile it as well.
 
-| Note: If you have multiple versions of PostgreSQL installed like 9.5 and 9.6, Plv8 will only be built for PostgreSQL 9.6. This is because make calls pg_config to get the version number, which will always be the latest version installed. If you need to build Plv8 for PostgreSQL 9.5 while you have 9.6 installed pass make the PG_CONFIG variable to your 9.5 version of pg_config. This works for `make`, `make -f Makefile.shared`, and `make install`. For example in Ubuntu:
+| Note: If you have multiple versions of PostgreSQL installed like 9.5 and 9.6, Plv8 will only be built for PostgreSQL 9.6. This is because make calls pg_config to get the version number, which will always be the latest version installed. If you need to build Plv8 for PostgreSQL 9.5 while you have 9.6 installed pass make the PG_CONFIG variable to your 9.5 version of pg_config. This works for `make`, and `make install`. For example in Ubuntu:
 
 ```
 $ make PG_CONFIG=/usr/lib/postgresql/9.5/bin/pg_config
@@ -190,4 +190,3 @@ Makefile:35: recipe for target 'build/v8' failed
 make: *** [build/v8] Error 1
 ERROR: command returned 2: make PG_CONFIG=/usr/bin/pg_config all
 ```
-

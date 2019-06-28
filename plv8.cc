@@ -33,6 +33,10 @@ extern "C" {
 #include "utils/rel.h"
 #include "utils/syscache.h"
 
+#if PG_VERSION_NUM >= 120000
+#include "catalog/pg_database.h"
+#endif
+
 #include <signal.h>
 
 #ifdef EXECUTION_TIMEOUT
@@ -593,8 +597,13 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	}
 	else
 	{
-		for (int i = 0; i < nargs; i++)
+		for (int i = 0; i < nargs; i++) {
+#if PG_VERSION_NUM < 120000
 			args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
+#else
+			args[i] = ToValue(fcinfo->args[i].value, fcinfo->args[i].isnull, &argtypes[i]);
+#endif
+		}
 	}
 
 	Local<Object> recv = Local<Object>::New(plv8_isolate, xenv->recv);
@@ -690,8 +699,13 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	 */
 	SRFSupport support(context, &conv, tupstore);
 
-	for (int i = 0; i < nargs; i++)
+	for (int i = 0; i < nargs; i++) {
+#if PG_VERSION_NUM < 120000
 		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
+#else
+		args[i] = ToValue(fcinfo->args[i].value, fcinfo->args[i].isnull, &argtypes[i]);
+#endif
+	}
 
 	Local<Object> recv = Local<Object>::New(plv8_isolate, xenv->recv);
 	Local<Function>		fn =
@@ -1384,7 +1398,12 @@ find_js_function(Oid fn_oid)
 		tuple = SearchSysCache(LANGNAME, NameGetDatum(&langnames[langno]), 0, 0, 0);
 		if (HeapTupleIsValid(tuple))
 		{
+#if PG_VERSION_NUM < 120000
 			Oid langtupoid = HeapTupleGetOid(tuple);
+#else
+			Form_pg_database datForm = (Form_pg_database) GETSTRUCT(tuple);
+			Oid langtupoid = datForm->oid;
+#endif
 			ReleaseSysCache(tuple);
 			if (langtupoid == prolang)
 				break;
@@ -1511,7 +1530,11 @@ GetGlobalContext(Persistent<Context>& global_context)
 			TryCatch			try_catch;
 			MemoryContext		ctx = CurrentMemoryContext;
 			text *arg;
+#if PG_VERSION_NUM < 120000
 			FunctionCallInfoData fake_fcinfo;
+#else
+			FunctionCallInfo fake_fcinfo;
+#endif
 			FmgrInfo	flinfo;
 
 			char perm[16];
@@ -1521,7 +1544,7 @@ GetGlobalContext(Persistent<Context>& global_context)
 			PG_TRY();
 			{
 				Oid funcoid = DatumGetObjectId(DirectFunctionCall1(regprocin, CStringGetDatum(plv8_start_proc)));
-
+#if PG_VERSION_NUM < 120000
 				MemSet(&fake_fcinfo, 0, sizeof(fake_fcinfo));
 				MemSet(&flinfo, 0, sizeof(flinfo));
 				fake_fcinfo.flinfo = &flinfo;
@@ -1530,8 +1553,18 @@ GetGlobalContext(Persistent<Context>& global_context)
 				fake_fcinfo.nargs = 2;
 				fake_fcinfo.arg[0] = ObjectIdGetDatum(funcoid);
 				fake_fcinfo.arg[1] = CStringGetDatum(arg);
-
 				Datum ret = has_function_privilege_id(&fake_fcinfo);
+#else
+				MemSet(fake_fcinfo, 0, sizeof(fake_fcinfo));
+				MemSet(&flinfo, 0, sizeof(flinfo));
+				fake_fcinfo->flinfo = &flinfo;
+				flinfo.fn_oid = InvalidOid;
+				flinfo.fn_mcxt = CurrentMemoryContext;
+				fake_fcinfo->nargs = 2;
+				fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
+				fake_fcinfo->args[1].value = CStringGetDatum(arg);
+				Datum ret = has_function_privilege_id(fake_fcinfo);
+#endif
 
 				if (ret == 0) {
 					elog(WARNING, "failed to find js function %s", plv8_start_proc);

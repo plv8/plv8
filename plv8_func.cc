@@ -1057,8 +1057,11 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 	}
 	CString				signature(args[0]);
 	Local<Function>		func;
-
+#if PG_VERSION_NUM < 120000
 	FunctionCallInfoData fake_fcinfo;
+#else
+	FunctionCallInfo fake_fcinfo;
+#endif
 	FmgrInfo	flinfo;
 	text *arg;
 
@@ -1076,16 +1079,27 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 			funcoid = DatumGetObjectId(
 					DirectFunctionCall1(regprocedurein, CStringGetDatum(signature.str())));
 
-		MemSet(&fake_fcinfo, 0, sizeof(fake_fcinfo));
-		MemSet(&flinfo, 0, sizeof(flinfo));
-		fake_fcinfo.flinfo = &flinfo;
-		flinfo.fn_oid = InvalidOid;
-		flinfo.fn_mcxt = CurrentMemoryContext;
-		fake_fcinfo.nargs = 2;
-		fake_fcinfo.arg[0] = ObjectIdGetDatum(funcoid);
-		fake_fcinfo.arg[1] = CStringGetDatum(arg);
-
-		Datum ret = has_function_privilege_id(&fake_fcinfo);
+#if PG_VERSION_NUM < 120000
+				MemSet(&fake_fcinfo, 0, sizeof(fake_fcinfo));
+				MemSet(&flinfo, 0, sizeof(flinfo));
+				fake_fcinfo.flinfo = &flinfo;
+				flinfo.fn_oid = InvalidOid;
+				flinfo.fn_mcxt = CurrentMemoryContext;
+				fake_fcinfo.nargs = 2;
+				fake_fcinfo.arg[0] = ObjectIdGetDatum(funcoid);
+				fake_fcinfo.arg[1] = CStringGetDatum(arg);
+				Datum ret = has_function_privilege_id(&fake_fcinfo);
+#else
+				MemSet(fake_fcinfo, 0, sizeof(fake_fcinfo));
+				MemSet(&flinfo, 0, sizeof(flinfo));
+				fake_fcinfo->flinfo = &flinfo;
+				flinfo.fn_oid = InvalidOid;
+				flinfo.fn_mcxt = CurrentMemoryContext;
+				fake_fcinfo->nargs = 2;
+				fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
+				fake_fcinfo->args[1].value = CStringGetDatum(arg);
+				Datum ret = has_function_privilege_id(fake_fcinfo);
+#endif
 
 		if (ret == 0) {
 			elog(WARNING, "failed to find or no permission for js function %s", signature.str());

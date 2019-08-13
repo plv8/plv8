@@ -30,3 +30,28 @@ COPY jsonbonly (data) FROM stdin;
 -- Call twice to test the function cache.
 SELECT get_keyb('ok', data) FROM jsonbonly;
 SELECT get_keyb('ok', data) FROM jsonbonly;
+
+CREATE FUNCTION jsonb_cat(data jsonb) RETURNS jsonb LANGUAGE plv8
+AS $$
+  return data;
+$$;
+
+SELECT jsonb_cat('[{"a": 1},{"b": 2},{"c": 3}]'::jsonb);
+
+CREATE TABLE test_infinity_tbl (
+  id INT,
+  version_actual_period_start timestamp,
+  version_actual_period_end timestamp
+);
+
+INSERT INTO test_infinity_tbl VALUES(1, '2019-03-01', 'infinity'::timestamp);
+
+CREATE OR REPLACE FUNCTION test_plv8_with_infinite_date() RETURNS JSONB AS
+$$
+  var data = [];
+  data = plv8.execute("SELECT * FROM test_infinity_tbl");
+  return data[0];
+$$
+LANGUAGE plv8 STABLE;
+
+SELECT test_plv8_with_infinite_date();

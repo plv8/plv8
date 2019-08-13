@@ -1,5 +1,8 @@
 Revision history for plv8
 
+2.3.13      2019-08-13
+            - direct jsonb conversion backports
+
 2.3.12      2019-06-28
             - support postgres 12
 

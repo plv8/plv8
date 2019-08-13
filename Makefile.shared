@@ -12,7 +12,7 @@
 #   'make' will download v8 and build, then statically link to it.
 #
 #-----------------------------------------------------------------------------#
-PLV8_VERSION = 2.3.12
+PLV8_VERSION = 2.3.13
 
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)

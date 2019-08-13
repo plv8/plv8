@@ -204,9 +204,9 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
 			obj = v8::Object::New(plv8_isolate);
 			if (container->IsArray()) {
 				container->Set(count, JsonbIterate(it, obj));
+				count++;
 			} else {
 				container->Set(key, JsonbIterate(it, obj));
-				count++;
 			}
       break;
 
@@ -219,9 +219,9 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
 			obj = v8::Array::New(plv8_isolate);
 			if (container->IsArray()) {
 				container->Set(count, JsonbIterate(it, obj));
+				count++;
 			} else {
 				container->Set(key, JsonbIterate(it, obj));
-				count++;
 			}
       break;
 
@@ -409,6 +409,8 @@ JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorTo
 			val.val.boolean = value->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked();
 		} else if (value->IsNull()) {
 			val.type = jbvNull;
+		} else if (value->IsUndefined()) {
+			return NULL;
 		} else if (value->IsString()) {
 			val.type = jbvString;
 			String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
@@ -431,9 +433,13 @@ JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorTo
 			}
 		} else if (value->IsDate()) {
 			double t = value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked();
-			val.val.string.val = TimeAs8601(t);
-			val.val.string.len = 24;
-			val.type = jbvString;
+			if (isnan(t)) {
+				val.type = jbvNull;
+			} else {
+				val.val.string.val = TimeAs8601(t);
+				val.val.string.len = 24;
+				val.type = jbvString;
+			}
 		} else {
 			LogType(value, false);
 			val.type = jbvString;
@@ -1111,6 +1117,10 @@ Local<String>
 ToString(const char *str, int len, int encoding)
 {
 	char		   *utf8;
+
+	if (str == NULL) {
+		return String::NewFromUtf8(plv8_isolate, "(null)", String::kNormalString, 6);
+	}
 
 	if (len < 0)
 		len = strlen(str);

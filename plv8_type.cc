@@ -409,8 +409,10 @@ JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorTo
 		if (value->IsBoolean()) {
 			val.type = jbvBool;
 			val.val.boolean = value->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked();
-		} else if (value->IsNull() || value->IsUndefined()) {
+		} else if (value->IsNull()) {
 			val.type = jbvNull;
+		} else if (value->IsUndefined()) {
+			return NULL;
 		} else if (value->IsString()) {
 			val.type = jbvString;
 			String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));

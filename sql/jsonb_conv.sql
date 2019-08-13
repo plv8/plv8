@@ -55,3 +55,11 @@ $$
 LANGUAGE plv8 STABLE;
 
 SELECT test_plv8_with_infinite_date();
+
+CREATE FUNCTION jsonb_undefined(data jsonb) RETURNS jsonb AS
+$$
+  return Object.assign({}, data, { key: undefined });
+$$
+LANGUAGE plv8;
+
+SELECT jsonb_undefined('{"foo": "bar"}'::jsonb);

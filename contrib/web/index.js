@@ -47,7 +47,7 @@ files.forEach((elem) => {
 });
 
 // replace the content of the template
-template = template.replace('%CONTENT%', content);
+template = template.replace('%CONTENT%', () => content);
 
 // create the links for the sidebar
 var level = 0;
@@ -67,7 +67,7 @@ links.forEach((elem) => {
 });
 
 // replace the content of the sidebar
-template = template.replace('%SIDEBAR%', sidebar);
+template = template.replace('%SIDEBAR%', () => sidebar);
 
 // write the output
 fs.writeFileSync('index.html', template, 'utf8');

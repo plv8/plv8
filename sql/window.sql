@@ -196,7 +196,11 @@ INSERT INTO empsalary VALUES
 SELECT row_number() OVER (w), js_row_number() OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);
 SELECT rank() OVER (w), js_rank() OVER (w) FROM empsalary WINDOW w AS (PARTITION BY depname ORDER BY salary);
 SELECT dense_rank() OVER (w), js_dense_rank() OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);
+
+SET extra_float_digits = 0;
 SELECT percent_rank() OVER (w), js_percent_rank() OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);
+RESET extra_float_digits;
+
 SELECT cume_dist() OVER (w), js_cume_dist() OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);
 SELECT ntile(3) OVER (w), js_ntile(3) OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);
 SELECT lag(enroll_date) OVER (w), js_lag(enroll_date) OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);

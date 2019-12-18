@@ -1072,7 +1072,9 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 #if PG_VERSION_NUM < 120000
 	FunctionCallInfoData fake_fcinfo;
 #else
-	FunctionCallInfo fake_fcinfo;
+	// Stack-allocate FunctionCallInfoBaseData with
+	// space for 2 arguments:
+	LOCAL_FCINFO(fake_fcinfo, 2);
 #endif
 	FmgrInfo	flinfo;
 	text *arg;
@@ -1102,7 +1104,6 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 				fake_fcinfo.arg[1] = CStringGetDatum(arg);
 				Datum ret = has_function_privilege_id(&fake_fcinfo);
 #else
-				MemSet(fake_fcinfo, 0, sizeof(fake_fcinfo));
 				MemSet(&flinfo, 0, sizeof(flinfo));
 				fake_fcinfo->flinfo = &flinfo;
 				flinfo.fn_oid = InvalidOid;

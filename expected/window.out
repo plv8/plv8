@@ -219,6 +219,7 @@ SELECT dense_rank() OVER (w), js_dense_rank() OVER (w) FROM empsalary WINDOW w A
           8 |             8
 (10 rows)
 
+SET extra_float_digits = 0;
 SELECT percent_rank() OVER (w), js_percent_rank() OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);
    percent_rank    |  js_percent_rank  
 -------------------+-------------------
@@ -234,6 +235,7 @@ SELECT percent_rank() OVER (w), js_percent_rank() OVER (w) FROM empsalary WINDOW
                  1 |                 1
 (10 rows)
 
+RESET extra_float_digits;
 SELECT cume_dist() OVER (w), js_cume_dist() OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);
  cume_dist | js_cume_dist 
 -----------+--------------

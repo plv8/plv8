@@ -1,5 +1,8 @@
 Revision history for plv8
 
+2.3.14      2020-01-09
+            - backport 3.0 pg12 changes
+
 2.3.13      2019-08-13
             - direct jsonb conversion backports
 

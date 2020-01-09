@@ -1,5 +1,5 @@
 -- window functions
-CREATE FUNCTION js_row_number() RETURNS int8 AS $$
+CREATE FUNCTION js_row_number() RETURNS numeric AS $$
   var winobj = plv8.get_window_object();
   return winobj.get_current_position() + 1;
 $$ LANGUAGE plv8 WINDOW;
@@ -23,7 +23,7 @@ CREATE FUNCTION __js_rank_up(winobj internal, up_callback internal) RETURNS void
   return context;
 $$ LANGUAGE plv8;
 
-CREATE FUNCTION js_rank() RETURNS int8 AS $$
+CREATE FUNCTION js_rank() RETURNS numeric AS $$
   var winobj = plv8.get_window_object();
   var context = plv8.find_function("__js_rank_up")(winobj, function(context){
     context.rank = winobj.get_current_position() + 1;
@@ -31,7 +31,7 @@ CREATE FUNCTION js_rank() RETURNS int8 AS $$
   return context.rank;
 $$ LANGUAGE plv8 WINDOW;
 
-CREATE FUNCTION js_dense_rank() RETURNS int8 AS $$
+CREATE FUNCTION js_dense_rank() RETURNS numeric AS $$
   var winobj = plv8.get_window_object();
   var context = plv8.find_function("__js_rank_up")(winobj, function(context){
     context.rank++;
@@ -67,7 +67,7 @@ CREATE FUNCTION js_cume_dist() RETURNS float AS $$
   return context.rank / totalrows;
 $$ LANGUAGE plv8 WINDOW;
 
-CREATE FUNCTION js_ntile(nbuckets int8) RETURNS int AS $$
+CREATE FUNCTION js_ntile(nbuckets numeric) RETURNS int AS $$
   var winobj = plv8.get_window_object();
   var context = winobj.get_partition_local() || {};
 
@@ -196,7 +196,11 @@ INSERT INTO empsalary VALUES
 SELECT row_number() OVER (w), js_row_number() OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);
 SELECT rank() OVER (w), js_rank() OVER (w) FROM empsalary WINDOW w AS (PARTITION BY depname ORDER BY salary);
 SELECT dense_rank() OVER (w), js_dense_rank() OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);
+
+SET extra_float_digits = 0;
 SELECT percent_rank() OVER (w), js_percent_rank() OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);
+RESET extra_float_digits;
+
 SELECT cume_dist() OVER (w), js_cume_dist() OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);
 SELECT ntile(3) OVER (w), js_ntile(3) OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);
 SELECT lag(enroll_date) OVER (w), js_lag(enroll_date) OVER (w) FROM empsalary WINDOW w AS (ORDER BY salary);

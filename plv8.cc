@@ -56,6 +56,7 @@ PGDLLEXPORT Datum	plcoffee_call_handler(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plcoffee_call_validator(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plls_call_handler(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plls_call_validator(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_reset(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(plv8_call_handler);
 PG_FUNCTION_INFO_V1(plv8_call_validator);
@@ -63,6 +64,7 @@ PG_FUNCTION_INFO_V1(plcoffee_call_handler);
 PG_FUNCTION_INFO_V1(plcoffee_call_validator);
 PG_FUNCTION_INFO_V1(plls_call_handler);
 PG_FUNCTION_INFO_V1(plls_call_validator);
+PG_FUNCTION_INFO_V1(plv8_reset);
 
 
 PGDLLEXPORT void _PG_init(void);
@@ -463,6 +465,42 @@ Datum
 plls_call_handler(PG_FUNCTION_ARGS)
 {
 	return common_pl_call_handler(fcinfo, PLV8_DIALECT_LIVESCRIPT);
+}
+
+Datum
+plv8_reset(PG_FUNCTION_ARGS)
+{
+	Oid					user_id = GetUserId();
+	unsigned long		i;
+	HASH_SEQ_STATUS		status;
+	plv8_proc_cache*	cache;
+
+	for (i = 0; i < ContextVector.size(); i++)
+	{
+		if (ContextVector[i]->user_id == user_id)
+		{
+			plv8_context * context = ContextVector[i];
+			ContextVector.erase(ContextVector.begin() + i);
+			// need to search and reset all the user functions which were created in the old context
+			hash_seq_init(&status, plv8_proc_cache_hash);
+			cache = (plv8_proc_cache *) hash_seq_search(&status);
+			while (cache != nullptr) {
+				if (cache->user_id == user_id) {
+					if (cache->prosrc)
+					{
+						pfree(cache->prosrc);
+						cache->prosrc = NULL;
+					}
+					cache->function.Reset();
+				}
+				cache = (plv8_proc_cache *) hash_seq_search(&status);
+			}
+			context->context.Reset();
+			pfree(context);
+			break;
+		}
+	}
+	return (Datum) 0;
 }
 
 #if PG_VERSION_NUM >= 90000

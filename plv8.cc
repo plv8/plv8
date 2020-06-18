@@ -614,8 +614,11 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 	signal(SIGINT, (void (*)(int)) int_handler);
 	signal(SIGTERM, (void (*)(int)) term_handler);
 
-	if (result.IsEmpty())
+	if (result.IsEmpty()) {
+		if (plv8_isolate->IsExecutionTerminating())
+			throw js_error("Out of memory error");
 		throw js_error(try_catch);
+	}
 
 	if (status < 0)
 		throw js_error(FormatSPIStatus(status));
@@ -1272,8 +1275,11 @@ CompileDialect(const char *src, Dialect dialect)
 		v8::Local<v8::Value> result;
 		if (!script->Run(plv8_isolate->GetCurrentContext()).ToLocal(&result))
 			throw js_error(try_catch);
-		if (result.IsEmpty())
+		if (result.IsEmpty()) {
+			if (plv8_isolate->IsExecutionTerminating())
+				throw js_error("Script is out of memory");
 			throw js_error(try_catch);
+		}
 	}
 
 	Local<Object>	compiler = Local<Object>::Cast(ctx->Global()->Get(key));
@@ -1285,8 +1291,11 @@ CompileDialect(const char *src, Dialect dialect)
 	args[0] = ToString(src);
 	MaybeLocal<v8::Value>	value = func->Call(ctx, compiler, nargs, args);
 
-	if (value.IsEmpty())
+	if (value.IsEmpty()) {
+		if (plv8_isolate->IsExecutionTerminating())
+			throw js_error("Out of memory error");
 		throw js_error(try_catch);
+	}
 	CString		result(value.ToLocalChecked());
 
 	PG_TRY();
@@ -1427,8 +1436,11 @@ CompileFunction(
 	v8::Local<v8::Value> result;
 	if (!script->Run(plv8_isolate->GetCurrentContext()).ToLocal(&result))
 		throw js_error(try_catch);
-	if (result.IsEmpty())
+	if (result.IsEmpty()) {
+		if (plv8_isolate->IsExecutionTerminating())
+			throw js_error("Script is out of memory");
 		throw js_error(try_catch);
+	}
 
 	return handle_scope.Escape(Local<Function>::Cast(result));
 }

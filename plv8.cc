@@ -995,7 +995,13 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 	/* except for TRIGGER, RECORD, INTERNAL, VOID or polymorphic types */
 	if (functyptype == TYPTYPE_PSEUDO)
 	{
+#if PG_VERSION_NUM >= 130000
                 if (proc->prorettype == TRIGGEROID)
+#else
+                /* we assume OPAQUE with no arguments means a trigger */
+                if (proc->prorettype == TRIGGEROID ||
+                        (proc->prorettype == OPAQUEOID && proc->pronargs == 0))
+#endif
 			is_trigger = true;
 		else if (proc->prorettype != RECORDOID &&
 			proc->prorettype != VOIDOID &&

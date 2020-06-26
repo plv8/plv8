@@ -38,6 +38,10 @@ extern "C" {
 #include "catalog/pg_database.h"
 #endif
 
+#if PG_VERSION_NUM >= 130000
+#include "common/hashfn.h"
+#endif
+
 #include <signal.h>
 
 #ifdef EXECUTION_TIMEOUT
@@ -991,9 +995,7 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 	/* except for TRIGGER, RECORD, INTERNAL, VOID or polymorphic types */
 	if (functyptype == TYPTYPE_PSEUDO)
 	{
-		/* we assume OPAQUE with no arguments means a trigger */
-		if (proc->prorettype == TRIGGEROID ||
-			(proc->prorettype == OPAQUEOID && proc->pronargs == 0))
+                if (proc->prorettype == TRIGGEROID)
 			is_trigger = true;
 		else if (proc->prorettype != RECORDOID &&
 			proc->prorettype != VOIDOID &&

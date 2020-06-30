@@ -106,6 +106,24 @@ typedef struct plv8_type
 } plv8_type;
 
 /*
+ * For the security reasons, the global context is separated
+ * between users and it's associated with user id.
+ */
+typedef struct plv8_context
+{
+	v8::Isolate				   	   	   *isolate;
+	v8::ArrayBuffer::Allocator	   	   *array_buffer_allocator;
+	v8::Persistent<v8::Context>			context;
+	v8::Persistent<v8::ObjectTemplate>	recv_templ;
+	v8::Persistent<v8::Context>			compile_context;
+	v8::Persistent<v8::ObjectTemplate>  plan_template;
+	v8::Persistent<v8::ObjectTemplate>  cursor_template;
+	v8::Persistent<v8::ObjectTemplate>  window_template;
+	v8::Local<v8::Context> localContext() { return v8::Local<v8::Context>::New(isolate, context) ; }
+	Oid							user_id;
+} plv8_context;
+
+/*
  * A multibyte string in the database encoding. It works more effective
  * when the encoding is UTF8.
  */
@@ -252,7 +270,7 @@ public:
 	}
 };
 
-extern v8::Isolate* plv8_isolate;
+extern plv8_context* current_context;
 extern v8::Local<v8::Function> find_js_function(Oid fn_oid);
 extern v8::Local<v8::Function> find_js_function_by_name(const char *signature);
 extern const char *FormatSPIStatus(int status) throw();
@@ -273,5 +291,8 @@ extern v8::Handle<v8::Function> CreateYieldFunction(Converter *conv, Tuplestores
 extern void Subtransaction(const v8::FunctionCallbackInfo<v8::Value>& info) throw();
 
 extern void SetupPlv8Functions(v8::Handle<v8::ObjectTemplate> plv8);
+extern void SetupPrepFunctions(v8::Handle<v8::ObjectTemplate> templ);
+extern void SetupCursorFunctions(v8::Handle<v8::ObjectTemplate> templ);
+extern void SetupWindowFunctions(v8::Handle<v8::ObjectTemplate> templ);
 
 #endif	// _PLV8_

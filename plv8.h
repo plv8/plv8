@@ -295,4 +295,6 @@ extern void SetupPrepFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupCursorFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupWindowFunctions(v8::Handle<v8::ObjectTemplate> templ);
 
+extern void GetMemoryInfo(v8::Local<v8::Object> obj);
+
 #endif	// _PLV8_

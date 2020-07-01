@@ -61,6 +61,7 @@ PGDLLEXPORT Datum	plcoffee_call_validator(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plls_call_handler(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plls_call_validator(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plv8_reset(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_info(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(plv8_call_handler);
 PG_FUNCTION_INFO_V1(plv8_call_validator);
@@ -69,6 +70,7 @@ PG_FUNCTION_INFO_V1(plcoffee_call_validator);
 PG_FUNCTION_INFO_V1(plls_call_handler);
 PG_FUNCTION_INFO_V1(plls_call_validator);
 PG_FUNCTION_INFO_V1(plv8_reset);
+PG_FUNCTION_INFO_V1(plv8_info);
 
 
 PGDLLEXPORT void _PG_init(void);
@@ -513,6 +515,52 @@ plv8_reset(PG_FUNCTION_ARGS)
 		}
 	}
 	return (Datum) 0;
+}
+
+Datum
+plv8_info(PG_FUNCTION_ARGS)
+{
+	unsigned long		i;
+	unsigned long 		size = ContextVector.size();
+	char 				*infos[size];
+	size_t 				lengths[size];
+	size_t 				total_length = 3; // length of "[]\0"
+
+	for (i = 0; i < size; i++)
+	{
+		Isolate 	   	   *isolate = ContextVector[i]->isolate;
+		Isolate::Scope		scope(isolate);
+		HandleScope			handle_scope(isolate);
+		Local<Context>		context = ContextVector[i]->localContext();
+		Context::Scope		context_scope(context);
+		JSONObject 			JSON;
+		Local<v8::Value>	result;
+		Local<v8::Object>   obj = v8::Object::New(isolate);
+
+		obj->Set(String::NewFromUtf8(isolate, "user"), String::NewFromUtf8(isolate,
+				GetUserNameFromId(ContextVector[i]->user_id, false)));
+		GetMemoryInfo(obj);
+
+		result = JSON.Stringify(obj);
+		CString str(result);
+
+		infos[i] = pstrdup(str.str());
+		lengths[i] = strlen(infos[i]);
+		total_length += lengths[i] + 1; // add 1 byte for ','
+	}
+	char *out = (char *) palloc0(total_length);
+	out[0] = '[';
+	size_t current = 0;
+	for (i = 0; i < size; i++)
+	{
+		++current;
+		strcpy(out + current, infos[i]);
+		pfree(infos[i]);
+		current += lengths[i];
+		out[current] = ',';
+	}
+	out[current] = ']';
+	return CStringGetTextDatum(out);
 }
 
 #if PG_VERSION_NUM >= 90000

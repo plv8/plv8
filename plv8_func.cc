@@ -1637,7 +1637,18 @@ plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args)
 	isolate->GetHeapStatistics(&v8_heap_stats);
 
 	Local<v8::Value>	result;
-	Local<v8::Object> obj = v8::Object::New(isolate);
+	Local<v8::Object>	obj = v8::Object::New(isolate);
+
+	GetMemoryInfo(obj);
+	result = obj;
+	args.GetReturnValue().Set(result);
+}
+
+void GetMemoryInfo(v8::Local<v8::Object> obj) {
+	HeapStatistics  	v8_heap_stats;
+	Isolate 		   *isolate = obj->GetIsolate();
+
+	isolate->GetHeapStatistics(&v8_heap_stats);
 
 	Local<v8::Value> total = Local<v8::Value>::New(isolate, Number::New(isolate, v8_heap_stats.total_heap_size()));
 	Local<v8::Value> used = Local<v8::Value>::New(isolate, Number::New(isolate, v8_heap_stats.used_heap_size()));
@@ -1646,7 +1657,4 @@ plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args)
 	obj->Set(String::NewFromUtf8(isolate, "total_heap_size"), total);
 	obj->Set(String::NewFromUtf8(isolate, "used_heap_size"), used);
 	obj->Set(String::NewFromUtf8(isolate, "external_memory"), external);
-
-	result = obj;
-	args.GetReturnValue().Set(result);
 }

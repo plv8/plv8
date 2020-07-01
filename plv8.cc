@@ -537,8 +537,12 @@ plv8_info(PG_FUNCTION_ARGS)
 		Local<v8::Value>	result;
 		Local<v8::Object>   obj = v8::Object::New(isolate);
 
-		obj->Set(String::NewFromUtf8(isolate, "user"), String::NewFromUtf8(isolate,
-				GetUserNameFromId(ContextVector[i]->user_id, false)));
+#if PG_VERSION_NUM >= 90500
+		char 			   *username = GetUserNameFromId(ContextVector[i]->user_id, false);
+#else
+		char 			   *username = GetUserNameFromId(ContextVector[i]->user_id);
+#endif
+		obj->Set(String::NewFromUtf8(isolate, "user"), String::NewFromUtf8(isolate, username));
 		GetMemoryInfo(obj);
 
 		result = JSON.Stringify(obj);

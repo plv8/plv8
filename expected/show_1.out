@@ -1,0 +1,10 @@
+DO $$
+    const res = plv8.execute('SHOW search_path');
+    plv8.elog(INFO, JSON.stringify(res));
+$$ language plv8;
+INFO:  [{"search_path":"\"$user\", public"}]
+DO $$
+    const res = plv8.execute('EXPLAIN (FORMAT JSON, COSTS OFF) SELECT 1');
+    plv8.elog(INFO, JSON.stringify(res));
+$$ language plv8;
+INFO:  [{"QUERY PLAN":[{"Plan":{"Node Type":"Result","Parallel Aware":false}}]}]

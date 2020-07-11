@@ -72,6 +72,9 @@ else
 		ifeq ($(shell uname -m | grep -o arm),arm)
 			PLATFORM = arm64.release
 		endif
+		ifeq ($(shell uname -m),aarch64)
+			PLATFORM = arm64.release
+		endif
 		ifeq ($(shell uname -m),x86_64)
 			PLATFORM = x64.release
 		endif

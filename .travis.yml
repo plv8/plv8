@@ -24,6 +24,7 @@ before_script:
 
 env:
   matrix:
+    - PGVERSION=12
     - PGVERSION=11
     - PGVERSION=10
     - PGVERSION=9.6

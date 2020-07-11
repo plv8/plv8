@@ -6,8 +6,7 @@ do $$
   };
   [...({})];
 $$ language plv8;
-ERROR:  missing error text
-CONTEXT:  
+ERROR:  Out of memory error
 do $$
   Object.prototype[Symbol.iterator] = function() {
      return {
@@ -16,5 +15,4 @@ do $$
   };
   [...({})];
 $$ language plv8;
-ERROR:  missing error text
-CONTEXT:  
+ERROR:  Out of memory error

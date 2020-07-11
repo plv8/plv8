@@ -37,6 +37,9 @@ $$
 	return "@PLV8_VERSION@";
 $$ LANGUAGE plv8;
 
+CREATE FUNCTION plv8_reset() RETURNS void
+	AS 'MODULE_PATHNAME' LANGUAGE C;
+
 #endif
 
 

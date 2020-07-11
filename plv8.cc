@@ -38,6 +38,10 @@ extern "C" {
 #include "catalog/pg_database.h"
 #endif
 
+#if PG_VERSION_NUM >= 130000
+#include "common/hashfn.h"
+#endif
+
 #include <signal.h>
 
 #ifdef EXECUTION_TIMEOUT
@@ -56,6 +60,7 @@ PGDLLEXPORT Datum	plcoffee_call_handler(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plcoffee_call_validator(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plls_call_handler(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plls_call_validator(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_reset(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(plv8_call_handler);
 PG_FUNCTION_INFO_V1(plv8_call_validator);
@@ -63,6 +68,7 @@ PG_FUNCTION_INFO_V1(plcoffee_call_handler);
 PG_FUNCTION_INFO_V1(plcoffee_call_validator);
 PG_FUNCTION_INFO_V1(plls_call_handler);
 PG_FUNCTION_INFO_V1(plls_call_validator);
+PG_FUNCTION_INFO_V1(plv8_reset);
 
 
 PGDLLEXPORT void _PG_init(void);
@@ -465,6 +471,42 @@ plls_call_handler(PG_FUNCTION_ARGS)
 	return common_pl_call_handler(fcinfo, PLV8_DIALECT_LIVESCRIPT);
 }
 
+Datum
+plv8_reset(PG_FUNCTION_ARGS)
+{
+	Oid					user_id = GetUserId();
+	unsigned long		i;
+	HASH_SEQ_STATUS		status;
+	plv8_proc_cache*	cache;
+
+	for (i = 0; i < ContextVector.size(); i++)
+	{
+		if (ContextVector[i]->user_id == user_id)
+		{
+			plv8_context * context = ContextVector[i];
+			ContextVector.erase(ContextVector.begin() + i);
+			// need to search and reset all the user functions which were created in the old context
+			hash_seq_init(&status, plv8_proc_cache_hash);
+			cache = (plv8_proc_cache *) hash_seq_search(&status);
+			while (cache != nullptr) {
+				if (cache->user_id == user_id) {
+					if (cache->prosrc)
+					{
+						pfree(cache->prosrc);
+						cache->prosrc = NULL;
+					}
+					cache->function.Reset();
+				}
+				cache = (plv8_proc_cache *) hash_seq_search(&status);
+			}
+			context->context.Reset();
+			pfree(context);
+			break;
+		}
+	}
+	return (Datum) 0;
+}
+
 #if PG_VERSION_NUM >= 90000
 static Datum
 common_pl_inline_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
@@ -614,8 +656,11 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 	signal(SIGINT, (void (*)(int)) int_handler);
 	signal(SIGTERM, (void (*)(int)) term_handler);
 
-	if (result.IsEmpty())
+	if (result.IsEmpty()) {
+		if (plv8_isolate->IsExecutionTerminating())
+			throw js_error("Out of memory error");
 		throw js_error(try_catch);
+	}
 
 	if (status < 0)
 		throw js_error(FormatSPIStatus(status));
@@ -950,9 +995,13 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 	/* except for TRIGGER, RECORD, INTERNAL, VOID or polymorphic types */
 	if (functyptype == TYPTYPE_PSEUDO)
 	{
-		/* we assume OPAQUE with no arguments means a trigger */
-		if (proc->prorettype == TRIGGEROID ||
-			(proc->prorettype == OPAQUEOID && proc->pronargs == 0))
+#if PG_VERSION_NUM >= 130000
+                if (proc->prorettype == TRIGGEROID)
+#else
+                /* we assume OPAQUE with no arguments means a trigger */
+                if (proc->prorettype == TRIGGEROID ||
+                        (proc->prorettype == OPAQUEOID && proc->pronargs == 0))
+#endif
 			is_trigger = true;
 		else if (proc->prorettype != RECORDOID &&
 			proc->prorettype != VOIDOID &&
@@ -1272,8 +1321,11 @@ CompileDialect(const char *src, Dialect dialect)
 		v8::Local<v8::Value> result;
 		if (!script->Run(plv8_isolate->GetCurrentContext()).ToLocal(&result))
 			throw js_error(try_catch);
-		if (result.IsEmpty())
+		if (result.IsEmpty()) {
+			if (plv8_isolate->IsExecutionTerminating())
+				throw js_error("Script is out of memory");
 			throw js_error(try_catch);
+		}
 	}
 
 	Local<Object>	compiler = Local<Object>::Cast(ctx->Global()->Get(key));
@@ -1285,8 +1337,11 @@ CompileDialect(const char *src, Dialect dialect)
 	args[0] = ToString(src);
 	MaybeLocal<v8::Value>	value = func->Call(ctx, compiler, nargs, args);
 
-	if (value.IsEmpty())
+	if (value.IsEmpty()) {
+		if (plv8_isolate->IsExecutionTerminating())
+			throw js_error("Out of memory error");
 		throw js_error(try_catch);
+	}
 	CString		result(value.ToLocalChecked());
 
 	PG_TRY();
@@ -1427,8 +1482,11 @@ CompileFunction(
 	v8::Local<v8::Value> result;
 	if (!script->Run(plv8_isolate->GetCurrentContext()).ToLocal(&result))
 		throw js_error(try_catch);
-	if (result.IsEmpty())
+	if (result.IsEmpty()) {
+		if (plv8_isolate->IsExecutionTerminating())
+			throw js_error("Script is out of memory");
 		throw js_error(try_catch);
+	}
 
 	return handle_scope.Escape(Local<Function>::Cast(result));
 }
@@ -1598,7 +1656,9 @@ GetGlobalContext(Persistent<Context>& global_context)
 #if PG_VERSION_NUM < 120000
 			FunctionCallInfoData fake_fcinfo;
 #else
-			FunctionCallInfo fake_fcinfo;
+			// Stack-allocate FunctionCallInfoBaseData with
+			// space for 2 arguments:
+			LOCAL_FCINFO(fake_fcinfo, 2);
 #endif
 			FmgrInfo	flinfo;
 
@@ -1620,7 +1680,6 @@ GetGlobalContext(Persistent<Context>& global_context)
 				fake_fcinfo.arg[1] = CStringGetDatum(arg);
 				Datum ret = has_function_privilege_id(&fake_fcinfo);
 #else
-				MemSet(fake_fcinfo, 0, sizeof(fake_fcinfo));
 				MemSet(&flinfo, 0, sizeof(flinfo));
 				fake_fcinfo->flinfo = &flinfo;
 				flinfo.fn_oid = InvalidOid;

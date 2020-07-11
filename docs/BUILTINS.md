@@ -29,7 +29,7 @@ plv8.elog(DEBUG1, 'Hello', `${msg}!`);
 
 See the [PostgreSQL manual](https://www.postgresql.org/docs/current/static/runtime-config-logging.html#RUNTIME-CONFIG-SEVERITY-LEVELS) for information on each error level.
 
-### `plv8.quote_literal`, `plv8.nullable`, `plv8.quote_indent`
+### `plv8.quote_literal`, `plv8.nullable`, `plv8.quote_ident`
 
 Each function for the quote family is identical to the built-in SQL function
 with the same name.

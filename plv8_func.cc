@@ -138,6 +138,15 @@ SPIResultToValue(int status)
 
 	switch (status)
 	{
+	case SPI_OK_UTILITY:
+ 	case SPI_OK_REWRITTEN:
+ 	{
+ 		if (SPI_tuptable == NULL) {
+ 			result = Int32::New(plv8_isolate, SPI_processed);
+ 			break;
+ 		}
+ 		// will fallthrough here to the "SELECT" logic below
+ 	}
 	case SPI_OK_SELECT:
 	case SPI_OK_INSERT_RETURNING:
 	case SPI_OK_DELETE_RETURNING:

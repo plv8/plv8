@@ -14,9 +14,9 @@ Building PLV8 for MacOS or Linux has some specific requirements:
 Downloading the source code is very straightforward:
 
 ```
-$ wget https://github.com/plv8/plv8/archive/v2.3.3.tar.gz
-$ tar -xvzf v2.3.3.tar.gz
-$ cd plv8-2.3.3
+$ wget https://github.com/plv8/plv8/archive/v2.3.15.tar.gz
+$ tar -xvzf v2.3.15.tar.gz
+$ cd plv8-2.3.15
 $ make
 ```
 

@@ -143,7 +143,7 @@ SPIResultToValue(int status)
 	case SPI_OK_REWRITTEN:
 	{
 		if (SPI_tuptable == NULL) {
-			result = Int32::New(plv8_isolate, SPI_processed);
+			result = Int32::New(isolate, SPI_processed);
 			break;
 		}
 		// will fallthrough here to the "SELECT" logic below

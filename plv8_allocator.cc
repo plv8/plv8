@@ -11,13 +11,14 @@ ArrayAllocator::ArrayAllocator(size_t limit) : heap_limit(limit),
 
 bool ArrayAllocator::check(const size_t length) {
 	if (heap_size + allocated + length > next_size) {
+		v8::Isolate* isolate = v8::Isolate::GetCurrent();
 		v8::HeapStatistics heap_statistics;
-		plv8_isolate->GetHeapStatistics(&heap_statistics);
+		isolate->GetHeapStatistics(&heap_statistics);
 		heap_size = heap_statistics.total_heap_size();
 		if (heap_size + allocated + length > heap_limit) {
 			// wee need to force GC here,
 			// otherwise the next allocation will fail even if there is a space for it
-			plv8_isolate->LowMemoryNotification();
+			isolate->LowMemoryNotification();
 			heap_size = heap_statistics.total_heap_size();
 			if (heap_size + allocated + length > heap_limit) {
 				return false;

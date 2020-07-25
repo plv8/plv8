@@ -172,26 +172,29 @@ inferred_datum_type(Handle<v8::Value> value)
 
 static Local<v8::Value>
 GetJsonbValue(JsonbValue *scalarVal) {
+  Isolate *isolate = Isolate::GetCurrent();
+
   if (scalarVal->type == jbvNull) {
-		return Local<v8::Value>::New(plv8_isolate, Null(plv8_isolate));
+		return Local<v8::Value>::New(isolate, Null(isolate));
   } else if (scalarVal->type == jbvString) {
     char t[ scalarVal->val.string.len + 1 ];
     strncpy(t, scalarVal->val.string.val, scalarVal->val.string.len);
     t[ scalarVal->val.string.len ] = '\0';
 
-		return Local<v8::Value>::New(plv8_isolate, String::NewFromUtf8(plv8_isolate, t));
+		return Local<v8::Value>::New(isolate, String::NewFromUtf8(isolate, t));
   } else if (scalarVal->type == jbvNumeric) {
-		return Local<v8::Value>::New(plv8_isolate, Number::New(plv8_isolate, DatumGetFloat8(DirectFunctionCall1(numeric_float8, PointerGetDatum(scalarVal->val.numeric)))));
+		return Local<v8::Value>::New(isolate, Number::New(isolate, DatumGetFloat8(DirectFunctionCall1(numeric_float8, PointerGetDatum(scalarVal->val.numeric)))));
   } else if (scalarVal->type == jbvBool) {
-		return Local<v8::Value>::New(plv8_isolate, Boolean::New(plv8_isolate, scalarVal->val.boolean));
+		return Local<v8::Value>::New(isolate, Boolean::New(isolate, scalarVal->val.boolean));
   } else {
     elog(ERROR, "unknown jsonb scalar type");
-    return Local<v8::Value>::New(plv8_isolate, Null(plv8_isolate));
+    return Local<v8::Value>::New(isolate, Null(isolate));
   }
 }
 
 static Local<v8::Object>
 JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
+  Isolate *isolate = Isolate::GetCurrent();
   JsonbValue val;
 	Local<v8::Value> out;
 	int32 count = 0;
@@ -203,7 +206,7 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
   while (token != WJB_DONE) {
     switch (token) {
     case WJB_BEGIN_OBJECT:
-			obj = v8::Object::New(plv8_isolate);
+			obj = v8::Object::New(isolate);
 			if (container->IsArray()) {
 				container->Set(count, JsonbIterate(it, obj));
 				count++;
@@ -218,7 +221,7 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
       break;
 
     case WJB_BEGIN_ARRAY:
-			obj = v8::Array::New(plv8_isolate);
+			obj = v8::Array::New(isolate);
 			if (container->IsArray()) {
 				container->Set(count, JsonbIterate(it, obj));
 				count++;
@@ -264,6 +267,7 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
 
 static Local<Object>
 ConvertJsonb(JsonbContainer *in) {
+	Isolate *isolate = Isolate::GetCurrent();
 	JsonbValue val;
 	JsonbIterator *it = JsonbIteratorInit(in);
 	JsonbIteratorToken token = JsonbIteratorNext(&it, &val, false);
@@ -271,9 +275,9 @@ ConvertJsonb(JsonbContainer *in) {
 	Local<Object> container;
 
 	if (token == WJB_BEGIN_ARRAY) {
-		container = v8::Array::New(plv8_isolate);
+		container = v8::Array::New(isolate);
 	} else {
-		container = v8::Object::New(plv8_isolate);
+		container = v8::Object::New(isolate);
 	}
 
 	return JsonbIterate(&it, container);
@@ -397,44 +401,45 @@ TimeAs8601 (double millis) {
 
 static JsonbValue *
 JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorToken type) {
+	Isolate *isolate = Isolate::GetCurrent();
 	JsonbValue val;
 
 	// if the token type is a key, the only valid value is jbvString
 	if (type == WJB_KEY) {
 		val.type = jbvString;
-		String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+		String::Utf8Value utf8(isolate, value->ToString(isolate));
 		val.val.string.val = ToCStringCopy(utf8);
 		val.val.string.len = utf8.length();
 	} else {
 		if (value->IsBoolean()) {
 			val.type = jbvBool;
-			val.val.boolean = value->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked();
+			val.val.boolean = value->BooleanValue(isolate->GetCurrentContext()).ToChecked();
 		} else if (value->IsNull()) {
 			val.type = jbvNull;
 		} else if (value->IsUndefined()) {
 			return NULL;
 		} else if (value->IsString()) {
 			val.type = jbvString;
-			String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+			String::Utf8Value utf8(isolate, value->ToString(isolate));
 			val.val.string.val = ToCStringCopy(utf8);
 			val.val.string.len = utf8.length();
 		} else if (value->IsNumber()) {
 			if (value->IsInt32()) {
-				int32 iv = value->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+				int32 iv = value->Int32Value(isolate->GetCurrentContext()).ToChecked();
 				val.val.numeric = DatumGetNumeric(DirectFunctionCall1(int4_numeric, Int32GetDatum(iv)));
 				val.type = jbvNumeric;
 			} else if (value->IsUint32()) {
-				int64 iv = (int64) value->Uint32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+				int64 iv = (int64) value->Uint32Value(isolate->GetCurrentContext()).ToChecked();
 				val.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric, Int64GetDatum(iv)));
 				val.type = jbvNumeric;
 			} else {
-				float8 fv = (float8) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked();
+				float8 fv = (float8) value->NumberValue(isolate->GetCurrentContext()).ToChecked();
 
 				val.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric, Float8GetDatum(fv)));
 				val.type = jbvNumeric;
 			}
 		} else if (value->IsDate()) {
-			double t = value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked();
+			double t = value->NumberValue(isolate->GetCurrentContext()).ToChecked();
 			if (isnan(t)) {
 				val.type = jbvNull;
 			} else {
@@ -445,7 +450,7 @@ JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorTo
 		} else {
 			LogType(value, false);
 			val.type = jbvString;
-			String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+			String::Utf8Value utf8(isolate, value->ToString(isolate));
 			val.val.string.val = ToCStringCopy(utf8);
 			val.val.string.len = utf8.length();
 		}
@@ -477,8 +482,9 @@ JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object) {
 
 static JsonbValue *
 JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object) {
+	Isolate *isolate = Isolate::GetCurrent();
 	JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_OBJECT, NULL);
-	Local<Array> arr = object->GetOwnPropertyNames(plv8_isolate->GetCurrentContext()).ToLocalChecked();
+	Local<Array> arr = object->GetOwnPropertyNames(isolate->GetCurrentContext()).ToLocalChecked();
 
 	for (size_t i = 0; i < arr->Length(); i++) {
 		Local<v8::Value> v = arr->Get(i);
@@ -545,13 +551,14 @@ static Local<Object>
 CreateExternalArray(void *data, plv8_external_array_type array_type,
 					int byte_size, Datum datum)
 {
+	Isolate* isolate = Isolate::GetCurrent();
 	Local<v8::ArrayBuffer> buffer;
 	Local<v8::TypedArray> array;
 
-	buffer = v8::ArrayBuffer::New(plv8_isolate, byte_size);
+	buffer = v8::ArrayBuffer::New(isolate, byte_size);
 	if (buffer.IsEmpty())
 	{
-		return Local<Object>();
+		return {};
 	}
 
 	switch (array_type)
@@ -585,7 +592,7 @@ CreateExternalArray(void *data, plv8_external_array_type array_type,
 	default:
 		throw js_error("unexpected array type");
 	}
-	array->SetInternalField(0, External::New(plv8_isolate, DatumGetPointer(datum)));
+	array->SetInternalField(0, External::New(isolate, DatumGetPointer(datum)));
 
 	// needs to be a copy, as the data could go away
 	memcpy(buffer->GetContents().Data(), data, byte_size);
@@ -621,6 +628,7 @@ ToDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 static Datum
 ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 {
+	Isolate* isolate = Isolate::GetCurrent();
 	if (type->category == TYPCATEGORY_COMPOSITE)
 		return ToRecordDatum(value, isnull, type);
 
@@ -635,11 +643,11 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	{
 	case OIDOID:
 		if (value->IsNumber())
-			return ObjectIdGetDatum(value->Uint32Value(plv8_isolate->GetCurrentContext()).ToChecked());
+			return ObjectIdGetDatum(value->Uint32Value(isolate->GetCurrentContext()).ToChecked());
 		break;
 	case BOOLOID:
 		if (value->IsBoolean())
-			return BoolGetDatum(value->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked());
+			return BoolGetDatum(value->BooleanValue(isolate->GetCurrentContext()).ToChecked());
 		break;
 	case INT2OID:
 		if (value->IsNumber())
@@ -647,7 +655,7 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			return DirectFunctionCall1(int82,
 					Int64GetDatum(value->IntegerValue()));
 #else
-			return Int16GetDatum((int16) value->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked());
+			return Int16GetDatum((int16) value->Int32Value(isolate->GetCurrentContext()).ToChecked());
 #endif
 		break;
 	case INT4OID:
@@ -656,7 +664,7 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			return DirectFunctionCall1(int84,
 					Int64GetDatum(value->IntegerValue()));
 #else
-			return Int32GetDatum((int32) value->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked());
+			return Int32GetDatum((int32) value->Int32Value(isolate->GetCurrentContext()).ToChecked());
 #endif
 		break;
 	case INT8OID:
@@ -665,33 +673,33 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			return Int64GetDatum((int64) b->Int64Value());
 		}
 		if (value->IsNumber())
-			return Int64GetDatum((int64) value->IntegerValue(plv8_isolate->GetCurrentContext()).ToChecked());
+			return Int64GetDatum((int64) value->IntegerValue(isolate->GetCurrentContext()).ToChecked());
 		break;
 	case FLOAT4OID:
 		if (value->IsNumber())
-			return Float4GetDatum((float4) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
+			return Float4GetDatum((float4) value->NumberValue(isolate->GetCurrentContext()).ToChecked());
 		break;
 	case FLOAT8OID:
 		if (value->IsNumber())
-			return Float8GetDatum((float8) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
+			return Float8GetDatum((float8) value->NumberValue(isolate->GetCurrentContext()).ToChecked());
 		break;
 	case NUMERICOID:
 		if (value->IsBigInt()) {
-			String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+			String::Utf8Value utf8(isolate, value->ToString(isolate));
 			return DirectFunctionCall3(numeric_in, (Datum) *utf8, ObjectIdGetDatum(InvalidOid), Int32GetDatum((int32) -1));
 		}
 		if (value->IsNumber())
 			return DirectFunctionCall1(float8_numeric,
-					Float8GetDatum((float8) value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked()));
+					Float8GetDatum((float8) value->NumberValue(isolate->GetCurrentContext()).ToChecked()));
 		break;
 	case DATEOID:
 		if (value->IsDate())
-			return EpochToDate(value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
+			return EpochToDate(value->NumberValue(isolate->GetCurrentContext()).ToChecked());
 		break;
 	case TIMESTAMPOID:
 	case TIMESTAMPTZOID:
 		if (value->IsDate())
-			return EpochToTimestampTz(value->NumberValue(plv8_isolate->GetCurrentContext()).ToChecked());
+			return EpochToTimestampTz(value->NumberValue(isolate->GetCurrentContext()).ToChecked());
 		break;
 	case BYTEAOID:
 		{
@@ -902,8 +910,9 @@ ToRecordDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 Local<v8::Value>
 ToValue(Datum datum, bool isnull, plv8_type *type)
 {
+	Isolate* isolate = Isolate::GetCurrent();
 	if (isnull)
-		return Local<v8::Value>::New(plv8_isolate, Null(plv8_isolate));
+		return Local<v8::Value>::New(isolate, Null(isolate));
 	else if (type->category == TYPCATEGORY_ARRAY || type->typid == RECORDARRAYOID)
 		return ToArrayValue(datum, isnull, type);
 	else if (type->category == TYPCATEGORY_COMPOSITE || type->typid == RECORDOID)
@@ -915,39 +924,40 @@ ToValue(Datum datum, bool isnull, plv8_type *type)
 static Local<v8::Value>
 ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 {
+	Isolate* isolate = Isolate::GetCurrent();
 	switch (type->typid)
 	{
 	case OIDOID:
-		return Uint32::New(plv8_isolate, DatumGetObjectId(datum));
+		return Uint32::New(isolate, DatumGetObjectId(datum));
 	case BOOLOID:
-		return Boolean::New(plv8_isolate, DatumGetBool(datum));
+		return Boolean::New(isolate, DatumGetBool(datum));
 	case INT2OID:
-		return Int32::New(plv8_isolate, DatumGetInt16(datum));
+		return Int32::New(isolate, DatumGetInt16(datum));
 	case INT4OID:
-		return Int32::New(plv8_isolate, DatumGetInt32(datum));
+		return Int32::New(isolate, DatumGetInt32(datum));
 	case INT8OID: {
 #if BIGINT_GRACEFUL
 		int64 v = DatumGetInt64(datum);
 
 		if (v > INT32_MAX || v < INT32_MIN)
-			return BigInt::New(plv8_isolate, v);
-		return Number::New(plv8_isolate, v);
+			return BigInt::New(isolate, v);
+		return Number::New(isolate, v);
 #else
-		return BigInt::New(plv8_isolate, DatumGetInt64(datum));
+		return BigInt::New(isolate, DatumGetInt64(datum));
 #endif
 	}
 	case FLOAT4OID:
-		return Number::New(plv8_isolate, DatumGetFloat4(datum));
+		return Number::New(isolate, DatumGetFloat4(datum));
 	case FLOAT8OID:
-		return Number::New(plv8_isolate, DatumGetFloat8(datum));
+		return Number::New(isolate, DatumGetFloat8(datum));
 	case NUMERICOID:
-		return Number::New(plv8_isolate, DatumGetFloat8(
+		return Number::New(isolate, DatumGetFloat8(
 			DirectFunctionCall1(numeric_float8, datum)));
 	case DATEOID:
-		return Date::New(plv8_isolate->GetCurrentContext(), DateToEpoch(DatumGetDateADT(datum))).ToLocalChecked();
+		return Date::New(isolate->GetCurrentContext(), DateToEpoch(DatumGetDateADT(datum))).ToLocalChecked();
 	case TIMESTAMPOID:
 	case TIMESTAMPTZOID:
-		return Date::New(plv8_isolate->GetCurrentContext(), TimestampTzToEpoch(DatumGetTimestampTz(datum))).ToLocalChecked();
+		return Date::New(isolate->GetCurrentContext(), TimestampTzToEpoch(DatumGetTimestampTz(datum))).ToLocalChecked();
 	case TEXTOID:
 	case VARCHAROID:
 	case BPCHAROID:
@@ -981,7 +991,7 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 
 		Local<v8::Value>	jsonString = ToString(str, len);
 		JSONObject JSON;
-		Local<v8::Value> result = Local<v8::Value>::New(plv8_isolate, JSON.Parse(jsonString));
+		Local<v8::Value> result = Local<v8::Value>::New(isolate, JSON.Parse(jsonString));
 
 		if (p != DatumGetPointer(datum))
 			pfree(p);	// free if detoasted
@@ -997,7 +1007,7 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 #else
 		Local<v8::Value>	jsonString = ToString(datum, type);
 		JSONObject JSON;
-		Local<v8::Value> result = Local<v8::Value>::New(plv8_isolate, JSON.Parse(jsonString));
+		Local<v8::Value> result = Local<v8::Value>::New(isolate, JSON.Parse(jsonString));
 #endif
 
 		return result;
@@ -1042,7 +1052,7 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 	deconstruct_array(DatumGetArrayTypeP(datum),
 						type->typid, type->len, type->byval, type->align,
 						&values, &nulls, &nelems);
-	Local<Array>  result = Array::New(plv8_isolate, nelems);
+	Local<Array>  result = Array::New(Isolate::GetCurrent(), nelems);
 	plv8_type base = { 0 };
 	bool    ispreferred;
 
@@ -1126,7 +1136,7 @@ ToString(Datum value, plv8_type *type)
 
 	Local<String>	result =
 		encoding == PG_UTF8
-			? String::NewFromUtf8(plv8_isolate, str)
+			? String::NewFromUtf8(Isolate::GetCurrent(), str)
 			: ToString(str, strlen(str), encoding);
 	pfree(str);
 
@@ -1137,9 +1147,10 @@ Local<String>
 ToString(const char *str, int len, int encoding)
 {
 	char		   *utf8;
+	Isolate		   *isolate = Isolate::GetCurrent();
 
 	if (str == NULL) {
-		return String::NewFromUtf8(plv8_isolate, "(null)", String::kNormalString, 6);
+		return String::NewFromUtf8(isolate, "(null)", String::kNormalString, 6);
 	}
 	if (len < 0)
 		len = strlen(str);
@@ -1157,7 +1168,7 @@ ToString(const char *str, int len, int encoding)
 
 	if (utf8 != str)
 		len = strlen(utf8);
-	Local<String> result = String::NewFromUtf8(plv8_isolate, utf8, String::kNormalString, len);
+	Local<String> result = String::NewFromUtf8(isolate, utf8, String::kNormalString, len);
 	if (utf8 != str)
 		pfree(utf8);
 	return result;
@@ -1280,7 +1291,7 @@ EpochToDate(double epoch)
 	PG_RETURN_DATEADT((DateADT) epoch);
 }
 
-CString::CString(Handle<v8::Value> value) : m_utf8(plv8_isolate, value)
+CString::CString(Handle<v8::Value> value) : m_utf8(Isolate::GetCurrent(), value)
 {
 	m_str = ToCString(m_utf8);
 }
@@ -1294,10 +1305,11 @@ CString::~CString()
 bool CString::toStdString(v8::Handle<v8::Value> value, std::string &out)
 {
 	if(value.IsEmpty()) return false;
-	String::Utf8Value utf8(plv8_isolate, value->ToString(plv8_isolate));
+	Isolate* isolate = Isolate::GetCurrent();
+	String::Utf8Value utf8(isolate, value->ToString(isolate));
 
   // convert it to string
-	//auto obj = value->ToString(plv8_isolate);
+	//auto obj = value->ToString(isolate);
 	//String::Utf8Value utf8(val);
 	if(*utf8) {
 		out = *utf8;

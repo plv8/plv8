@@ -79,7 +79,8 @@ quote_literal_cstr(const char *rawstr)
 static inline Local<v8::Value>
 WrapCallback(FunctionCallback func)
 {
-	return External::New(plv8_isolate,
+	Isolate* isolate = Isolate::GetCurrent();
+	return External::New(isolate,
 			reinterpret_cast<void *>(
 				reinterpret_cast<uintptr_t>(func)));
 }
@@ -95,8 +96,9 @@ static inline void
 SetCallback(Handle<ObjectTemplate> obj, const char *name,
 			FunctionCallback func, PropertyAttribute attr = None)
 {
-	obj->Set(String::NewFromUtf8(plv8_isolate, name, String::kInternalizedString),
-				FunctionTemplate::New(plv8_isolate, plv8_FunctionInvoker,
+	Isolate* isolate = Isolate::GetCurrent();
+	obj->Set(String::NewFromUtf8(isolate, name, String::kInternalizedString),
+				FunctionTemplate::New(isolate, plv8_FunctionInvoker,
 					WrapCallback(func)), attr);
 }
 
@@ -110,10 +112,6 @@ public:
 	void enter();
 	void exit(bool success);
 };
-
-Persistent<ObjectTemplate> PlanTemplate;
-Persistent<ObjectTemplate> CursorTemplate;
-Persistent<ObjectTemplate> WindowObjectTemplate;
 
 static text *
 charToText(char *string)
@@ -131,10 +129,11 @@ charToText(char *string)
 static Handle<v8::Value>
 SPIResultToValue(int status)
 {
+	Isolate* isolate = Isolate::GetCurrent();
 	Local<v8::Value>	result;
 
 	if (status < 0) {
-		plv8_isolate->ThrowException(String::NewFromUtf8(plv8_isolate, FormatSPIStatus(status)));
+		isolate->ThrowException(String::NewFromUtf8(isolate, FormatSPIStatus(status)));
 		return result;
 	}
 
@@ -156,7 +155,7 @@ SPIResultToValue(int status)
 	{
 		int				nrows = SPI_processed;
 		Converter		conv(SPI_tuptable->tupdesc);
-		Local<Array>	rows = Array::New(plv8_isolate, nrows);
+		Local<Array>	rows = Array::New(isolate, nrows);
 
 		for (int r = 0; r < nrows; r++)
 			rows->Set(r, conv.ToValue(SPI_tuptable->vals[r]));
@@ -165,7 +164,7 @@ SPIResultToValue(int status)
 		break;
 	}
 	default:
-		result = Int32::New(plv8_isolate, SPI_processed);
+		result = Int32::New(isolate, SPI_processed);
 		break;
 	}
 
@@ -203,9 +202,10 @@ SubTranBlock::exit(bool success)
 
 JSONObject::JSONObject()
 {
-	Handle<Context> context = plv8_isolate->GetCurrentContext();
+	Isolate* isolate = v8::Isolate::GetCurrent();
+	Handle<Context> context = isolate->GetCurrentContext();
 	Handle<Object> global = context->Global();
-	MaybeLocal<v8::Object> maybeJson = global->Get(String::NewFromUtf8(plv8_isolate, "JSON", String::kInternalizedString))->ToObject(plv8_isolate->GetCurrentContext());
+	MaybeLocal<v8::Object> maybeJson = global->Get(String::NewFromUtf8(isolate, "JSON", String::kInternalizedString))->ToObject(isolate->GetCurrentContext());
 	if (maybeJson.IsEmpty())
 		throw js_error("JSON not found");
 	m_json = maybeJson.ToLocalChecked();
@@ -217,14 +217,15 @@ JSONObject::JSONObject()
 Handle<v8::Value>
 JSONObject::Parse(Handle<v8::Value> str)
 {
+	Isolate* isolate = v8::Isolate::GetCurrent();
 	Handle<Function> parse_func =
-		Handle<Function>::Cast(m_json->Get(String::NewFromUtf8(plv8_isolate, "parse", String::kInternalizedString)));
+		Handle<Function>::Cast(m_json->Get(String::NewFromUtf8(isolate, "parse", String::kInternalizedString)));
 
 	if (parse_func.IsEmpty())
 		throw js_error("JSON.parse() not found");
 
-	TryCatch try_catch(plv8_isolate);
-	MaybeLocal<v8::Value> value = parse_func->Call(plv8_isolate->GetCurrentContext(), m_json, 1, &str);
+	TryCatch try_catch(isolate);
+	MaybeLocal<v8::Value> value = parse_func->Call(isolate->GetCurrentContext(), m_json, 1, &str);
 	if (value.IsEmpty())
 		throw js_error(try_catch);
 	return value.ToLocalChecked();
@@ -236,14 +237,15 @@ JSONObject::Parse(Handle<v8::Value> str)
 Handle<v8::Value>
 JSONObject::Stringify(Handle<v8::Value> val)
 {
+	Isolate* isolate = v8::Isolate::GetCurrent();
 	Handle<Function> stringify_func =
-		Handle<Function>::Cast(m_json->Get(String::NewFromUtf8(plv8_isolate, "stringify", String::kInternalizedString)));
+		Handle<Function>::Cast(m_json->Get(String::NewFromUtf8(isolate, "stringify", String::kInternalizedString)));
 
 	if (stringify_func.IsEmpty())
 		throw js_error("JSON.stringify() not found");
 
-	TryCatch try_catch(plv8_isolate);
-	MaybeLocal<v8::Value> value = stringify_func->Call(plv8_isolate->GetCurrentContext(), m_json, 1, &val);
+	TryCatch try_catch(isolate);
+	MaybeLocal<v8::Value> value = stringify_func->Call(isolate->GetCurrentContext(), m_json, 1, &val);
 	if (value.IsEmpty())
 		throw js_error(try_catch);
 	return value.ToLocalChecked();
@@ -270,6 +272,48 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	plv8->SetInternalFieldCount(PLV8_INTNL_MAX);
 }
 
+void
+SetupPrepFunctions(Handle<ObjectTemplate> templ)
+{
+	templ->SetInternalFieldCount(2);
+	SetCallback(templ, "cursor", plv8_PlanCursor);
+	SetCallback(templ, "execute", plv8_PlanExecute);
+	SetCallback(templ, "free", plv8_PlanFree);
+}
+
+void
+SetupCursorFunctions(Handle<ObjectTemplate> templ)
+{
+	templ->SetInternalFieldCount(1);
+	SetCallback(templ, "fetch", plv8_CursorFetch);
+	SetCallback(templ, "move", plv8_CursorMove);
+	SetCallback(templ, "close", plv8_CursorClose);
+}
+
+void
+SetupWindowFunctions(Handle<ObjectTemplate> templ)
+{
+	Isolate *isolate = Isolate::GetCurrent();
+	/* We store fcinfo here. */
+	templ->SetInternalFieldCount(1);
+
+	/* Functions. */
+	SetCallback(templ, "get_partition_local", plv8_WinGetPartitionLocal);
+	SetCallback(templ, "set_partition_local", plv8_WinSetPartitionLocal);
+	SetCallback(templ, "get_current_position", plv8_WinGetCurrentPosition);
+	SetCallback(templ, "get_partition_row_count", plv8_WinGetPartitionRowCount);
+	SetCallback(templ, "set_mark_position", plv8_WinSetMarkPosition);
+	SetCallback(templ, "rows_are_peers", plv8_WinRowsArePeers);
+	SetCallback(templ, "get_func_arg_in_partition", plv8_WinGetFuncArgInPartition);
+	SetCallback(templ, "get_func_arg_in_frame", plv8_WinGetFuncArgInFrame);
+	SetCallback(templ, "get_func_arg_current", plv8_WinGetFuncArgCurrent);
+
+	/* Constants for get_func_in_XXX() */
+	templ->Set(String::NewFromUtf8(isolate, "SEEK_CURRENT", String::kInternalizedString), Int32::New(isolate, WINDOW_SEEK_CURRENT));
+	templ->Set(String::NewFromUtf8(isolate, "SEEK_HEAD", String::kInternalizedString), Int32::New(isolate, WINDOW_SEEK_HEAD));
+	templ->Set(String::NewFromUtf8(isolate, "SEEK_TAIL", String::kInternalizedString), Int32::New(isolate, WINDOW_SEEK_TAIL));
+}
+
 /*
  * v8 is not exception-safe! We cannot throw C++ exceptions over v8 functions.
  * So, we catch C++ exceptions and convert them to JavaScript ones.
@@ -277,7 +321,8 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 static void
 plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 {
-	HandleScope		handle_scope(plv8_isolate);
+	Isolate *		isolate = args.GetIsolate();
+	HandleScope		handle_scope(isolate);
 	MemoryContext	ctx = CurrentMemoryContext;
 	FunctionCallback	fn = UnwrapCallback(args.Data());
 
@@ -287,7 +332,7 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 	}
 	catch (js_error& e)
 	{
-		args.GetReturnValue().Set(plv8_isolate->ThrowException(e.error_object()));
+		args.GetReturnValue().Set(isolate->ThrowException(e.error_object()));
 	}
 	catch (pg_error& e)
 	{
@@ -298,46 +343,46 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 		Handle<String> sqlerrcode = ToString(unpack_sql_state(edata->sqlerrcode));
 #if PG_VERSION_NUM >= 90300
 		Handle<Primitive> schema_name = edata->schema_name ?
-			Handle<Primitive>(ToString(edata->schema_name)) : Null(plv8_isolate);
+			Handle<Primitive>(ToString(edata->schema_name)) : Null(isolate);
 		Handle<Primitive> table_name = edata->table_name ?
-			Handle<Primitive>(ToString(edata->table_name)) : Null(plv8_isolate);
+			Handle<Primitive>(ToString(edata->table_name)) : Null(isolate);
 		Handle<Primitive> column_name = edata->column_name ?
-			Handle<Primitive>(ToString(edata->column_name)) : Null(plv8_isolate);
+			Handle<Primitive>(ToString(edata->column_name)) : Null(isolate);
 		Handle<Primitive> datatype_name = edata->datatype_name ?
-			Handle<Primitive>(ToString(edata->datatype_name)) : Null(plv8_isolate);
+			Handle<Primitive>(ToString(edata->datatype_name)) : Null(isolate);
 		Handle<Primitive> constraint_name = edata->constraint_name ?
-			Handle<Primitive>(ToString(edata->constraint_name)) : Null(plv8_isolate);
+			Handle<Primitive>(ToString(edata->constraint_name)) : Null(isolate);
 		Handle<Primitive> detail = edata->detail ?
-			Handle<Primitive>(ToString(edata->detail)) : Null(plv8_isolate);
+			Handle<Primitive>(ToString(edata->detail)) : Null(isolate);
 		Handle<Primitive> hint = edata->hint ?
-			Handle<Primitive>(ToString(edata->hint)) : Null(plv8_isolate);
+			Handle<Primitive>(ToString(edata->hint)) : Null(isolate);
 		Handle<Primitive> context = edata->context ?
-			Handle<Primitive>(ToString(edata->context)) : Null(plv8_isolate);
+			Handle<Primitive>(ToString(edata->context)) : Null(isolate);
 		Handle<Primitive> internalquery = edata->internalquery ?
-			Handle<Primitive>(ToString(edata->internalquery)) : Null(plv8_isolate);
-		Handle<Integer> code = Uint32::New(plv8_isolate, edata->sqlerrcode);
+			Handle<Primitive>(ToString(edata->internalquery)) : Null(isolate);
+		Handle<Integer> code = Uint32::New(isolate, edata->sqlerrcode);
 
 #endif
 
 		FlushErrorState();
 		FreeErrorData(edata);
 
-		Handle<v8::Object> err = Exception::Error(message)->ToObject(plv8_isolate->GetCurrentContext()).ToLocalChecked();
-		err->Set(String::NewFromUtf8(plv8_isolate, "sqlerrcode"), sqlerrcode);
+		Handle<v8::Object> err = Exception::Error(message)->ToObject(isolate->GetCurrentContext()).ToLocalChecked();
+		err->Set(String::NewFromUtf8(isolate, "sqlerrcode"), sqlerrcode);
 #if PG_VERSION_NUM >= 90300
-		err->Set(String::NewFromUtf8(plv8_isolate, "schema_name"), schema_name);
-		err->Set(String::NewFromUtf8(plv8_isolate, "table_name"), table_name);
-		err->Set(String::NewFromUtf8(plv8_isolate, "column_name"), column_name);
-		err->Set(String::NewFromUtf8(plv8_isolate, "datatype_name"), datatype_name);
-		err->Set(String::NewFromUtf8(plv8_isolate, "constraint_name"), constraint_name);
-		err->Set(String::NewFromUtf8(plv8_isolate, "detail"), detail);
-		err->Set(String::NewFromUtf8(plv8_isolate, "hint"), hint);
-		err->Set(String::NewFromUtf8(plv8_isolate, "context"), context);
-		err->Set(String::NewFromUtf8(plv8_isolate, "internalquery"), internalquery);
-		err->Set(String::NewFromUtf8(plv8_isolate, "code"), code);
+		err->Set(String::NewFromUtf8(isolate, "schema_name"), schema_name);
+		err->Set(String::NewFromUtf8(isolate, "table_name"), table_name);
+		err->Set(String::NewFromUtf8(isolate, "column_name"), column_name);
+		err->Set(String::NewFromUtf8(isolate, "datatype_name"), datatype_name);
+		err->Set(String::NewFromUtf8(isolate, "constraint_name"), constraint_name);
+		err->Set(String::NewFromUtf8(isolate, "detail"), detail);
+		err->Set(String::NewFromUtf8(isolate, "hint"), hint);
+		err->Set(String::NewFromUtf8(isolate, "context"), context);
+		err->Set(String::NewFromUtf8(isolate, "internalquery"), internalquery);
+		err->Set(String::NewFromUtf8(isolate, "code"), code);
 #endif
 
-		args.GetReturnValue().Set(plv8_isolate->ThrowException(err));
+		args.GetReturnValue().Set(isolate->ThrowException(err));
 	}
 }
 
@@ -348,13 +393,14 @@ static void
 plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 {
 	MemoryContext	ctx = CurrentMemoryContext;
+	Isolate *		isolate = args.GetIsolate();
 
 	if (args.Length() < 2) {
-		args.GetReturnValue().Set(plv8_isolate->ThrowException(String::NewFromUtf8(plv8_isolate, "usage: plv8.elog(elevel, ...)")));
+		args.GetReturnValue().Set(isolate->ThrowException(String::NewFromUtf8(args.GetIsolate(), "usage: plv8.elog(elevel, ...)")));
 		return;
 	}
 
-	int	elevel = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+	int	elevel = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
 	switch (elevel)
 	{
 	case DEBUG5:
@@ -369,7 +415,7 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 	case ERROR:
 		break;
 	default:
-		args.GetReturnValue().Set(plv8_isolate->ThrowException(String::NewFromUtf8(plv8_isolate, "invalid error level")));
+		args.GetReturnValue().Set(isolate->ThrowException(String::NewFromUtf8(args.GetIsolate(), "invalid error level")));
 		return;
 	}
 
@@ -381,7 +427,7 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 			msg += " ";
 		}
 		if (!CString::toStdString(args[i],buf)){
-			args.GetReturnValue().Set(Undefined(plv8_isolate));
+			args.GetReturnValue().Set(Undefined(isolate));
 			return;
 		}
 		msg += buf;
@@ -392,7 +438,7 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 	if (elevel != ERROR)
 	{
 		elog(elevel, "%s", message);
-		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		args.GetReturnValue().Set(Undefined(isolate));
 		return;
 	}
 
@@ -409,12 +455,12 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 		FlushErrorState();
 		FreeErrorData(edata);
 
-		args.GetReturnValue().Set(plv8_isolate->ThrowException(Exception::Error(message)));
+		args.GetReturnValue().Set(isolate->ThrowException(Exception::Error(message)));
 		return;
 	}
 	PG_END_TRY();
 
-	args.GetReturnValue().Set(Undefined(plv8_isolate));
+	args.GetReturnValue().Set(Undefined(isolate));
 }
 
 static Datum
@@ -501,7 +547,7 @@ plv8_execute_params(const char *sql, Handle<Array> params)
 static Handle<Array>
 convertArgsToArray(const FunctionCallbackInfo<v8::Value> &args, int start, int downshift)
 {
-	Local<Array> result = Array::New(plv8_isolate, args.Length() - start);
+	Local<Array> result = Array::New(args.GetIsolate(), args.Length() - start);
 	for (int i = start; i < args.Length(); i++)
 	{
 		result->Set(i - downshift, args[i]);
@@ -518,7 +564,7 @@ plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 	int				status;
 
 	if (args.Length() < 1) {
-		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		args.GetReturnValue().Set(Undefined(args.GetIsolate()));
 		return;
 	}
 
@@ -564,6 +610,7 @@ plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 static void
 plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 {
+	Isolate *		isolate = args.GetIsolate();
 	SPIPlanPtr		initial = NULL, saved;
 	CString			sql(args[0]);
 	Handle<Array>	array;
@@ -616,22 +663,11 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 	}
 	PG_END_TRY();
 
-	if (PlanTemplate.IsEmpty())
-	{
-		Local<FunctionTemplate> base = FunctionTemplate::New(plv8_isolate);
-		base->SetClassName(String::NewFromUtf8(plv8_isolate, "PreparedPlan", String::kInternalizedString));
-		Local<ObjectTemplate> templ = base->InstanceTemplate();
-		templ->SetInternalFieldCount(2);
-		SetCallback(templ, "cursor", plv8_PlanCursor);
-		SetCallback(templ, "execute", plv8_PlanExecute);
-		SetCallback(templ, "free", plv8_PlanFree);
-		PlanTemplate.Reset(plv8_isolate, templ);
-	}
-	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, PlanTemplate);
+	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(isolate, current_context->plan_template);
 
-	Local<v8::Object> result = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
-	result->SetInternalField(0, External::New(plv8_isolate, saved));
-	result->SetInternalField(1, External::New(plv8_isolate, parstate));
+	Local<v8::Object> result = templ->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
+	result->SetInternalField(0, External::New(isolate, saved));
+	result->SetInternalField(1, External::New(isolate, parstate));
 
 	args.GetReturnValue().Set(result);
 }
@@ -642,6 +678,7 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 static void
 plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 {
+	Isolate *			isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
 	SPIPlanPtr			plan;
 	Datum			   *values = NULL;
@@ -734,24 +771,9 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 	PG_END_TRY();
 
 	Handle<String> cname = ToString(cursor->name, strlen(cursor->name));
+	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(isolate, current_context->cursor_template);
 
-	/*
-	 * Instantiate if the template is empty.
-	 */
-	if (CursorTemplate.IsEmpty())
-	{
-		Local<FunctionTemplate> base = FunctionTemplate::New(plv8_isolate);
-		base->SetClassName(String::NewFromUtf8(plv8_isolate, "Cursor", String::kInternalizedString));
-		Local<ObjectTemplate> templ = base->InstanceTemplate();
-		templ->SetInternalFieldCount(1);
-		SetCallback(templ, "fetch", plv8_CursorFetch);
-		SetCallback(templ, "move", plv8_CursorMove);
-		SetCallback(templ, "close", plv8_CursorClose);
-		CursorTemplate.Reset(plv8_isolate, templ);
-	}
-	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, CursorTemplate);
-
-	Local<v8::Object> result = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
+	Local<v8::Object> result = templ->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
 	result->SetInternalField(0, cname);
 
 	args.GetReturnValue().Set(result);
@@ -860,6 +882,7 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 static void
 plv8_PlanFree(const FunctionCallbackInfo<v8::Value> &args)
 {
+	Isolate *			isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
 	SPIPlanPtr			plan;
 	plv8_param_state   *parstate;
@@ -871,16 +894,16 @@ plv8_PlanFree(const FunctionCallbackInfo<v8::Value> &args)
 	if (plan)
 		status = SPI_freeplan(plan);
 
-	self->SetInternalField(0, External::New(plv8_isolate, 0));
+	self->SetInternalField(0, External::New(isolate, 0));
 
 	parstate = static_cast<plv8_param_state *>(
 			Handle<External>::Cast(self->GetInternalField(1))->Value());
 
 	if (parstate)
 		pfree(parstate);
-	self->SetInternalField(1, External::New(plv8_isolate, 0));
+	self->SetInternalField(1, External::New(isolate, 0));
 
-	args.GetReturnValue().Set(Int32::New(plv8_isolate, status));
+	args.GetReturnValue().Set(Int32::New(isolate, status));
 }
 
 /*
@@ -889,6 +912,7 @@ plv8_PlanFree(const FunctionCallbackInfo<v8::Value> &args)
 static void
 plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 {
+	Isolate*			isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
 	CString				cname(self->GetInternalField(0));
 	Portal				cursor = SPI_cursor_find(cname);
@@ -901,7 +925,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 	if (args.Length() >= 1)
 	{
 		wantarray = true;
-		nfetch = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+		nfetch = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
 
 		if (nfetch < 0)
 		{
@@ -933,7 +957,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 		}
 		else
 		{
-			Handle<Array> array = Array::New(plv8_isolate);
+			Handle<Array> array = Array::New(isolate);
 			for (unsigned int i = 0; i < SPI_processed; i++)
 				array->Set(i, conv.ToValue(SPI_tuptable->vals[i]));
 			args.GetReturnValue().Set(array);
@@ -943,7 +967,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 	}
 
 	SPI_freetuptable(SPI_tuptable);
-	args.GetReturnValue().Set(Undefined(plv8_isolate));
+	args.GetReturnValue().Set(Undefined(isolate));
 }
 
 /*
@@ -952,6 +976,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 static void
 plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args)
 {
+	Isolate*			isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
 	CString				cname(self->GetInternalField(0));
 	Portal				cursor = SPI_cursor_find(cname);
@@ -962,11 +987,11 @@ plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args)
 		throw js_error("cannot find cursor");
 
 	if (args.Length() < 1) {
-		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		args.GetReturnValue().Set(Undefined(isolate));
 		return;
 	}
 
-	nmove = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+	nmove = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
 	if (nmove < 0)
 	{
 		nmove = -nmove;
@@ -983,7 +1008,7 @@ plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args)
 	}
 	PG_END_TRY();
 
-	args.GetReturnValue().Set(Undefined(plv8_isolate));
+	args.GetReturnValue().Set(Undefined(isolate));
 }
 
 /*
@@ -1009,7 +1034,7 @@ plv8_CursorClose(const FunctionCallbackInfo<v8::Value> &args)
 	}
 	PG_END_TRY();
 
-	args.GetReturnValue().Set(Int32::New(plv8_isolate, cursor ? 1 : 0));
+	args.GetReturnValue().Set(Int32::New(args.GetIsolate(), cursor ? 1 : 0));
 }
 
 /*
@@ -1033,7 +1058,7 @@ plv8_ReturnNext(const FunctionCallbackInfo<v8::Value>& args)
 
 	conv->ToDatum(args[0], tupstore);
 
-	args.GetReturnValue().Set(Undefined(plv8_isolate));
+	args.GetReturnValue().Set(Undefined(args.GetIsolate()));
 }
 
 /*
@@ -1042,12 +1067,14 @@ plv8_ReturnNext(const FunctionCallbackInfo<v8::Value>& args)
 static void
 plv8_Subtransaction(const FunctionCallbackInfo<v8::Value>& args)
 {
+	Isolate *		isolate = args.GetIsolate();
+
 	if (args.Length() < 1) {
-		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		args.GetReturnValue().Set(Undefined(isolate));
 		return;
 	}
 	if (!args[0]->IsFunction()) {
-		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		args.GetReturnValue().Set(Undefined(isolate));
 		return;
 	}
 	Handle<Function>	func = Handle<Function>::Cast(args[0]);
@@ -1056,8 +1083,8 @@ plv8_Subtransaction(const FunctionCallbackInfo<v8::Value>& args)
 	subtran.enter();
 
 	Handle<v8::Value> emptyargs[1] = {};
-	TryCatch try_catch(plv8_isolate);
-	MaybeLocal<v8::Value> result = func->Call(plv8_isolate->GetCurrentContext(), func, 0, emptyargs);
+	TryCatch try_catch(isolate);
+	MaybeLocal<v8::Value> result = func->Call(isolate->GetCurrentContext(), func, 0, emptyargs);
 
 	subtran.exit(!result.IsEmpty());
 
@@ -1072,8 +1099,9 @@ plv8_Subtransaction(const FunctionCallbackInfo<v8::Value>& args)
 static void
 plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 {
+	Isolate			    *isolate = Isolate::GetCurrent();
 	if (args.Length() < 1) {
-		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		args.GetReturnValue().Set(Undefined(isolate));
 		return;
 	}
 	CString				signature(args[0]);
@@ -1151,44 +1179,16 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 static void
 plv8_GetWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 {
+	Isolate*			isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
 	Handle<v8::Value>	fcinfo_value =
 			self->GetInternalField(PLV8_INTNL_FCINFO);
 
 	if (!fcinfo_value->IsExternal())
 		throw js_error("get_window_object called in wrong context");
+	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(isolate, current_context->window_template);
 
-	if (WindowObjectTemplate.IsEmpty())
-	{
-		/* Initialize it if we haven't yet. */
-		Local<FunctionTemplate> base = FunctionTemplate::New(plv8_isolate);
-		base->SetClassName(String::NewFromUtf8(plv8_isolate, "WindowObject", String::kInternalizedString));
-		Local<ObjectTemplate> templ = base->InstanceTemplate();
-
-		/* We store fcinfo here. */
-		templ->SetInternalFieldCount(1);
-
-		/* Functions. */
-		SetCallback(templ, "get_partition_local", plv8_WinGetPartitionLocal);
-		SetCallback(templ, "set_partition_local", plv8_WinSetPartitionLocal);
-		SetCallback(templ, "get_current_position", plv8_WinGetCurrentPosition);
-		SetCallback(templ, "get_partition_row_count", plv8_WinGetPartitionRowCount);
-		SetCallback(templ, "set_mark_position", plv8_WinSetMarkPosition);
-		SetCallback(templ, "rows_are_peers", plv8_WinRowsArePeers);
-		SetCallback(templ, "get_func_arg_in_partition", plv8_WinGetFuncArgInPartition);
-		SetCallback(templ, "get_func_arg_in_frame", plv8_WinGetFuncArgInFrame);
-		SetCallback(templ, "get_func_arg_current", plv8_WinGetFuncArgCurrent);
-
-		/* Constants for get_func_in_XXX() */
-		templ->Set(String::NewFromUtf8(plv8_isolate, "SEEK_CURRENT", String::kInternalizedString), Int32::New(plv8_isolate, WINDOW_SEEK_CURRENT));
-		templ->Set(String::NewFromUtf8(plv8_isolate, "SEEK_HEAD", String::kInternalizedString), Int32::New(plv8_isolate, WINDOW_SEEK_HEAD));
-		templ->Set(String::NewFromUtf8(plv8_isolate, "SEEK_TAIL", String::kInternalizedString), Int32::New(plv8_isolate, WINDOW_SEEK_TAIL));
-
-		WindowObjectTemplate.Reset(plv8_isolate, templ);
-	}
-	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, WindowObjectTemplate);
-
-	Local<v8::Object> js_winobj = templ->NewInstance(plv8_isolate->GetCurrentContext()).ToLocalChecked();
+	Local<v8::Object> js_winobj = templ->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
 	js_winobj->SetInternalField(0, fcinfo_value);
 
 	args.GetReturnValue().Set(js_winobj);
@@ -1242,6 +1242,7 @@ plv8_MyArgType(const FunctionCallbackInfo<v8::Value>& args, int argno)
 static void
 plv8_WinGetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args)
 {
+	Isolate*		isolate = args.GetIsolate();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	size_t			size;
 	window_storage *storage;
@@ -1249,7 +1250,7 @@ plv8_WinGetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args)
 	if (args.Length() < 1)
 		size = 1000; /* default 1K */
 	else
-		size = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+		size = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
 
 	size += sizeof(size_t) * 2;
 
@@ -1269,7 +1270,7 @@ plv8_WinGetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args)
 
 	/* If nothing is stored, undefined is returned. */
 	if (storage->len == 0) {
-		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		args.GetReturnValue().Set(Undefined(isolate));
 		return;
 	}
 
@@ -1290,10 +1291,11 @@ plv8_WinGetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args)
 static void
 plv8_WinSetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args)
 {
+	Isolate*		isolate = args.GetIsolate();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 
 	if (args.Length() < 1) {
-		args.GetReturnValue().Set(Undefined(plv8_isolate));
+		args.GetReturnValue().Set(Undefined(isolate));
 		return;
 	}
 
@@ -1326,7 +1328,7 @@ plv8_WinSetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args)
 	storage->len = str_size;
 	memcpy(storage->data, str, str_size);
 
-        args.GetReturnValue().Set(Undefined(plv8_isolate));
+	args.GetReturnValue().Set(Undefined(isolate));
 }
 
 /*
@@ -1348,7 +1350,7 @@ plv8_WinGetCurrentPosition(const FunctionCallbackInfo<v8::Value>& args)
 	}
 	PG_END_TRY();
 
-	args.GetReturnValue().Set(Integer::New(plv8_isolate, pos));
+	args.GetReturnValue().Set(Integer::New(args.GetIsolate(), pos));
 }
 
 /*
@@ -1370,7 +1372,7 @@ plv8_WinGetPartitionRowCount(const FunctionCallbackInfo<v8::Value>& args)
 	}
 	PG_END_TRY();
 
-	args.GetReturnValue().Set(Integer::New(plv8_isolate, pos));
+	args.GetReturnValue().Set(Integer::New(args.GetIsolate(), pos));
 }
 
 /*
@@ -1379,12 +1381,13 @@ plv8_WinGetPartitionRowCount(const FunctionCallbackInfo<v8::Value>& args)
 static void
 plv8_WinSetMarkPosition(const FunctionCallbackInfo<v8::Value>& args)
 {
+	Isolate*		isolate = args.GetIsolate();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	if (args.Length() < 1) {
-                args.GetReturnValue().Set(Undefined(plv8_isolate));
+                args.GetReturnValue().Set(Undefined(isolate));
 		return;
         }
-	int64		markpos = args[0]->IntegerValue(plv8_isolate->GetCurrentContext()).ToChecked();
+	int64		markpos = args[0]->IntegerValue(isolate->GetCurrentContext()).ToChecked();
 
 	PG_TRY();
 	{
@@ -1396,7 +1399,7 @@ plv8_WinSetMarkPosition(const FunctionCallbackInfo<v8::Value>& args)
 	}
 	PG_END_TRY();
 
-        args.GetReturnValue().Set(Undefined(plv8_isolate));
+        args.GetReturnValue().Set(Undefined(isolate));
 }
 
 /*
@@ -1405,13 +1408,14 @@ plv8_WinSetMarkPosition(const FunctionCallbackInfo<v8::Value>& args)
 static void
 plv8_WinRowsArePeers(const FunctionCallbackInfo<v8::Value>& args)
 {
+	Isolate*		isolate = args.GetIsolate();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	if (args.Length() < 2) {
-                args.GetReturnValue().Set(Undefined(plv8_isolate));
+                args.GetReturnValue().Set(Undefined(isolate));
 		return;
 	}
-	int64		pos1 = args[0]->IntegerValue(plv8_isolate->GetCurrentContext()).ToChecked();
-	int64		pos2 = args[1]->IntegerValue(plv8_isolate->GetCurrentContext()).ToChecked();
+	int64		pos1 = args[0]->IntegerValue(isolate->GetCurrentContext()).ToChecked();
+	int64		pos2 = args[1]->IntegerValue(isolate->GetCurrentContext()).ToChecked();
 	bool		res = false;
 
 	PG_TRY();
@@ -1424,7 +1428,7 @@ plv8_WinRowsArePeers(const FunctionCallbackInfo<v8::Value>& args)
 	}
 	PG_END_TRY();
 
-	args.GetReturnValue().Set(Boolean::New(plv8_isolate, res));
+	args.GetReturnValue().Set(Boolean::New(isolate, res));
 }
 
 /*
@@ -1433,14 +1437,15 @@ plv8_WinRowsArePeers(const FunctionCallbackInfo<v8::Value>& args)
 static void
 plv8_WinGetFuncArgInPartition(const FunctionCallbackInfo<v8::Value>& args)
 {
+	Isolate*		isolate = args.GetIsolate();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	/* Since we return undefined in "isout" case, throw if arg isn't enough. */
 	if (args.Length() < 4)
 		throw js_error("argument not enough");
-	int			argno = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
-	int			relpos = args[1]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
-	int			seektype = args[2]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
-	bool		set_mark = args[3]->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked();
+	int			argno = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+	int			relpos = args[1]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+	int			seektype = args[2]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+	bool		set_mark = args[3]->BooleanValue(isolate->GetCurrentContext()).ToChecked();
 	bool		isnull, isout;
 	Datum		res;
 
@@ -1462,7 +1467,7 @@ plv8_WinGetFuncArgInPartition(const FunctionCallbackInfo<v8::Value>& args)
 
 	/* Return undefined to tell it's out of partition. */
 	if (isout) {
-                args.GetReturnValue().Set(Undefined(plv8_isolate));
+                args.GetReturnValue().Set(Undefined(isolate));
 		return;
 	}
 
@@ -1477,14 +1482,15 @@ plv8_WinGetFuncArgInPartition(const FunctionCallbackInfo<v8::Value>& args)
 static void
 plv8_WinGetFuncArgInFrame(const FunctionCallbackInfo<v8::Value>& args)
 {
+	Isolate*		isolate = args.GetIsolate();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	/* Since we return undefined in "isout" case, throw if arg isn't enough. */
 	if (args.Length() < 4)
 		throw js_error("argument not enough");
-	int			argno = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
-	int			relpos = args[1]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
-	int			seektype = args[2]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
-	bool		set_mark = args[3]->BooleanValue(plv8_isolate->GetCurrentContext()).ToChecked();
+	int			argno = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+	int			relpos = args[1]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+	int			seektype = args[2]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+	bool		set_mark = args[3]->BooleanValue(isolate->GetCurrentContext()).ToChecked();
 	bool		isnull, isout;
 	Datum		res;
 
@@ -1506,7 +1512,7 @@ plv8_WinGetFuncArgInFrame(const FunctionCallbackInfo<v8::Value>& args)
 
 	/* Return undefined to tell it's out of frame. */
 	if (isout) {
-                args.GetReturnValue().Set(Undefined(plv8_isolate));
+                args.GetReturnValue().Set(Undefined(isolate));
 		return;
 	}
 
@@ -1521,12 +1527,13 @@ plv8_WinGetFuncArgInFrame(const FunctionCallbackInfo<v8::Value>& args)
 static void
 plv8_WinGetFuncArgCurrent(const FunctionCallbackInfo<v8::Value>& args)
 {
+	Isolate*		isolate = args.GetIsolate();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	if (args.Length() < 1) {
-                args.GetReturnValue().Set(Undefined(plv8_isolate));
+                args.GetReturnValue().Set(Undefined(isolate));
 		return;
         }
-	int			argno = args[0]->Int32Value(plv8_isolate->GetCurrentContext()).ToChecked();
+	int			argno = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
 	bool		isnull;
 	Datum		res;
 
@@ -1554,7 +1561,7 @@ static void
 plv8_QuoteLiteral(const FunctionCallbackInfo<v8::Value>& args)
 {
 	if (args.Length() < 1) {
-                args.GetReturnValue().Set(Undefined(plv8_isolate));
+                args.GetReturnValue().Set(Undefined(args.GetIsolate()));
 		return;
 	}
 	CString			instr(args[0]);
@@ -1580,7 +1587,7 @@ static void
 plv8_QuoteNullable(const FunctionCallbackInfo<v8::Value>& args)
 {
 	if (args.Length() < 1) {
-                args.GetReturnValue().Set(Undefined(plv8_isolate));
+                args.GetReturnValue().Set(Undefined(args.GetIsolate()));
 		return;
 	}
 	CString			instr(args[0]);
@@ -1611,7 +1618,7 @@ static void
 plv8_QuoteIdent(const FunctionCallbackInfo<v8::Value>& args)
 {
 	if (args.Length() < 1) {
-                args.GetReturnValue().Set(Undefined(plv8_isolate));
+                args.GetReturnValue().Set(Undefined(args.GetIsolate()));
 		return;
 	}
 	CString			instr(args[0]);
@@ -1634,20 +1641,29 @@ static void
 plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args)
 {
 	// V8 memory usage
-  HeapStatistics v8_heap_stats;
-  plv8_isolate->GetHeapStatistics(&v8_heap_stats);
+  	HeapStatistics v8_heap_stats;
+	Isolate *		isolate = args.GetIsolate();
+	isolate->GetHeapStatistics(&v8_heap_stats);
 
 	Local<v8::Value>	result;
-	Local<v8::Object> obj = v8::Object::New(plv8_isolate);
+	Local<v8::Object>	obj = v8::Object::New(isolate);
 
-	Local<v8::Value> total = Local<v8::Value>::New(plv8_isolate, Number::New(plv8_isolate, v8_heap_stats.total_heap_size()));
-	Local<v8::Value> used = Local<v8::Value>::New(plv8_isolate, Number::New(plv8_isolate, v8_heap_stats.used_heap_size()));
-	Local<v8::Value> external = Local<v8::Value>::New(plv8_isolate, Number::New(plv8_isolate, v8_heap_stats.external_memory()));
-
-	obj->Set(String::NewFromUtf8(plv8_isolate, "total_heap_size"), total);
-	obj->Set(String::NewFromUtf8(plv8_isolate, "used_heap_size"), used);
-	obj->Set(String::NewFromUtf8(plv8_isolate, "external_memory"), external);
-
+	GetMemoryInfo(obj);
 	result = obj;
 	args.GetReturnValue().Set(result);
+}
+
+void GetMemoryInfo(v8::Local<v8::Object> obj) {
+	HeapStatistics  	v8_heap_stats;
+	Isolate 		   *isolate = obj->GetIsolate();
+
+	isolate->GetHeapStatistics(&v8_heap_stats);
+
+	Local<v8::Value> total = Local<v8::Value>::New(isolate, Number::New(isolate, v8_heap_stats.total_heap_size()));
+	Local<v8::Value> used = Local<v8::Value>::New(isolate, Number::New(isolate, v8_heap_stats.used_heap_size()));
+	Local<v8::Value> external = Local<v8::Value>::New(isolate, Number::New(isolate, v8_heap_stats.external_memory()));
+
+	obj->Set(String::NewFromUtf8(isolate, "total_heap_size"), total);
+	obj->Set(String::NewFromUtf8(isolate, "used_heap_size"), used);
+	obj->Set(String::NewFromUtf8(isolate, "external_memory"), external);
 }

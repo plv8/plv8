@@ -235,7 +235,7 @@ declare_plv8_start_proc ( void ) {
 
 static void
 read_plv8_start_proc ( void ) {
-	plv8_start_proc = (char *)GetConfigOption( GUC_PLV8_START_PROC, TRUE, FALSE );
+	plv8_start_proc = (char *)GetConfigOption( GUC_PLV8_START_PROC, true, false );
 }
 
 static void
@@ -255,7 +255,7 @@ declare_plv8_icu_data ( void ) {
 
 static void
 read_plv8_icu_data ( void ) {
-	plv8_icu_data = (char *)GetConfigOption( GUC_PLV8_ICU_DATA, TRUE, FALSE );
+	plv8_icu_data = (char *)GetConfigOption( GUC_PLV8_ICU_DATA, true, false );
 }
 
 static void
@@ -275,7 +275,7 @@ declare_plv8_v8_flags ( void ) {
 
 static void
 read_plv8_v8_flags ( void ) {
-	plv8_v8_flags = (char *)GetConfigOption( GUC_PLV8_V8_FLAGS, TRUE, FALSE );
+	plv8_v8_flags = (char *)GetConfigOption( GUC_PLV8_V8_FLAGS, true, false );
 }
 
 static void
@@ -297,7 +297,7 @@ declare_plv8_debugger_port ( void ) {
 static void
 read_plv8_debugger_port ( void ) {
 	const char *hint;
-	const char *value = GetConfigOption( GUC_PLV8_DEBUGGER_PORT, TRUE, FALSE );
+	const char *value = GetConfigOption( GUC_PLV8_DEBUGGER_PORT, true, false );
 	parse_int ( value, &plv8_debugger_port, 0, &hint );
 }
 
@@ -321,7 +321,7 @@ declare_plv8_execution_timeout ( void ) {
 static void
 read_plv8_execution_timeout ( void ) {
 	const char *hint;
-	const char *value = GetConfigOption( GUC_PLV8_EXECUTION_TIMEOUT, TRUE, FALSE );
+	const char *value = GetConfigOption( GUC_PLV8_EXECUTION_TIMEOUT, true, false );
 	parse_int ( value, &plv8_execution_timeout, 0, &hint );
 }
 #endif

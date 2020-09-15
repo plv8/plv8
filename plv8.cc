@@ -44,6 +44,7 @@ extern "C" {
 #endif
 
 #include <stdlib.h>
+#include <string.h>
 
 PG_MODULE_MAGIC;
 
@@ -366,19 +367,16 @@ _PG_init(void)
 		bool noshow;
 		GetConfigOptionByNum( i, (const char **) values, &noshow );
 		for ( int j = 0; j < m; j++ ) {
-			plv8_guc_variable *v = &guc_variables[j];
-			if ( strcmp( values[0], v->name ) == 0 ) {
-				v->exists = true;
+			if ( !strcmp( values[0], guc_variables[j].name ) ) {
+			    guc_variables[j].exists = true;
+			    guc_variables[j].read();
 			}
 		}
 	}
 	// go through all plv8's GUC variables and define or read them accordingly
 	for ( int j = 0; j < m; j++ ) {
-		plv8_guc_variable *v = &guc_variables[j];
-		if ( !v->exists ) {
-			v->define();
-		} else {
-			v->read();
+		if ( !guc_variables[j].exists ) {
+		    guc_variables[j].define();
 		}
 	}
 

@@ -502,13 +502,6 @@ plv8_reset(PG_FUNCTION_ARGS)
 				}
 				cache = (plv8_proc_cache *) hash_seq_search(&status);
 			}
-			context->context.Reset();
-			context->recv_templ.Reset();
-			context->compile_context.Reset();
-			context->plan_template.Reset();
-			context->cursor_template.Reset();
-			context->window_template.Reset();
-			delete context->array_buffer_allocator;
 			context->isolate->Dispose();
 			pfree(context);
 			break;

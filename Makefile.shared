@@ -25,7 +25,7 @@ CUSTOM_CC = g++
 JSS  = coffee-script.js livescript.js
 # .cc created from .js
 JSCS = $(JSS:.js=.cc)
-SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc $(JSCS)
+SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc plv8_guc.cc $(JSCS)
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8-$(PLV8_VERSION)
 EXTENSION = plv8

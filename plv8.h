@@ -297,4 +297,8 @@ extern void SetupWindowFunctions(v8::Handle<v8::ObjectTemplate> templ);
 
 extern void GetMemoryInfo(v8::Local<v8::Object> obj);
 
+extern struct config_generic *plv8_find_option(const char *name);
+char *plv8_string_option(struct config_generic * record);
+int plv8_int_option(struct config_generic * record);
+
 #endif	// _PLV8_

@@ -940,7 +940,11 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 		int64 v = DatumGetInt64(datum);
 
 		if (v > INT32_MAX || v < INT32_MIN)
-			return BigInt::New(isolate, v);
+		{
+			char str[20];
+			sprintf(str, "%ld", v);
+			return ToString(str);
+		}
 		return Number::New(isolate, v);
 #else
 		return BigInt::New(isolate, DatumGetInt64(datum));

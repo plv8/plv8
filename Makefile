@@ -62,12 +62,12 @@ $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
 	cd build; wget -nc http://releases.llvm.org/7.0.1/clang+llvm-7.0.1-aarch64-linux-gnu.tar.xz; tar xf clang+llvm-7.0.1-aarch64-linux-gnu.tar.xz
 
 	# Get and build the plugin
-	cd build; wget -nc https://chromium.googlesource.com/chromium/src/+archive/lkgr/tools/clang/plugins.tar.gz; mkdir -p plugin; cd plugin; tar xf ../plugins.tar.gz; clang++ *.cpp -c -I ../clang+llvm-7.0.1-aarch64-linux-gnu/include/ -fPIC -Wall -std=c++14 -fno-rtti -fno-omit-frame-pointer; clang -shared *.o -o libFindBadConstructs.so
+	cd build; export PATH=$$PATH:`pwd`/clang+llvm-7.0.1-aarch64-linux-gnu/bin; wget -nc https://chromium.googlesource.com/chromium/src/+archive/lkgr/tools/clang/plugins.tar.gz; mkdir -p plugin; cd plugin; tar xf ../plugins.tar.gz; clang++ *.cpp -c -I ../clang+llvm-7.0.1-aarch64-linux-gnu/include/ -fPIC -Wall -std=c++14 -fno-rtti -fno-omit-frame-pointer; clang -shared *.o -o libFindBadConstructs.so
 
 	cp build/plugin/libFindBadConstructs.so build/clang+llvm-7.0.1-aarch64-linux-gnu/lib/
 
 	# Build an ARM64 binary of gn
-	cd build; rm -rf gn; git clone https://gn.googlesource.com/gn; cd gn; git checkout 6ae63300be3e9865a72772e4cb6e1f8f667624c4; sed -i -e "s/-Wl,--icf=all//" build/gen.py; python build/gen.py; ninja -C out
+	cd build; export PATH=$$PATH:`pwd`/clang+llvm-7.0.1-aarch64-linux-gnu/bin; rm -rf gn; git clone https://gn.googlesource.com/gn; cd gn; git checkout 6ae63300be3e9865a72772e4cb6e1f8f667624c4; sed -i -e "s/-Wl,--icf=all//" build/gen.py; python build/gen.py; ninja -C out
 
 	# clone v8
 	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync

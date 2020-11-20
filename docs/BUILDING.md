@@ -10,6 +10,9 @@ Building PLV8 for MacOS or Linux has some specific requirements:
 * pkg-config (linux only for v8)
 * libc++-dev (linux only)
 * libc++abi-dev (linux only)
+* libglib2.0-dev (ubuntu 20.04)
+* libtinfo5 (ubuntu 20.04)
+* ninja-build (ubuntu arm64)
 
 Note that some distributions of Linux may have additional requirements.  This
 is not meant to be an exhaustive list.

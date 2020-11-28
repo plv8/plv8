@@ -586,7 +586,7 @@ common_pl_inline_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 		char			   *source_text = codeblock->source_text;
 		Persistent<Context> global_context;
 		global_context.Reset(current_context->isolate, current_context->context);
-		
+
 		Local<Function>	function = CompileFunction(current_context,
 										NULL, 0, NULL,
 										source_text, false, false, dialect);
@@ -671,7 +671,7 @@ signal_handler (int sig) {
  */
 static Local<v8::Value>
 DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
-	int nargs, Handle<v8::Value> args[])
+	int nargs, Handle<v8::Value> args[], bool nonatomic)
 {
 	Isolate 	   *isolate = ctx->GetIsolate();
 	TryCatch		try_catch(isolate);
@@ -685,8 +685,11 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 #endif
 #endif
 
-	if (SPI_connect() != SPI_OK_CONNECT)
+	if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT)
 		throw js_error("could not connect to SPI manager");
+
+//	if (SPI_connect() != SPI_OK_CONNECT)
+//		throw js_error("could not connect to SPI manager");
 
 	// set up the signal handlers
 	int_handler = (void *) signal(SIGINT, signal_handler);
@@ -745,6 +748,10 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Handle<v8::Value>	args[FUNC_MAX_ARGS];
 	Handle<Object>		plv8obj;
 
+	bool nonatomic = fcinfo->context &&
+		IsA(fcinfo->context, CallContext) &&
+		!castNode(CallContext, fcinfo->context)->atomic;
+
 	WindowFunctionSupport support(context, fcinfo);
 
 	/*
@@ -776,7 +783,7 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Local<Function>		fn =
 		Local<Function>::Cast(recv->GetInternalField(0));
 	Local<v8::Value> result =
-		DoCall(context, fn, recv, nargs, args);
+		DoCall(context, fn, recv, nargs, args, nonatomic);
 
 	if (rettype)
 		return ToDatum(result, &fcinfo->isnull, rettype);
@@ -852,6 +859,10 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	TupleDesc			tupdesc;
 	Tuplestorestate	   *tupstore;
 
+	bool nonatomic = fcinfo->context &&
+		IsA(fcinfo->context, CallContext) &&
+		!castNode(CallContext, fcinfo->context)->atomic;
+
 	tupstore = CreateTupleStore(fcinfo, &tupdesc);
 
 	Handle<Context>		context = xenv->localContext();
@@ -877,7 +888,7 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Local<Function>		fn =
 		Local<Function>::Cast(recv->GetInternalField(0));
 
-	Handle<v8::Value> result = DoCall(context, fn, recv, nargs, args);
+	Handle<v8::Value> result = DoCall(context, fn, recv, nargs, args, nonatomic);
 
 	if (result->IsUndefined())
 	{
@@ -922,6 +933,10 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	TriggerEvent		event = trig->tg_event;
 	Handle<v8::Value>	args[10];
 	Datum				result = (Datum) 0;
+
+	bool nonatomic = fcinfo->context &&
+		IsA(fcinfo->context, CallContext) &&
+		!castNode(CallContext, fcinfo->context)->atomic;
 
 	Handle<Context>		context = xenv->localContext();
 	Context::Scope		context_scope(context);
@@ -1010,7 +1025,7 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	Local<Function>		fn =
 		Local<Function>::Cast(recv->GetInternalField(0));
 	Handle<v8::Value> newtup =
-		DoCall(context, fn, recv, lengthof(args), args);
+		DoCall(context, fn, recv, lengthof(args), args, nonatomic);
 
 	if (newtup.IsEmpty())
 		throw js_error(try_catch);
@@ -1285,11 +1300,11 @@ CreateExecEnv(Persistent<Function>& function, plv8_context *context)
 		throw pg_error();
 	}
 	PG_END_TRY();
-	
+
 	xenv->context.Reset(context->isolate, context->context);
 	Local<Context>		ctx = xenv->localContext();
 	Context::Scope		scope(ctx);
-	
+
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(context->isolate, context->recv_templ);
 	Local<Object> obj = templ->NewInstance(ctx).ToLocalChecked();
 	Local<Function> f = Local<Function>::New(context->isolate, function);
@@ -1320,7 +1335,7 @@ CreateExecEnv(Handle<Function> function, plv8_context *context)
 	xenv->context.Reset(context->isolate, context->context);
 	Local<Context>		ctx = xenv->localContext();
 	Context::Scope		scope(ctx);
-	
+
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(context->isolate, context->recv_templ);
 	Local<Object> obj = templ->NewInstance(ctx).ToLocalChecked();
 	Local<Function> f = Local<Function>::New(context->isolate, function);
@@ -1686,7 +1701,7 @@ GetPlv8Context() {
 		HandleScope				handle_scope(isolate);
 
 		Local<ObjectTemplate>	global = Local<ObjectTemplate>::New(isolate, GetGlobalObjectTemplate(isolate));
-		
+
 		new(&my_context->context) Persistent<Context>();
 		my_context->context.Reset(isolate, Context::New(isolate, NULL, global));
 		my_context->user_id = user_id;
@@ -1803,7 +1818,7 @@ GetPlv8Context() {
 			if (!func.IsEmpty())
 			{
 				Handle<v8::Value>	result =
-						DoCall(context, func, my_context->localContext()->Global(), 0, NULL);
+						DoCall(context, func, my_context->localContext()->Global(), 0, NULL, false);
 				if (result.IsEmpty())
 					throw js_error(try_catch);
 			}

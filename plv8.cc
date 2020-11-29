@@ -685,11 +685,13 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 #endif
 #endif
 
+#if PG_VERSION_NUM >= 110000
 	if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT)
 		throw js_error("could not connect to SPI manager");
-
-//	if (SPI_connect() != SPI_OK_CONNECT)
-//		throw js_error("could not connect to SPI manager");
+#else
+	if (SPI_connect() != SPI_OK_CONNECT)
+		throw js_error("could not connect to SPI manager");
+#endif
 
 	// set up the signal handlers
 	int_handler = (void *) signal(SIGINT, signal_handler);
@@ -748,9 +750,13 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Handle<v8::Value>	args[FUNC_MAX_ARGS];
 	Handle<Object>		plv8obj;
 
+#if PG_VERSION_NUM >= 110000
 	bool nonatomic = fcinfo->context &&
 		IsA(fcinfo->context, CallContext) &&
 		!castNode(CallContext, fcinfo->context)->atomic;
+#else
+  bool nonatomic = false;
+#endif
 
 	WindowFunctionSupport support(context, fcinfo);
 
@@ -859,9 +865,13 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	TupleDesc			tupdesc;
 	Tuplestorestate	   *tupstore;
 
+#if PG_VERSION_NUM >= 110000
 	bool nonatomic = fcinfo->context &&
 		IsA(fcinfo->context, CallContext) &&
 		!castNode(CallContext, fcinfo->context)->atomic;
+#else
+  bool nonatomic = false;
+#endif
 
 	tupstore = CreateTupleStore(fcinfo, &tupdesc);
 
@@ -934,9 +944,13 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	Handle<v8::Value>	args[10];
 	Datum				result = (Datum) 0;
 
+#if PG_VERSION_NUM >= 110000
 	bool nonatomic = fcinfo->context &&
 		IsA(fcinfo->context, CallContext) &&
 		!castNode(CallContext, fcinfo->context)->atomic;
+#else
+  bool nonatomic = false;
+#endif
 
 	Handle<Context>		context = xenv->localContext();
 	Context::Scope		context_scope(context);

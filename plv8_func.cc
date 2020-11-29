@@ -48,8 +48,11 @@ static void plv8_QuoteLiteral(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_QuoteNullable(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_QuoteIdent(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args);
+
+#if PG_VERSION_NUM >= 110000
 static void plv8_Commit(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_Rollback(const FunctionCallbackInfo<v8::Value>& args);
+#endif
 
 /*
  * Window function API allows to store partition-local memory, but
@@ -270,9 +273,11 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	SetCallback(plv8, "quote_nullable", plv8_QuoteNullable, attrFull);
 	SetCallback(plv8, "quote_ident", plv8_QuoteIdent, attrFull);
 	SetCallback(plv8, "memory_usage", plv8_MemoryUsage, attrFull);
+
+#if PG_VERSION_NUM >= 110000
 	SetCallback(plv8, "rollback", plv8_Rollback, attrFull);
 	SetCallback(plv8, "commit", plv8_Commit, attrFull);
-
+#endif
 	plv8->SetInternalFieldCount(PLV8_INTNL_MAX);
 }
 
@@ -1672,6 +1677,8 @@ void GetMemoryInfo(v8::Local<v8::Object> obj) {
 	obj->Set(String::NewFromUtf8(isolate, "external_memory"), external);
 }
 
+#if PG_VERSION_NUM >= 110000
+
 static void
 plv8_Commit(const FunctionCallbackInfo<v8::Value> &args)
 {
@@ -1703,3 +1710,5 @@ plv8_Rollback(const FunctionCallbackInfo<v8::Value> &args)
 	}
 	PG_END_TRY();
 }
+
+#endif

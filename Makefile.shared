@@ -39,7 +39,7 @@ endif
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 plv8-errors inline json startup_pre startup varparam json_conv \
 		  jsonb_conv window guc es6 arraybuffer composites currentresource startup_perms bytea find_function_perms \
-		  memory_limits array_spread reset show procedure
+		  memory_limits array_spread reset show
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif
@@ -48,6 +48,10 @@ ifndef BIGINT_GRACEFUL
 	REGRESS += bigint
 else
 	REGRESS += bigint_graceful
+endif
+
+ifeq ($(shell test $(PG_VERSION_NUM) -ge 110000 && echo yes), yes)
+	REGRESS += procedure
 endif
 
 SHLIB_LINK += -lv8

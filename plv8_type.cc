@@ -758,6 +758,7 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 				return PointerGetDatum(datum_p);
 			}
 		}
+		break;
 #if PG_VERSION_NUM >= 90400
 	case JSONBOID:
 #if JSONB_DIRECT_CONVERSION

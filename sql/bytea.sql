@@ -21,3 +21,14 @@ AS $$
 $$;
 
 SELECT length(valid_int16array_bytea(20));
+
+DO $$
+  const test = 'string test'
+  const bytea = plv8.execute(`select $1::bytea`, [test])[0].bytea;
+  const result = String.fromCharCode.apply(null, bytea);
+  if (result === test) {
+    plv8.elog(INFO, 'OK');
+  } else {
+    plv8.elog(WARN, 'FAIL');
+  }
+$$ language plv8;

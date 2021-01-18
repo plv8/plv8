@@ -50,6 +50,10 @@ else
 	REGRESS += bigint_graceful
 endif
 
+ifeq ($(shell test $(PG_VERSION_NUM) -ge 110000 && echo yes), yes)
+	REGRESS += procedure
+endif
+
 SHLIB_LINK += -lv8
 ifdef V8_OUTDIR
 SHLIB_LINK += -L$(V8_OUTDIR)

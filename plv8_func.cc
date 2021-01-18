@@ -49,6 +49,11 @@ static void plv8_QuoteNullable(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_QuoteIdent(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args);
 
+#if PG_VERSION_NUM >= 110000
+static void plv8_Commit(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_Rollback(const FunctionCallbackInfo<v8::Value>& args);
+#endif
+
 /*
  * Window function API allows to store partition-local memory, but
  * the allocation is only once per partition.  maxlen represents
@@ -269,6 +274,10 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	SetCallback(plv8, "quote_ident", plv8_QuoteIdent, attrFull);
 	SetCallback(plv8, "memory_usage", plv8_MemoryUsage, attrFull);
 
+#if PG_VERSION_NUM >= 110000
+	SetCallback(plv8, "rollback", plv8_Rollback, attrFull);
+	SetCallback(plv8, "commit", plv8_Commit, attrFull);
+#endif
 	plv8->SetInternalFieldCount(PLV8_INTNL_MAX);
 }
 
@@ -1667,3 +1676,39 @@ void GetMemoryInfo(v8::Local<v8::Object> obj) {
 	obj->Set(String::NewFromUtf8(isolate, "used_heap_size"), used);
 	obj->Set(String::NewFromUtf8(isolate, "external_memory"), external);
 }
+
+#if PG_VERSION_NUM >= 110000
+
+static void
+plv8_Commit(const FunctionCallbackInfo<v8::Value> &args)
+{
+	PG_TRY();
+	{
+		HoldPinnedPortals();
+		SPI_commit();
+		SPI_start_transaction();
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+}
+
+static void
+plv8_Rollback(const FunctionCallbackInfo<v8::Value> &args)
+{
+	PG_TRY();
+	{
+		HoldPinnedPortals();
+		SPI_rollback();
+		SPI_start_transaction();
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+}
+
+#endif

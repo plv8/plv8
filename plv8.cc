@@ -542,7 +542,7 @@ plv8_info(PG_FUNCTION_ARGS)
 #else
 		char 			   *username = GetUserNameFromId(ContextVector[i]->user_id);
 #endif
-		obj->Set(String::NewFromUtf8(isolate, "user"), String::NewFromUtf8(isolate, username));
+		obj->Set(context, String::NewFromUtf8(isolate, "user").ToLocalChecked(), String::NewFromUtf8(isolate, username).ToLocalChecked());
 		GetMemoryInfo(obj);
 
 		result = JSON.Stringify(obj);
@@ -910,7 +910,7 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		// return an array of records.
 		int	length = array->Length();
 		for (int i = 0; i < length; i++)
-			conv.ToDatum(array->Get(i), tupstore);
+			conv.ToDatum(array->Get(context, i).ToLocalChecked(), tupstore);
 	}
 	else
 	{
@@ -995,29 +995,29 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 
 	// 3: TG_WHEN
 	if (TRIGGER_FIRED_BEFORE(event))
-		args[3] = String::NewFromUtf8(xenv->isolate, "BEFORE");
+		args[3] = String::NewFromUtf8(xenv->isolate, "BEFORE").ToLocalChecked();
 	else
-		args[3] = String::NewFromUtf8(xenv->isolate, "AFTER");
+		args[3] = String::NewFromUtf8(xenv->isolate, "AFTER").ToLocalChecked();
 
 	// 4: TG_LEVEL
 	if (TRIGGER_FIRED_FOR_ROW(event))
-		args[4] = String::NewFromUtf8(xenv->isolate, "ROW");
+		args[4] = String::NewFromUtf8(xenv->isolate, "ROW").ToLocalChecked();
 	else
-		args[4] = String::NewFromUtf8(xenv->isolate, "STATEMENT");
+		args[4] = String::NewFromUtf8(xenv->isolate, "STATEMENT").ToLocalChecked();
 
 	// 5: TG_OP
 	if (TRIGGER_FIRED_BY_INSERT(event))
-		args[5] = String::NewFromUtf8(xenv->isolate, "INSERT");
+		args[5] = String::NewFromUtf8(xenv->isolate, "INSERT").ToLocalChecked();
 	else if (TRIGGER_FIRED_BY_DELETE(event))
-		args[5] = String::NewFromUtf8(xenv->isolate, "DELETE");
+		args[5] = String::NewFromUtf8(xenv->isolate, "DELETE").ToLocalChecked();
 	else if (TRIGGER_FIRED_BY_UPDATE(event))
-		args[5] = String::NewFromUtf8(xenv->isolate, "UPDATE");
+		args[5] = String::NewFromUtf8(xenv->isolate, "UPDATE").ToLocalChecked();
 #ifdef TRIGGER_FIRED_BY_TRUNCATE
 	else if (TRIGGER_FIRED_BY_TRUNCATE(event))
-		args[5] = String::NewFromUtf8(xenv->isolate, "TRUNCATE");
+		args[5] = String::NewFromUtf8(xenv->isolate, "TRUNCATE").ToLocalChecked();
 #endif
 	else
-		args[5] = String::NewFromUtf8(xenv->isolate, "?");
+		args[5] = String::NewFromUtf8(xenv->isolate, "?").ToLocalChecked();
 
 	// 6: TG_RELID
 	args[6] = Uint32::New(xenv->isolate, RelationGetRelid(rel));
@@ -1031,7 +1031,7 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	// 9: TG_ARGV
 	Handle<Array> tgargs = Array::New(xenv->isolate, trig->tg_trigger->tgnargs);
 	for (int i = 0; i < trig->tg_trigger->tgnargs; i++)
-		tgargs->Set(i, ToString(trig->tg_trigger->tgargs[i]));
+		tgargs->Set(context, i, ToString(trig->tg_trigger->tgargs[i]));
 	args[9] = tgargs;
 
 	TryCatch			try_catch(xenv->isolate);
@@ -1378,20 +1378,20 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 		case PLV8_DIALECT_COFFEE:
 			if (coffee_script_binary_data[0] == '\0')
 				throw js_error("CoffeeScript is not enabled");
-			key = String::NewFromUtf8(isolate, "CoffeeScript", String::kInternalizedString);
+			key = String::NewFromUtf8(isolate, "CoffeeScript").ToLocalChecked();
 			dialect_binary_data = (const char *) coffee_script_binary_data;
 			break;
 		case PLV8_DIALECT_LIVESCRIPT:
 			if (livescript_binary_data[0] == '\0')
 				throw js_error("LiveScript is not enabled");
-			key = String::NewFromUtf8(isolate, "LiveScript", String::kInternalizedString);
+			key = String::NewFromUtf8(isolate, "LiveScript").ToLocalChecked();
 			dialect_binary_data = (const char *) livescript_binary_data;
 			break;
 		default:
 			throw js_error("Unknown Dialect");
 	}
 
-	if (ctx->Global()->Get(key)->IsUndefined())
+	if (ctx->Global()->Get(ctx, key).ToLocalChecked()->IsUndefined())
 	{
 		HandleScope		handle_scope(isolate);
 		v8::ScriptOrigin origin(key);
@@ -1410,9 +1410,9 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 		}
 	}
 
-	Local<Object>	compiler = Local<Object>::Cast(ctx->Global()->Get(key));
+	Local<Object>	compiler = Local<Object>::Cast(ctx->Global()->Get(ctx, key).ToLocalChecked());
 	Local<Function>	func = Local<Function>::Cast(
-			compiler->Get(String::NewFromUtf8(isolate, "compile", String::kInternalizedString)));
+			compiler->Get(ctx, String::NewFromUtf8(isolate, "compile").ToLocalChecked()).ToLocalChecked());
 	const int		nargs = 1;
 	Handle<v8::Value>	args[nargs];
 
@@ -1731,21 +1731,21 @@ GetPlv8Context() {
 
 		new(&my_context->plan_template) Persistent<ObjectTemplate>();
 		Local<FunctionTemplate> base = FunctionTemplate::New(isolate);
-		base->SetClassName(String::NewFromUtf8(isolate, "PreparedPlan", String::kInternalizedString));
+		base->SetClassName(String::NewFromUtf8(isolate, "PreparedPlan").ToLocalChecked());
 		templ = base->InstanceTemplate();
 		SetupPrepFunctions(templ);
 		my_context->plan_template.Reset(isolate, templ);
 
 		new(&my_context->cursor_template) Persistent<ObjectTemplate>();
 		base = FunctionTemplate::New(isolate);
-		base->SetClassName(String::NewFromUtf8(isolate, "Cursor", String::kInternalizedString));
+		base->SetClassName(String::NewFromUtf8(isolate, "Cursor").ToLocalChecked());
 		templ = base->InstanceTemplate();
 		SetupCursorFunctions(templ);
 		my_context->cursor_template.Reset(isolate, templ);
 
 		new(&my_context->window_template) Persistent<ObjectTemplate>();
 		base = FunctionTemplate::New(isolate);
-		base->SetClassName(String::NewFromUtf8(isolate, "WindowObject", String::kInternalizedString));
+		base->SetClassName(String::NewFromUtf8(isolate, "WindowObject").ToLocalChecked());
 		templ = base->InstanceTemplate();
 		SetupWindowFunctions(templ);
 		my_context->window_template.Reset(isolate, templ);
@@ -1856,32 +1856,34 @@ GetGlobalObjectTemplate(Isolate *isolate)
 {
 	Persistent<ObjectTemplate>	global;
 
+
 	if (global.IsEmpty())
 	{
 		HandleScope				handle_scope(isolate);
+		Local<Context>		context = isolate->GetCurrentContext();
 
 		Local<ObjectTemplate> templ = ObjectTemplate::New(isolate);
 		// ERROR levels for elog
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG5", String::kInternalizedString), Int32::New(isolate, DEBUG5));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG4", String::kInternalizedString), Int32::New(isolate, DEBUG4));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG3", String::kInternalizedString), Int32::New(isolate, DEBUG3));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG2", String::kInternalizedString), Int32::New(isolate, DEBUG2));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG1", String::kInternalizedString), Int32::New(isolate, DEBUG1));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG", String::kInternalizedString), Int32::New(isolate, DEBUG5));
-		templ->Set(String::NewFromUtf8(isolate, "LOG", String::kInternalizedString), Int32::New(isolate, LOG));
-		templ->Set(String::NewFromUtf8(isolate, "INFO", String::kInternalizedString), Int32::New(isolate, INFO));
-		templ->Set(String::NewFromUtf8(isolate, "NOTICE", String::kInternalizedString), Int32::New(isolate, NOTICE));
-		templ->Set(String::NewFromUtf8(isolate, "WARNING", String::kInternalizedString), Int32::New(isolate, WARNING));
-		templ->Set(String::NewFromUtf8(isolate, "ERROR", String::kInternalizedString), Int32::New(isolate, ERROR));
+		templ->Set(String::NewFromUtf8(isolate, "DEBUG5").ToLocalChecked(), Int32::New(isolate, DEBUG5));
+		templ->Set(String::NewFromUtf8(isolate, "DEBUG4").ToLocalChecked(), Int32::New(isolate, DEBUG4));
+		templ->Set(String::NewFromUtf8(isolate, "DEBUG3").ToLocalChecked(), Int32::New(isolate, DEBUG3));
+		templ->Set(String::NewFromUtf8(isolate, "DEBUG2").ToLocalChecked(), Int32::New(isolate, DEBUG2));
+		templ->Set(String::NewFromUtf8(isolate, "DEBUG1").ToLocalChecked(), Int32::New(isolate, DEBUG1));
+		templ->Set(String::NewFromUtf8(isolate, "DEBUG").ToLocalChecked(), Int32::New(isolate, DEBUG5));
+		templ->Set(String::NewFromUtf8(isolate, "LOG").ToLocalChecked(), Int32::New(isolate, LOG));
+		templ->Set(String::NewFromUtf8(isolate, "INFO").ToLocalChecked(), Int32::New(isolate, INFO));
+		templ->Set(String::NewFromUtf8(isolate, "NOTICE").ToLocalChecked(), Int32::New(isolate, NOTICE));
+		templ->Set(String::NewFromUtf8(isolate, "WARNING").ToLocalChecked(), Int32::New(isolate, WARNING));
+		templ->Set(String::NewFromUtf8(isolate, "ERROR").ToLocalChecked(), Int32::New(isolate, ERROR));
 		global.Reset(isolate, templ);
 
 		Handle<ObjectTemplate>	plv8 = ObjectTemplate::New(isolate);
 
 		SetupPlv8Functions(plv8);
-		plv8->Set(String::NewFromUtf8(isolate, "version", String::kInternalizedString), String::NewFromUtf8(isolate, PLV8_VERSION));
-		plv8->Set(String::NewFromUtf8(isolate, "v8_version", String::kInternalizedString), String::NewFromUtf8(isolate, V8_VERSION_STRING));
+		plv8->Set(isolate, "version", String::NewFromUtf8(isolate, PLV8_VERSION).ToLocalChecked());
+		plv8->Set(isolate, "v8_version", String::NewFromUtf8(isolate, V8_VERSION_STRING).ToLocalChecked());
 
-		templ->Set(String::NewFromUtf8(isolate, "plv8", String::kInternalizedString), plv8);
+		templ->Set(isolate, "plv8", plv8);
 	}
 	return Local<ObjectTemplate>::New(isolate, global);
 }
@@ -1990,6 +1992,7 @@ Converter::ToValue(HeapTuple tuple)
 {
 	Isolate		   *isolate = Isolate::GetCurrent();
 	Local<Object>	obj = Object::New(isolate);
+	Local<Context> context = isolate->GetCurrentContext();
 
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
@@ -2009,7 +2012,7 @@ Converter::ToValue(HeapTuple tuple)
 		datum = nocachegetattr(tuple, c + 1, m_tupdesc, &isnull);
 #endif
 
-		obj->Set(m_colnames[c], ::ToValue(datum, isnull, &m_coltypes[c]));
+		obj->Set(context, m_colnames[c], ::ToValue(datum, isnull, &m_coltypes[c]));
 	}
 
 	return obj;
@@ -2019,6 +2022,8 @@ Datum
 Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 {
 	Isolate		   *isolate = Isolate::GetCurrent();
+	Local<Context>		context = isolate->GetCurrentContext();
+
 	Datum			result;
 	TryCatch		try_catch(isolate);
 	Handle<Object>	obj;
@@ -2052,7 +2057,7 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 			CString  colname(m_colnames[c]);
 			for (int d = 0; d < m_tupdesc->natts; d++)
 			{
-				CString fname(names->Get(d));
+				CString fname(names->Get(context, d).ToLocalChecked());
 				if (strcmp(colname, fname) == 0)
 				{
 					found = true;
@@ -2077,7 +2082,7 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 			continue;
 		}
 
-		Handle<v8::Value> attr = m_is_scalar ? value : obj->Get(m_colnames[c]);
+		Handle<v8::Value> attr = m_is_scalar ? value : obj->Get(context, m_colnames[c]).ToLocalChecked();
 		if (attr.IsEmpty() || attr->IsUndefined() || attr->IsNull())
 			nulls[c] = true;
 		else
@@ -2117,6 +2122,7 @@ js_error::js_error(const char *msg) throw()
 js_error::js_error(TryCatch &try_catch) throw()
 {
 	Isolate		   *isolate = Isolate::GetCurrent();
+	Local<Context>		context = isolate->GetCurrentContext();
 	HandleScope		handle_scope(isolate);
 	String::Utf8Value	exception(isolate, try_catch.Exception());
 	Handle<Message>		message = try_catch.Message();
@@ -2130,7 +2136,7 @@ js_error::js_error(TryCatch &try_catch) throw()
 	try
 	{
 		m_msg = ToCStringCopy(exception);
-		Handle<v8::Object> err = try_catch.Exception()->ToObject(isolate);
+		Handle<v8::Object> err = try_catch.Exception()->ToObject(context).ToLocalChecked();
 		StringInfoData	detailStr;
 		StringInfoData	hintStr;
 		StringInfoData	contextStr;
@@ -2140,14 +2146,14 @@ js_error::js_error(TryCatch &try_catch) throw()
 
 		if (!err.IsEmpty())
                 {
-			v8::Local<v8::Value> errCode = err->Get(String::NewFromUtf8(isolate, "code"));
+			v8::Local<v8::Value> errCode = err->Get(context, String::NewFromUtf8(isolate, "code").ToLocalChecked()).ToLocalChecked();
 			if (!errCode->IsUndefined() && !errCode->IsNull())
 			{
-				int32_t code = errCode->Int32Value(isolate->GetCurrentContext()).FromJust();
+				int32_t code = errCode->Int32Value(context).FromJust();
 				m_code = code;
 			}
 
-			v8::Local<v8::Value> errDetail = err->Get(String::NewFromUtf8(isolate, "detail"));
+			v8::Local<v8::Value> errDetail = err->Get(context, String::NewFromUtf8(isolate, "detail").ToLocalChecked()).ToLocalChecked();
 			if (!errDetail->IsUndefined() && !errDetail->IsNull())
 			{
 				CString detail(errDetail);
@@ -2155,7 +2161,7 @@ js_error::js_error(TryCatch &try_catch) throw()
 				m_detail = detailStr.data;
 			}
 
-			v8::Local<v8::Value> errHint = err->Get(String::NewFromUtf8(isolate, "hint"));
+			v8::Local<v8::Value> errHint = err->Get(context, String::NewFromUtf8(isolate, "hint").ToLocalChecked()).ToLocalChecked();
 			if (!errHint->IsUndefined() && !errHint->IsNull())
 			{
 				CString hint(errHint);
@@ -2163,7 +2169,7 @@ js_error::js_error(TryCatch &try_catch) throw()
 				m_hint = hintStr.data;
 			}
 
-			v8::Local<v8::Value> errContext = err->Get(String::NewFromUtf8(isolate, "context"));
+			v8::Local<v8::Value> errContext = err->Get(context, String::NewFromUtf8(isolate, "context").ToLocalChecked()).ToLocalChecked();
 			if (!errContext->IsUndefined() && !errContext->IsNull())
 			{
 				CString context(errContext);

@@ -73,7 +73,7 @@ endif
 
 OPTFLAGS = -std=c++11 -fno-rtti -O2
 
-CCFLAGS = -Wall $(OPTFLAGS) $(OPT_ENABLE_DEBUGGER_SUPPORT) -g
+CCFLAGS = -Wall $(OPTFLAGS) $(OPT_ENABLE_DEBUGGER_SUPPORT)
 
 ifdef V8_SRCDIR
 override CPPFLAGS += -I$(V8_SRCDIR) -I$(V8_SRCDIR)/include

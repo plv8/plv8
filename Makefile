@@ -38,7 +38,7 @@ AUTOV8_STATIC_LIBS = -lv8_monolith
 export PATH := $(abspath $(AUTOV8_DEPOT_TOOLS)):$(PATH)
 
 SHLIB_LINK += -L$(AUTOV8_OUT) -L$(AUTOV8_OUT)/third_party/icu $(AUTOV8_STATIC_LIBS)
-V8_OPTIONS = use_custom_libcxx=false v8_monolithic=true v8_use_external_startup_data=false
+V8_OPTIONS = use_custom_libcxx=false v8_monolithic=true v8_use_external_startup_data=false is_component_build=false
 
 
 ifndef USE_ICU

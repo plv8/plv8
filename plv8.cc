@@ -144,6 +144,8 @@ static plv8_exec_env		   *exec_env_head = NULL;
 extern const unsigned char coffee_script_binary_data[];
 extern const unsigned char livescript_binary_data[];
 
+static void killPlv8Context(plv8_context *ctx);
+
 /*
  * lower_case_functions are postgres-like C functions.
  * They could raise errors with elog/ereport(ERROR).
@@ -221,7 +223,9 @@ void DispatchDebugMessages() {
 void OOMErrorHandler(const char* location, bool is_heap_oom) {
 	Isolate *isolate = Isolate::GetCurrent();
 	isolate->TerminateExecution();
-	throw js_error("OOM error");
+	// set it to kill the user context and isolate
+	current_context->is_dead = true;
+	elog(ERROR, "out of memory");
 }
 
 void GCEpilogueCallback(Isolate* isolate, GCType type, GCCallbackFlags /* flags */) {
@@ -230,7 +234,6 @@ void GCEpilogueCallback(Isolate* isolate, GCType type, GCCallbackFlags /* flags 
 	if (type != GCType::kGCTypeIncrementalMarking
 		&& heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB) {
 		isolate->TerminateExecution();
-		throw js_error("OOM error in GC");
 	}
 	if (heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB / 0.9
 		&& plv8_last_heap_size < plv8_memory_limit * 1_MB / 0.9) {
@@ -474,13 +477,33 @@ plls_call_handler(PG_FUNCTION_ARGS)
 	return common_pl_call_handler(fcinfo, PLV8_DIALECT_LIVESCRIPT);
 }
 
+static void killPlv8Context(plv8_context *ctx) {
+	HASH_SEQ_STATUS		status;
+	plv8_proc_cache*	cache;
+
+	// need to search and reset all the user functions which were created in the old context
+	hash_seq_init(&status, plv8_proc_cache_hash);
+	cache = (plv8_proc_cache *) hash_seq_search(&status);
+	while (cache != nullptr) {
+		if (cache->user_id == ctx->user_id) {
+			if (cache->prosrc)
+			{
+				pfree(cache->prosrc);
+				cache->prosrc = NULL;
+			}
+			cache->function.Reset();
+		}
+		cache = (plv8_proc_cache *) hash_seq_search(&status);
+	}
+	ctx->isolate->Dispose();
+	delete ctx->array_buffer_allocator;
+}
+
 Datum
 plv8_reset(PG_FUNCTION_ARGS)
 {
 	Oid					user_id = GetUserId();
 	unsigned long		i;
-	HASH_SEQ_STATUS		status;
-	plv8_proc_cache*	cache;
 
 	for (i = 0; i < ContextVector.size(); i++)
 	{
@@ -488,28 +511,7 @@ plv8_reset(PG_FUNCTION_ARGS)
 		{
 			plv8_context * context = ContextVector[i];
 			ContextVector.erase(ContextVector.begin() + i);
-			// need to search and reset all the user functions which were created in the old context
-			hash_seq_init(&status, plv8_proc_cache_hash);
-			cache = (plv8_proc_cache *) hash_seq_search(&status);
-			while (cache != nullptr) {
-				if (cache->user_id == user_id) {
-					if (cache->prosrc)
-					{
-						pfree(cache->prosrc);
-						cache->prosrc = NULL;
-					}
-					cache->function.Reset();
-				}
-				cache = (plv8_proc_cache *) hash_seq_search(&status);
-			}
-			context->context.Reset();
-			context->recv_templ.Reset();
-			context->compile_context.Reset();
-			context->plan_template.Reset();
-			context->cursor_template.Reset();
-			context->window_template.Reset();
-			delete context->array_buffer_allocator;
-			context->isolate->Dispose();
+			killPlv8Context(context);
 			pfree(context);
 			break;
 		}
@@ -677,6 +679,10 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 	Isolate 	   *isolate = ctx->GetIsolate();
 	TryCatch		try_catch(isolate);
 
+	if (isolate->IsExecutionTerminating()) {
+		isolate->CancelTerminateExecution();
+	}
+
 #if PG_VERSION_NUM >= 110000
 	if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT)
 		throw js_error("could not connect to SPI manager");
@@ -731,8 +737,10 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 #endif
 
 	if (result.IsEmpty()) {
-		if (isolate->IsExecutionTerminating())
+		if (isolate->IsExecutionTerminating()) {
+			isolate->CancelTerminateExecution();
 			throw js_error("Out of memory error");
+		}
 		throw js_error(try_catch);
 	}
 
@@ -1374,6 +1382,10 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 	char		   *cresult;
 	const char	   *dialect_binary_data;
 
+	if (isolate->IsExecutionTerminating()) {
+		isolate->CancelTerminateExecution();
+	}
+
 	switch (dialect)
 	{
 		case PLV8_DIALECT_COFFEE:
@@ -1611,8 +1623,10 @@ CompileFunction(
 #endif
 
 	if (result.IsEmpty()) {
-		if (isolate->IsExecutionTerminating())
+		if (isolate->IsExecutionTerminating()) {
+			isolate->CancelTerminateExecution();
 			throw js_error("Script is out of memory");
+		}
 		throw js_error(try_catch);
 	}
 
@@ -1748,10 +1762,23 @@ GetPlv8Context() {
 			break;
 		}
 	}
+	if (my_context && (my_context->is_dead || (my_context->isolate && my_context->isolate->IsDead()))) {
+		// the isolate is dead because of OOM, kill it and dispose
+		char *username = GetUserNameFromId(my_context->user_id, false);
+		elog(LOG_SERVER_ONLY, "Disposing of a dead isolate for: %s", username);
+		ContextVector.erase(ContextVector.begin() + i);
+		if (my_context->isolate && my_context->isolate->IsInUse()) {
+			my_context->isolate->Exit();
+		}
+		killPlv8Context(my_context);
+		pfree(my_context);
+		my_context = nullptr;
+	}
 	if (!my_context)
 	{
 		my_context = (plv8_context *) MemoryContextAlloc(TopMemoryContext,
 														 sizeof(plv8_context));
+		my_context->is_dead = false;
 		CreateIsolate(my_context);
 		Isolate 			   *isolate = my_context->isolate;
 		Isolate::Scope			scope(isolate);

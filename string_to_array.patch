@@ -1,0 +1,14 @@
+diff --git a/src/runtime/runtime-strings.cc b/src/runtime/runtime-strings.cc
+index 992a9c19a2..339f640bdd 100644
+--- a/src/runtime/runtime-strings.cc
++++ b/src/runtime/runtime-strings.cc
+@@ -384,6 +384,9 @@ RUNTIME_FUNCTION(Runtime_StringToArray) {
+ 
+   s = String::Flatten(isolate, s);
+   const int length = static_cast<int>(Min<uint32_t>(s->length(), limit));
++  if (FixedArray::kMaxLength < length) {
++	  THROW_NEW_ERROR_RETURN_FAILURE(isolate, NewRangeError(MessageTemplate::kInvalidArrayLength));
++  }
+ 
+   Handle<FixedArray> elements;
+   int position = 0;

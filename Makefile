@@ -86,6 +86,8 @@ $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
 	&& cd v8 \
 	&& git checkout $(AUTOV8_VERSION) \
 	&& gclient sync \
+	&& git apply ../../big_int_128.patch \
+	&& git apply ../../string_to_array.patch \
 	&& tools/dev/v8gen.py $(PLATFORM) -- $(V8_OPTIONS)
 endif
 

@@ -1,0 +1,21 @@
+diff --git a/src/numbers/conversions.cc b/src/numbers/conversions.cc
+index 27f0a6ac3b..0d6eec63a4 100644
+--- a/src/numbers/conversions.cc
++++ b/src/numbers/conversions.cc
+@@ -392,7 +392,7 @@ void StringToIntHelper<LocalIsolate>::DetectRadixInternal(Char current,
+ template <typename LocalIsolate>
+ template <class Char>
+ bool StringToIntHelper<LocalIsolate>::ParseChunkInternal(Char start) {
+-  const int kChunkSize = 10240;
++  const int kChunkSize = 128;
+   Char current = start + cursor_;
+   Char end = start + length_;
+   Char break_pos = current + kChunkSize;
+@@ -436,6 +436,7 @@ bool StringToIntHelper<LocalIsolate>::ParseChunkInternal(Char start) {
+       const uint32_t kMaximumMultiplier = 0xFFFFFFFFU / 36;
+       uint32_t m = multiplier * static_cast<uint32_t>(radix_);
+       if (m > kMaximumMultiplier) break;
++      if (current >= break_pos) break;
+       part = part * radix_ + d;
+       multiplier = m;
+       DCHECK(multiplier > part);

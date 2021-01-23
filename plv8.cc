@@ -676,15 +676,6 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 {
 	Isolate 	   *isolate = ctx->GetIsolate();
 	TryCatch		try_catch(isolate);
-#ifdef EXECUTION_TIMEOUT
-#ifdef _MSC_VER
-	HANDLE  hThread;
-	DWORD dwThreadId;
-#else
-	pthread_t breakout_thread;
-	void *thread_result;
-#endif
-#endif
 
 #if PG_VERSION_NUM >= 110000
 	if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT)
@@ -699,9 +690,13 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 	term_handler = (void *) signal(SIGTERM, signal_handler);
 
 #ifdef EXECUTION_TIMEOUT
+	bool timeout = false;
 #ifdef _MSC_VER // windows
+	HANDLE  hThread;
+	DWORD dwThreadId;
 	hThread = CreateThread(NULL, 0, Breakout, isolate, 0, &dwThreadId);
 #else
+	pthread_t breakout_thread;
 	// set up the thread to break out the execution if needed
 	pthread_create(&breakout_thread, NULL, Breakout, isolate);
 #endif
@@ -712,23 +707,28 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 
 #ifdef EXECUTION_TIMEOUT
 #ifdef _MSC_VER
-	BOOL cancel_state = TerminateThread(hThread, NULL);
-
-	if (cancel_state == 0) {
-		throw js_error("execution timeout exceeded");
+	if (TerminateThread(hThread, NULL) == 0) {
+		timeout = true;
 	}
 #else
+	void *thread_result;
 	pthread_cancel(breakout_thread);
 	pthread_join(breakout_thread, &thread_result);
-
 	if (thread_result == NULL) {
-		throw js_error("execution timeout exceeded");
+		timeout = true;
 	}
 #endif
 #endif
 
 	signal(SIGINT, (void (*)(int)) int_handler);
 	signal(SIGTERM, (void (*)(int)) term_handler);
+
+#ifdef EXECUTION_TIMEOUT
+	if (timeout) {
+		isolate->CancelTerminateExecution();
+		throw js_error("execution timeout exceeded");
+	}
+#endif
 
 	if (result.IsEmpty()) {
 		if (isolate->IsExecutionTerminating())
@@ -1559,16 +1559,57 @@ CompileFunction(
 	Context::Scope	context_scope(context);
 	TryCatch		try_catch(isolate);
 	v8::ScriptOrigin origin(name);
+
+	// set up the signal handlers
+	int_handler = (void *) signal(SIGINT, signal_handler);
+	term_handler = (void *) signal(SIGTERM, signal_handler);
+
+#ifdef EXECUTION_TIMEOUT
+	bool timeout = false;
+#ifdef _MSC_VER // windows
+	HANDLE  hThread;
+	DWORD dwThreadId;
+	hThread = CreateThread(NULL, 0, Breakout, isolate, 0, &dwThreadId);
+#else
+	pthread_t breakout_thread;
+	// set up the thread to break out the execution if needed
+	pthread_create(&breakout_thread, NULL, Breakout, isolate);
+#endif
+#endif
+
 	v8::Local<v8::Script> script;
-  if (!Script::Compile(isolate->GetCurrentContext(), source, &origin).ToLocal(&script))
-		throw js_error(try_catch);
-
-	if (script.IsEmpty())
-		throw js_error(try_catch);
-
 	v8::Local<v8::Value> result;
-	if (!script->Run(isolate->GetCurrentContext()).ToLocal(&result))
-		throw js_error(try_catch);
+	if (Script::Compile(isolate->GetCurrentContext(), source, &origin).ToLocal(&script)) {
+		if (!script.IsEmpty()) {
+			if (!script->Run(isolate->GetCurrentContext()).ToLocal(&result))
+				throw js_error(try_catch);
+		}
+	}
+
+#ifdef EXECUTION_TIMEOUT
+#ifdef _MSC_VER
+	if (TerminateThread(hThread, NULL) == 0) {
+		timeout = true;
+	}
+#else
+	void *thread_result;
+	pthread_cancel(breakout_thread);
+	pthread_join(breakout_thread, &thread_result);
+	if (thread_result == NULL) {
+		timeout = true;
+	}
+#endif
+#endif
+	signal(SIGINT, (void (*)(int)) int_handler);
+	signal(SIGTERM, (void (*)(int)) term_handler);
+
+#ifdef EXECUTION_TIMEOUT
+	if (timeout) {
+		isolate->CancelTerminateExecution();
+		throw js_error("compiler timeout exceeded");
+	}
+#endif
+
 	if (result.IsEmpty()) {
 		if (isolate->IsExecutionTerminating())
 			throw js_error("Script is out of memory");

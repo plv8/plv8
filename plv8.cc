@@ -542,7 +542,8 @@ plv8_info(PG_FUNCTION_ARGS)
 #else
 		char 			   *username = GetUserNameFromId(ContextVector[i]->user_id);
 #endif
-		obj->Set(String::NewFromUtf8(isolate, "user"), String::NewFromUtf8(isolate, username));
+		obj->Set(context, String::NewFromUtf8(isolate, "user").ToLocalChecked(),
+           String::NewFromUtf8(isolate, username).ToLocalChecked()).Check();
 		GetMemoryInfo(obj);
 
 		result = JSON.Stringify(obj);
@@ -910,7 +911,7 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		// return an array of records.
 		int	length = array->Length();
 		for (int i = 0; i < length; i++)
-			conv.ToDatum(array->Get(i), tupstore);
+			conv.ToDatum(array->Get(context, i).ToLocalChecked(), tupstore);
 	}
 	else
 	{
@@ -995,29 +996,29 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 
 	// 3: TG_WHEN
 	if (TRIGGER_FIRED_BEFORE(event))
-		args[3] = String::NewFromUtf8(xenv->isolate, "BEFORE");
+		args[3] = String::NewFromUtf8(xenv->isolate, "BEFORE").ToLocalChecked();
 	else
-		args[3] = String::NewFromUtf8(xenv->isolate, "AFTER");
+		args[3] = String::NewFromUtf8(xenv->isolate, "AFTER").ToLocalChecked();
 
 	// 4: TG_LEVEL
 	if (TRIGGER_FIRED_FOR_ROW(event))
-		args[4] = String::NewFromUtf8(xenv->isolate, "ROW");
+		args[4] = String::NewFromUtf8(xenv->isolate, "ROW").ToLocalChecked();
 	else
-		args[4] = String::NewFromUtf8(xenv->isolate, "STATEMENT");
+		args[4] = String::NewFromUtf8(xenv->isolate, "STATEMENT").ToLocalChecked();
 
 	// 5: TG_OP
 	if (TRIGGER_FIRED_BY_INSERT(event))
-		args[5] = String::NewFromUtf8(xenv->isolate, "INSERT");
+		args[5] = String::NewFromUtf8(xenv->isolate, "INSERT").ToLocalChecked();
 	else if (TRIGGER_FIRED_BY_DELETE(event))
-		args[5] = String::NewFromUtf8(xenv->isolate, "DELETE");
+		args[5] = String::NewFromUtf8(xenv->isolate, "DELETE").ToLocalChecked();
 	else if (TRIGGER_FIRED_BY_UPDATE(event))
-		args[5] = String::NewFromUtf8(xenv->isolate, "UPDATE");
+		args[5] = String::NewFromUtf8(xenv->isolate, "UPDATE").ToLocalChecked();
 #ifdef TRIGGER_FIRED_BY_TRUNCATE
 	else if (TRIGGER_FIRED_BY_TRUNCATE(event))
-		args[5] = String::NewFromUtf8(xenv->isolate, "TRUNCATE");
+		args[5] = String::NewFromUtf8(xenv->isolate, "TRUNCATE").ToLocalChecked();
 #endif
 	else
-		args[5] = String::NewFromUtf8(xenv->isolate, "?");
+		args[5] = String::NewFromUtf8(xenv->isolate, "?").ToLocalChecked();
 
 	// 6: TG_RELID
 	args[6] = Uint32::New(xenv->isolate, RelationGetRelid(rel));
@@ -1031,7 +1032,7 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	// 9: TG_ARGV
 	Handle<Array> tgargs = Array::New(xenv->isolate, trig->tg_trigger->tgnargs);
 	for (int i = 0; i < trig->tg_trigger->tgnargs; i++)
-		tgargs->Set(i, ToString(trig->tg_trigger->tgargs[i]));
+		tgargs->Set(context, i, ToString(trig->tg_trigger->tgargs[i])).Check();
 	args[9] = tgargs;
 
 	TryCatch			try_catch(xenv->isolate);
@@ -1378,20 +1379,20 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 		case PLV8_DIALECT_COFFEE:
 			if (coffee_script_binary_data[0] == '\0')
 				throw js_error("CoffeeScript is not enabled");
-			key = String::NewFromUtf8(isolate, "CoffeeScript", String::kInternalizedString);
+			key = String::NewFromUtf8(isolate, "CoffeeScript", NewStringType::kInternalized).ToLocalChecked();
 			dialect_binary_data = (const char *) coffee_script_binary_data;
 			break;
 		case PLV8_DIALECT_LIVESCRIPT:
 			if (livescript_binary_data[0] == '\0')
 				throw js_error("LiveScript is not enabled");
-			key = String::NewFromUtf8(isolate, "LiveScript", String::kInternalizedString);
+			key = String::NewFromUtf8(isolate, "LiveScript", NewStringType::kInternalized).ToLocalChecked();
 			dialect_binary_data = (const char *) livescript_binary_data;
 			break;
 		default:
 			throw js_error("Unknown Dialect");
 	}
 
-	if (ctx->Global()->Get(key)->IsUndefined())
+	if (ctx->Global()->Get(ctx, key).ToLocalChecked()->IsUndefined())
 	{
 		HandleScope		handle_scope(isolate);
 		v8::ScriptOrigin origin(key);
@@ -1410,9 +1411,10 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 		}
 	}
 
-	Local<Object>	compiler = Local<Object>::Cast(ctx->Global()->Get(key));
-	Local<Function>	func = Local<Function>::Cast(
-			compiler->Get(String::NewFromUtf8(isolate, "compile", String::kInternalizedString)));
+	Local<Object> compiler = Local<Object>::Cast(ctx->Global()->Get(ctx, key).ToLocalChecked());
+    Local<Function>	func = Local<Function>::Cast(
+            compiler->Get(ctx, String::NewFromUtf8(isolate, "compile",
+												   NewStringType::kInternalized).ToLocalChecked()).ToLocalChecked());
 	const int		nargs = 1;
 	Handle<v8::Value>	args[nargs];
 
@@ -1729,23 +1731,35 @@ GetPlv8Context() {
 		Local<Context> ctx = Context::New(isolate, (ExtensionConfiguration*)NULL);
 		my_context->compile_context.Reset(isolate, ctx);
 
+		auto toStringAttr = static_cast<PropertyAttribute>(v8::ReadOnly | v8::DontEnum);
+		auto toStringSymbol = v8::Symbol::GetToStringTag(isolate);
+
 		new(&my_context->plan_template) Persistent<ObjectTemplate>();
 		Local<FunctionTemplate> base = FunctionTemplate::New(isolate);
-		base->SetClassName(String::NewFromUtf8(isolate, "PreparedPlan", String::kInternalizedString));
+		Local<String> planClassName = String::NewFromUtf8(isolate, "PreparedPlan", NewStringType::kInternalized)
+				.ToLocalChecked();
+		base->SetClassName(planClassName);
+		base->PrototypeTemplate()->Set(toStringSymbol, planClassName, toStringAttr);
 		templ = base->InstanceTemplate();
 		SetupPrepFunctions(templ);
 		my_context->plan_template.Reset(isolate, templ);
 
 		new(&my_context->cursor_template) Persistent<ObjectTemplate>();
 		base = FunctionTemplate::New(isolate);
-		base->SetClassName(String::NewFromUtf8(isolate, "Cursor", String::kInternalizedString));
+		Local<String> cursorClassName = String::NewFromUtf8(isolate, "Cursor", NewStringType::kInternalized)
+				.ToLocalChecked();
+		base->SetClassName(cursorClassName);
+		base->PrototypeTemplate()->Set(toStringSymbol, cursorClassName, toStringAttr);
 		templ = base->InstanceTemplate();
 		SetupCursorFunctions(templ);
 		my_context->cursor_template.Reset(isolate, templ);
 
 		new(&my_context->window_template) Persistent<ObjectTemplate>();
 		base = FunctionTemplate::New(isolate);
-		base->SetClassName(String::NewFromUtf8(isolate, "WindowObject", String::kInternalizedString));
+		Local<String> windowClassName = String::NewFromUtf8(isolate, "WindowObject", NewStringType::kInternalized)
+				.ToLocalChecked();
+        base->SetClassName(windowClassName);
+		base->PrototypeTemplate()->Set(toStringSymbol, windowClassName, toStringAttr);
 		templ = base->InstanceTemplate();
 		SetupWindowFunctions(templ);
 		my_context->window_template.Reset(isolate, templ);
@@ -1862,26 +1876,39 @@ GetGlobalObjectTemplate(Isolate *isolate)
 
 		Local<ObjectTemplate> templ = ObjectTemplate::New(isolate);
 		// ERROR levels for elog
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG5", String::kInternalizedString), Int32::New(isolate, DEBUG5));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG4", String::kInternalizedString), Int32::New(isolate, DEBUG4));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG3", String::kInternalizedString), Int32::New(isolate, DEBUG3));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG2", String::kInternalizedString), Int32::New(isolate, DEBUG2));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG1", String::kInternalizedString), Int32::New(isolate, DEBUG1));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG", String::kInternalizedString), Int32::New(isolate, DEBUG5));
-		templ->Set(String::NewFromUtf8(isolate, "LOG", String::kInternalizedString), Int32::New(isolate, LOG));
-		templ->Set(String::NewFromUtf8(isolate, "INFO", String::kInternalizedString), Int32::New(isolate, INFO));
-		templ->Set(String::NewFromUtf8(isolate, "NOTICE", String::kInternalizedString), Int32::New(isolate, NOTICE));
-		templ->Set(String::NewFromUtf8(isolate, "WARNING", String::kInternalizedString), Int32::New(isolate, WARNING));
-		templ->Set(String::NewFromUtf8(isolate, "ERROR", String::kInternalizedString), Int32::New(isolate, ERROR));
+		templ->Set(String::NewFromUtf8(isolate, "DEBUG5", NewStringType::kInternalized).ToLocalChecked(),
+				   Int32::New(isolate, DEBUG5));
+		templ->Set(String::NewFromUtf8(isolate, "DEBUG4", NewStringType::kInternalized).ToLocalChecked(),
+				   Int32::New(isolate, DEBUG4));
+		templ->Set(String::NewFromUtf8(isolate, "DEBUG3", NewStringType::kInternalized).ToLocalChecked(),
+				   Int32::New(isolate, DEBUG3));
+		templ->Set(String::NewFromUtf8(isolate, "DEBUG2", NewStringType::kInternalized).ToLocalChecked(),
+				   Int32::New(isolate, DEBUG2));
+		templ->Set(String::NewFromUtf8(isolate, "DEBUG1", NewStringType::kInternalized).ToLocalChecked(),
+				   Int32::New(isolate, DEBUG1));
+		templ->Set(String::NewFromUtf8(isolate, "DEBUG", NewStringType::kInternalized).ToLocalChecked(),
+				   Int32::New(isolate, DEBUG5));
+		templ->Set(String::NewFromUtf8(isolate, "LOG", NewStringType::kInternalized).ToLocalChecked(),
+				   Int32::New(isolate, LOG));
+		templ->Set(String::NewFromUtf8(isolate, "INFO", NewStringType::kInternalized).ToLocalChecked(),
+				   Int32::New(isolate, INFO));
+		templ->Set(String::NewFromUtf8(isolate, "NOTICE", NewStringType::kInternalized).ToLocalChecked(),
+				   Int32::New(isolate, NOTICE));
+		templ->Set(String::NewFromUtf8(isolate, "WARNING", NewStringType::kInternalized).ToLocalChecked(),
+				   Int32::New(isolate, WARNING));
+		templ->Set(String::NewFromUtf8(isolate, "ERROR", NewStringType::kInternalized).ToLocalChecked(),
+				   Int32::New(isolate, ERROR));
 		global.Reset(isolate, templ);
 
-		Handle<ObjectTemplate>	plv8 = ObjectTemplate::New(isolate);
+		Local<ObjectTemplate> plv8 = ObjectTemplate::New(isolate);
 
 		SetupPlv8Functions(plv8);
-		plv8->Set(String::NewFromUtf8(isolate, "version", String::kInternalizedString), String::NewFromUtf8(isolate, PLV8_VERSION));
-		plv8->Set(String::NewFromUtf8(isolate, "v8_version", String::kInternalizedString), String::NewFromUtf8(isolate, V8_VERSION_STRING));
+		plv8->Set(String::NewFromUtf8(isolate, "version", NewStringType::kInternalized).ToLocalChecked(),
+				  String::NewFromUtf8(isolate, PLV8_VERSION).ToLocalChecked());
+		plv8->Set(String::NewFromUtf8(isolate, "v8_version", NewStringType::kInternalized).ToLocalChecked(),
+				  String::NewFromUtf8(isolate, V8_VERSION_STRING).ToLocalChecked());
 
-		templ->Set(String::NewFromUtf8(isolate, "plv8", String::kInternalizedString), plv8);
+		templ->Set(String::NewFromUtf8(isolate, "plv8", NewStringType::kInternalized).ToLocalChecked(), plv8);
 	}
 	return Local<ObjectTemplate>::New(isolate, global);
 }
@@ -1989,6 +2016,7 @@ Local<Object>
 Converter::ToValue(HeapTuple tuple)
 {
 	Isolate		   *isolate = Isolate::GetCurrent();
+    Local<Context>  context = isolate->GetCurrentContext();
 	Local<Object>	obj = Object::New(isolate);
 
 	for (int c = 0; c < m_tupdesc->natts; c++)
@@ -2009,7 +2037,7 @@ Converter::ToValue(HeapTuple tuple)
 		datum = nocachegetattr(tuple, c + 1, m_tupdesc, &isnull);
 #endif
 
-		obj->Set(m_colnames[c], ::ToValue(datum, isnull, &m_coltypes[c]));
+		obj->Set(context, m_colnames[c], ::ToValue(datum, isnull, &m_coltypes[c])).Check();
 	}
 
 	return obj;
@@ -2019,6 +2047,7 @@ Datum
 Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 {
 	Isolate		   *isolate = Isolate::GetCurrent();
+    Local<Context>  context = isolate->GetCurrentContext();
 	Datum			result;
 	TryCatch		try_catch(isolate);
 	Handle<Object>	obj;
@@ -2052,7 +2081,7 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 			CString  colname(m_colnames[c]);
 			for (int d = 0; d < m_tupdesc->natts; d++)
 			{
-				CString fname(names->Get(d));
+				CString fname(names->Get(context, d).ToLocalChecked());
 				if (strcmp(colname, fname) == 0)
 				{
 					found = true;
@@ -2077,7 +2106,7 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 			continue;
 		}
 
-		Handle<v8::Value> attr = m_is_scalar ? value : obj->Get(m_colnames[c]);
+		Handle<v8::Value> attr = m_is_scalar ? value : obj->Get(context, m_colnames[c]).ToLocalChecked();
 		if (attr.IsEmpty() || attr->IsUndefined() || attr->IsNull())
 			nulls[c] = true;
 		else
@@ -2120,6 +2149,7 @@ js_error::js_error(TryCatch &try_catch) throw()
 	HandleScope		handle_scope(isolate);
 	String::Utf8Value	exception(isolate, try_catch.Exception());
 	Handle<Message>		message = try_catch.Message();
+    Local<Context>      context = isolate->GetCurrentContext();
 
 	m_msg = NULL;
 	m_code = 0;
@@ -2130,53 +2160,67 @@ js_error::js_error(TryCatch &try_catch) throw()
 	try
 	{
 		m_msg = ToCStringCopy(exception);
-		Handle<v8::Object> err = try_catch.Exception()->ToObject(isolate);
-		StringInfoData	detailStr;
-		StringInfoData	hintStr;
-		StringInfoData	contextStr;
-		initStringInfo(&detailStr);
-		initStringInfo(&hintStr);
-		initStringInfo(&contextStr);
-
-		if (!err.IsEmpty())
+        StringInfoData	detailStr;
+        StringInfoData	hintStr;
+        StringInfoData	contextStr;
+        initStringInfo(&detailStr);
+        initStringInfo(&hintStr);
+        initStringInfo(&contextStr);
+		Handle<v8::Object> err;
+		if (try_catch.Exception()->ToObject(context).ToLocal(&err))
+        {
+            if (!err.IsEmpty())
+            {
+                v8::Local<v8::Value> errCode;
+                if (err->Get(context,
+                             String::NewFromUtf8(isolate, "code").ToLocalChecked()).ToLocal(&errCode))
                 {
-			v8::Local<v8::Value> errCode = err->Get(String::NewFromUtf8(isolate, "code"));
-			if (!errCode->IsUndefined() && !errCode->IsNull())
-			{
-				int32_t code = errCode->Int32Value(isolate->GetCurrentContext()).FromJust();
-				m_code = code;
-			}
-
-			v8::Local<v8::Value> errDetail = err->Get(String::NewFromUtf8(isolate, "detail"));
-			if (!errDetail->IsUndefined() && !errDetail->IsNull())
-			{
-				CString detail(errDetail);
-				appendStringInfo(&detailStr, "%s", detail.str("?"));
-				m_detail = detailStr.data;
-			}
-
-			v8::Local<v8::Value> errHint = err->Get(String::NewFromUtf8(isolate, "hint"));
-			if (!errHint->IsUndefined() && !errHint->IsNull())
-			{
-				CString hint(errHint);
-				appendStringInfo(&hintStr, "%s", hint.str("?"));
-				m_hint = hintStr.data;
-			}
-
-			v8::Local<v8::Value> errContext = err->Get(String::NewFromUtf8(isolate, "context"));
-			if (!errContext->IsUndefined() && !errContext->IsNull())
-			{
-				CString context(errContext);
-				appendStringInfo(&contextStr, "%s\n", context.str("?"));
-			}
+                    if (!errCode->IsUndefined() && !errCode->IsNull())
+                    {
+                        int32_t code = errCode->Int32Value(context).FromJust();
+                        m_code = code;
+                    }
                 }
 
+                v8::Local<v8::Value> errDetail;
+                if (err->Get(context,
+                             String::NewFromUtf8(isolate, "detail").ToLocalChecked()).ToLocal(&errDetail))
+                {
+                    if (!errDetail->IsUndefined() && !errDetail->IsNull())
+                    {
+                        CString detail(errDetail);
+                        appendStringInfo(&detailStr, "%s", detail.str("?"));
+                        m_detail = detailStr.data;
+                    }
+                }
+
+                v8::Local<v8::Value> errHint;
+                if (err->Get(context,
+                             String::NewFromUtf8(isolate, "hint").ToLocalChecked()).ToLocal(&errHint))
+                {
+                    if (!errHint->IsUndefined() && !errHint->IsNull())
+                    {
+                        CString hint(errHint);
+                        appendStringInfo(&hintStr, "%s", hint.str("?"));
+                        m_hint = hintStr.data;
+                    }
+                }
+
+                v8::Local<v8::Value> errContext;
+                if (err->Get(context, String::NewFromUtf8(isolate, "context").ToLocalChecked()).ToLocal(&errContext))
+                    if (!errContext->IsUndefined() && !errContext->IsNull())
+                    {
+                        CString str_context(errContext);
+                        appendStringInfo(&contextStr, "%s\n", str_context.str("?"));
+                    }
+            }
+        }
 
 		if (!message.IsEmpty())
 		{
 			CString		script(message->GetScriptResourceName());
-			int		lineno = message->GetLineNumber(isolate->GetCurrentContext()).FromJust();
-			CString		source(message->GetSourceLine(isolate->GetCurrentContext()).ToLocalChecked());
+			int		lineno = message->GetLineNumber(context).FromJust();
+			CString		source(message->GetSourceLine(context).ToLocalChecked());
 			// TODO: Get stack trace?
 			//Handle<StackTrace> stackTrace(message->GetStackTrace());
 

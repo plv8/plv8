@@ -209,10 +209,10 @@ public:
 		if (WindowObjectIsValid(m_winobj))
 		{
 			m_plv8obj = v8::Handle<v8::Object>::Cast(
-					context->Global()->Get(v8::String::NewFromUtf8(
+					context->Global()->Get(context, v8::String::NewFromUtf8(
 						context->GetIsolate(),
 						"plv8",
-						v8::String::kInternalizedString)));
+						v8::NewStringType::kInternalized).ToLocalChecked()).ToLocalChecked());
 			if (m_plv8obj.IsEmpty())
 				throw js_error("plv8 object not found");
 			/* Stash the current item, just in case of nested call */
@@ -248,13 +248,13 @@ public:
 	SRFSupport(v8::Handle<v8::Context> context,
 			   Converter *conv, Tuplestorestate *tupstore)
 	{
-		m_plv8obj = v8::Handle<v8::Object>::Cast(
-				context->Global()->Get(v8::String::NewFromUtf8(
-					context->GetIsolate(),
-					"plv8",
-					v8::String::kInternalizedString)));
-		if (m_plv8obj.IsEmpty())
-			throw js_error("plv8 object not found");
+	    v8::Local<v8::Value> m_val;
+	    if (!context->Global()->Get(context, v8::String::NewFromUtf8(
+                context->GetIsolate(),
+                "plv8",
+                v8::NewStringType::kInternalized).ToLocalChecked()).ToLocal(&m_val))
+            throw js_error("plv8 object not found");
+	    m_plv8obj = v8::Handle<v8::Object>::Cast(m_val);
 		m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV);
 		m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE);
 		m_plv8obj->SetInternalField(PLV8_INTNL_CONV,

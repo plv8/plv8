@@ -29,16 +29,18 @@ else
 	endif
 endif
 
-AUTOV8_VERSION = 7.4.288.28
+AUTOV8_VERSION = 8.8.278.14
 AUTOV8_DIR = build/v8
 AUTOV8_OUT = build/v8/out.gn/$(PLATFORM)/obj
 AUTOV8_DEPOT_TOOLS = build/depot_tools
 AUTOV8_LIB = $(AUTOV8_OUT)/libv8_snapshot.a
-AUTOV8_STATIC_LIBS = -lv8_base -lv8_snapshot -lv8_libplatform -lv8_libbase -lv8_libsampler
+AUTOV8_STATIC_LIBS = -lv8_base_without_compiler -lv8_compiler -lv8_base_without_compiler -lchrome_zlib -lcompression_utils_portable -ltorque_generated_definitions -lcppgc_base -lv8_cppgc_shared -lv8_snapshot -lv8_libplatform -lv8_libbase -lv8_libsampler -lchrome_zlib
+ZLIB_DIR = $(AUTOV8_OUT)/third_party/zlib
+ZLIB_OBJS = $(ZLIB_DIR)/zlib_adler32_simd/adler32_simd.o $(ZLIB_DIR)/zlib_inflate_chunk_simd/inffast_chunk.o $(ZLIB_DIR)/zlib_inflate_chunk_simd/inflate.o $(ZLIB_DIR)/zlib_crc32_simd/crc32_simd.o $(ZLIB_DIR)/zlib_x86_simd/crc_folding.o $(ZLIB_DIR)/zlib_x86_simd/fill_window_sse.o
 export PATH := $(abspath $(AUTOV8_DEPOT_TOOLS)):$(PATH)
 
-SHLIB_LINK += -L$(AUTOV8_OUT) -L$(AUTOV8_OUT)/third_party/icu $(AUTOV8_STATIC_LIBS)
-V8_OPTIONS = is_component_build=false v8_static_library=true v8_use_snapshot=true v8_use_external_startup_data=false use_custom_libcxx=false
+SHLIB_LINK += $(ZLIB_OBJS) -L$(AUTOV8_OUT) -L$(AUTOV8_OUT)/third_party/icu -L$(ZLIB_DIR) -L$(AUTOV8_OUT)/third_party/zlib/google $(AUTOV8_STATIC_LIBS)
+V8_OPTIONS = is_component_build=false v8_static_library=true v8_use_external_startup_data=false use_custom_libcxx=false
 
 ifndef USE_ICU
 	V8_OPTIONS += v8_enable_i18n_support=false
@@ -51,7 +53,8 @@ plv8_config.h plv8.so: v8
 
 $(AUTOV8_DEPOT_TOOLS):
 	mkdir -p build
-	cd build; git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+	cd build \
+	&& git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
 
 ifeq ($(PLATFORM),arm64.release)
 $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
@@ -78,7 +81,12 @@ $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
 	cd build/v8; sed -i -e "s/target_cpu=\"x64\" v8_target_cpu=\"arm64/target_cpu=\"arm64\" v8_target_cpu=\"arm64/" infra/mb/mb_config.pyl; tools/dev/v8gen.py $(PLATFORM) -- $(V8_OPTIONS)
 else
 $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
-	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync ; cd build/config ; cd ../.. ; tools/dev/v8gen.py $(PLATFORM) -- $(V8_OPTIONS)
+	cd build \
+	&& fetch v8 \
+	&& cd v8 \
+	&& git checkout $(AUTOV8_VERSION) \
+	&& gclient sync \
+	&& tools/dev/v8gen.py $(PLATFORM) -- $(V8_OPTIONS)
 endif
 
 $(AUTOV8_OUT)/third_party/icu/common/icudtb.dat:
@@ -86,7 +94,8 @@ $(AUTOV8_OUT)/third_party/icu/common/icudtb.dat:
 $(AUTOV8_OUT)/third_party/icu/common/icudtl.dat:
 
 v8: $(AUTOV8_DIR)
-	cd $(AUTOV8_DIR) ; env CXXFLAGS=-fPIC CFLAGS=-fPIC ninja -C out.gn/$(PLATFORM) d8
+	cd $(AUTOV8_DIR) \
+	&& env CXXFLAGS=-fPIC CFLAGS=-fPIC ninja -C out.gn/$(PLATFORM) d8
 
 include Makefile.shared
 
@@ -101,6 +110,9 @@ endif
 # enable direct jsonb conversion by default
 CCFLAGS += -DJSONB_DIRECT_CONVERSION
 
+# enable pointer compression support (default for v8 > 8.x)
+CCFLAGS += -DV8_COMPRESS_POINTERS -DV8_31BIT_SMIS_ON_64BIT_ARCH
+
 CCFLAGS += -I$(AUTOV8_DIR)/include -I$(AUTOV8_DIR)
 # We're gonna build static link.  Rip it out after include Makefile
 SHLIB_LINK := $(filter-out -lv8, $(SHLIB_LINK))
@@ -111,11 +123,11 @@ else
 	SHLIB_LINK += -L$(AUTOV8_OUT)
 	UNAME_S := $(shell uname -s)
 	ifeq ($(UNAME_S),Darwin)
-		CCFLAGS += -stdlib=libc++ -std=c++11
+		CCFLAGS += -stdlib=libc++ -std=c++14
 		SHLIB_LINK += -stdlib=libc++
 	endif
 	ifeq ($(UNAME_S),Linux)
-		CCFLAGS += -std=c++11
-		SHLIB_LINK += -lrt -std=c++11 -lc++
+		CCFLAGS += -std=c++14
+		SHLIB_LINK += -lrt -std=c++14 -lc++
 	endif
 endif

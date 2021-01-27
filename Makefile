@@ -29,7 +29,7 @@ else
 	endif
 endif
 
-AUTOV8_VERSION = 8.0.23
+AUTOV8_VERSION = 8.6.405
 AUTOV8_DIR = build/v8
 AUTOV8_OUT = build/v8/out.gn/$(PLATFORM)/obj
 AUTOV8_DEPOT_TOOLS = build/depot_tools
@@ -38,7 +38,7 @@ AUTOV8_STATIC_LIBS = -lv8_monolith
 export PATH := $(abspath $(AUTOV8_DEPOT_TOOLS)):$(PATH)
 
 SHLIB_LINK += -L$(AUTOV8_OUT) -L$(AUTOV8_OUT)/third_party/icu $(AUTOV8_STATIC_LIBS)
-V8_OPTIONS = use_custom_libcxx=false v8_monolithic=true v8_use_external_startup_data=false is_component_build=false
+V8_OPTIONS = use_custom_libcxx=false v8_monolithic=true v8_use_external_startup_data=false is_component_build=false is_debug=true
 
 
 ifndef USE_ICU
@@ -101,6 +101,8 @@ endif
 
 # enable direct jsonb conversion by default
 CCFLAGS += -DJSONB_DIRECT_CONVERSION
+
+CCFLAGS += -DV8_COMPRESS_POINTERS=1 -DV8_31BIT_SMIS_ON_64BIT_ARCH=1
 
 CCFLAGS += -I$(AUTOV8_DIR)/include -I$(AUTOV8_DIR)
 # We're gonna build static link.  Rip it out after include Makefile

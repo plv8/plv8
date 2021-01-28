@@ -210,8 +210,8 @@ JSONObject::JSONObject()
 	Isolate* isolate = v8::Isolate::GetCurrent();
 	Handle<Context> context = isolate->GetCurrentContext();
 	Handle<Object> global = context->Global();
-	MaybeLocal<v8::Value> maybeJson = global->Get(context, String::NewFromUtf8(isolate, "JSON",
-																				NewStringType::kInternalized).ToLocalChecked());
+	MaybeLocal<v8::Value> maybeJson = global->Get(context, String::NewFromUtf8Literal(isolate, "JSON",
+																				NewStringType::kInternalized));
 	if (maybeJson.IsEmpty())
 		throw js_error("JSON not found");
 	m_json = maybeJson.ToLocalChecked()->ToObject(context).ToLocalChecked();
@@ -226,7 +226,8 @@ JSONObject::Parse(Handle<v8::Value> str)
 	Isolate* isolate = v8::Isolate::GetCurrent();
 	Handle<Function> parse_func =
 		Handle<Function>::Cast(m_json->Get(isolate->GetCurrentContext(),
-									 String::NewFromUtf8(isolate, "parse", NewStringType::kInternalized).ToLocalChecked()).ToLocalChecked());
+									 String::NewFromUtf8Literal(isolate, "parse", 
+									 NewStringType::kInternalized)).ToLocalChecked());
 
 	if (parse_func.IsEmpty())
 		throw js_error("JSON.parse() not found");
@@ -248,8 +249,8 @@ JSONObject::Stringify(Handle<v8::Value> val)
 	Local<Context>	context = isolate->GetCurrentContext();
 	Handle<Function> stringify_func =
 		Handle<Function>::Cast(m_json->Get(context,
-									 String::NewFromUtf8(isolate, "stringify", NewStringType::kInternalized)
-									 .ToLocalChecked()).ToLocalChecked());
+									 String::NewFromUtf8Literal(isolate, "stringify", 
+									 NewStringType::kInternalized)).ToLocalChecked());
 
 	if (stringify_func.IsEmpty())
 		throw js_error("JSON.stringify() not found");
@@ -323,9 +324,12 @@ SetupWindowFunctions(Handle<ObjectTemplate> templ)
 	SetCallback(templ, "get_func_arg_current", plv8_WinGetFuncArgCurrent);
 
 	/* Constants for get_func_in_XXX() */
-	templ->Set(String::NewFromUtf8(isolate, "SEEK_CURRENT", NewStringType::kInternalized).ToLocalChecked(), Int32::New(isolate, WINDOW_SEEK_CURRENT));
-	templ->Set(String::NewFromUtf8(isolate, "SEEK_HEAD", NewStringType::kInternalized).ToLocalChecked(), Int32::New(isolate, WINDOW_SEEK_HEAD));
-	templ->Set(String::NewFromUtf8(isolate, "SEEK_TAIL", NewStringType::kInternalized).ToLocalChecked(), Int32::New(isolate, WINDOW_SEEK_TAIL));
+	templ->Set(String::NewFromUtf8Literal(isolate, "SEEK_CURRENT", NewStringType::kInternalized),
+			Int32::New(isolate, WINDOW_SEEK_CURRENT));
+	templ->Set(String::NewFromUtf8Literal(isolate, "SEEK_HEAD", NewStringType::kInternalized),
+			Int32::New(isolate, WINDOW_SEEK_HEAD));
+	templ->Set(String::NewFromUtf8Literal(isolate, "SEEK_TAIL", NewStringType::kInternalized),
+			Int32::New(isolate, WINDOW_SEEK_TAIL));
 }
 
 /*
@@ -383,19 +387,19 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 		FreeErrorData(edata);
 
 		Local<v8::Object> err = Exception::Error(message).As<Object>();
-		err->Set(context, String::NewFromUtf8(isolate, "sqlerrcode").ToLocalChecked(), sqlerrcode).ToChecked();
-        err->Set(context, String::NewFromUtf8(isolate, "sqlerrcode").ToLocalChecked(), sqlerrcode).Check();
+		err->Set(context, String::NewFromUtf8Literal(isolate, "sqlerrcode"), sqlerrcode).ToChecked();
+        err->Set(context, String::NewFromUtf8Literal(isolate, "sqlerrcode"), sqlerrcode).Check();
 #if PG_VERSION_NUM >= 90300
-        err->Set(context, String::NewFromUtf8(isolate, "schema_name").ToLocalChecked(), schema_name).Check();
-        err->Set(context, String::NewFromUtf8(isolate, "table_name").ToLocalChecked(), table_name).Check();
-        err->Set(context, String::NewFromUtf8(isolate, "column_name").ToLocalChecked(), column_name).Check();
-        err->Set(context, String::NewFromUtf8(isolate, "datatype_name").ToLocalChecked(), datatype_name).Check();
-        err->Set(context, String::NewFromUtf8(isolate, "constraint_name").ToLocalChecked(), constraint_name).Check();
-        err->Set(context, String::NewFromUtf8(isolate, "detail").ToLocalChecked(), detail).Check();
-        err->Set(context, String::NewFromUtf8(isolate, "hint").ToLocalChecked(), hint).Check();
-        err->Set(context, String::NewFromUtf8(isolate, "context").ToLocalChecked(), err_context).Check();
-        err->Set(context, String::NewFromUtf8(isolate, "internalquery").ToLocalChecked(), internalquery).Check();
-        err->Set(context, String::NewFromUtf8(isolate, "code").ToLocalChecked(), code).Check();
+        err->Set(context, String::NewFromUtf8Literal(isolate, "schema_name"), schema_name).Check();
+        err->Set(context, String::NewFromUtf8Literal(isolate, "table_name"), table_name).Check();
+        err->Set(context, String::NewFromUtf8Literal(isolate, "column_name"), column_name).Check();
+        err->Set(context, String::NewFromUtf8Literal(isolate, "datatype_name"), datatype_name).Check();
+        err->Set(context, String::NewFromUtf8Literal(isolate, "constraint_name"), constraint_name).Check();
+        err->Set(context, String::NewFromUtf8Literal(isolate, "detail"), detail).Check();
+        err->Set(context, String::NewFromUtf8Literal(isolate, "hint"), hint).Check();
+        err->Set(context, String::NewFromUtf8Literal(isolate, "context"), err_context).Check();
+        err->Set(context, String::NewFromUtf8Literal(isolate, "internalquery"), internalquery).Check();
+        err->Set(context, String::NewFromUtf8Literal(isolate, "code"), code).Check();
 #endif
 
 		args.GetReturnValue().Set(isolate->ThrowException(err));
@@ -412,7 +416,8 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 	Isolate *		isolate = args.GetIsolate();
 
 	if (args.Length() < 2) {
-		args.GetReturnValue().Set(isolate->ThrowException(String::NewFromUtf8(args.GetIsolate(), "usage: plv8.elog(elevel, ...)").ToLocalChecked()));
+		args.GetReturnValue().Set(isolate->ThrowException(String::NewFromUtf8Literal(args.GetIsolate(),
+																			   "usage: plv8.elog(elevel, ...)")));
 		return;
 	}
 
@@ -431,7 +436,8 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 	case ERROR:
 		break;
 	default:
-		args.GetReturnValue().Set(isolate->ThrowException(String::NewFromUtf8(args.GetIsolate(), "invalid error level").ToLocalChecked()));
+		args.GetReturnValue().Set(isolate->ThrowException(String::NewFromUtf8Literal(args.GetIsolate(),
+																			   "invalid error level")));
 		return;
 	}
 
@@ -1684,9 +1690,9 @@ void GetMemoryInfo(v8::Local<v8::Object> obj) {
 	Local<v8::Value> used = Local<v8::Value>::New(isolate, Number::New(isolate, v8_heap_stats.used_heap_size()));
 	Local<v8::Value> external = Local<v8::Value>::New(isolate, Number::New(isolate, v8_heap_stats.external_memory()));
 
-	obj->Set(context, String::NewFromUtf8(isolate, "total_heap_size").ToLocalChecked(), total).Check();
-	obj->Set(context, String::NewFromUtf8(isolate, "used_heap_size").ToLocalChecked(), used).Check();
-	obj->Set(context, String::NewFromUtf8(isolate, "external_memory").ToLocalChecked(), external).Check();
+	obj->Set(context, String::NewFromUtf8Literal(isolate, "total_heap_size"), total).Check();
+	obj->Set(context, String::NewFromUtf8Literal(isolate, "used_heap_size"), used).Check();
+	obj->Set(context, String::NewFromUtf8Literal(isolate, "external_memory"), external).Check();
 }
 
 #if PG_VERSION_NUM >= 110000

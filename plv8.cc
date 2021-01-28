@@ -544,7 +544,7 @@ plv8_info(PG_FUNCTION_ARGS)
 #else
 		char 			   *username = GetUserNameFromId(ContextVector[i]->user_id);
 #endif
-		obj->Set(context, String::NewFromUtf8(isolate, "user").ToLocalChecked(),
+		obj->Set(context, String::NewFromUtf8Literal(isolate, "user"),
            String::NewFromUtf8(isolate, username).ToLocalChecked()).Check();
 		GetMemoryInfo(obj);
 
@@ -663,8 +663,7 @@ signal_handler (int sig) {
 	elog(DEBUG1, "cancelling execution");
 	Isolate *isolate = Isolate::GetCurrent();
 	isolate->ThrowException(
-			String::NewFromUtf8(isolate, "Signal caught",
-								NewStringType::kNormal).ToLocalChecked());
+			String::NewFromUtf8Literal(isolate, "Signal caught"));
 }
 
 /*
@@ -1004,29 +1003,29 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 
 	// 3: TG_WHEN
 	if (TRIGGER_FIRED_BEFORE(event))
-		args[3] = String::NewFromUtf8(xenv->isolate, "BEFORE").ToLocalChecked();
+		args[3] = String::NewFromUtf8Literal(xenv->isolate, "BEFORE");
 	else
-		args[3] = String::NewFromUtf8(xenv->isolate, "AFTER").ToLocalChecked();
+		args[3] = String::NewFromUtf8Literal(xenv->isolate, "AFTER");
 
 	// 4: TG_LEVEL
 	if (TRIGGER_FIRED_FOR_ROW(event))
-		args[4] = String::NewFromUtf8(xenv->isolate, "ROW").ToLocalChecked();
+		args[4] = String::NewFromUtf8Literal(xenv->isolate, "ROW");
 	else
-		args[4] = String::NewFromUtf8(xenv->isolate, "STATEMENT").ToLocalChecked();
+		args[4] = String::NewFromUtf8Literal(xenv->isolate, "STATEMENT");
 
 	// 5: TG_OP
 	if (TRIGGER_FIRED_BY_INSERT(event))
-		args[5] = String::NewFromUtf8(xenv->isolate, "INSERT").ToLocalChecked();
+		args[5] = String::NewFromUtf8Literal(xenv->isolate, "INSERT");
 	else if (TRIGGER_FIRED_BY_DELETE(event))
-		args[5] = String::NewFromUtf8(xenv->isolate, "DELETE").ToLocalChecked();
+		args[5] = String::NewFromUtf8Literal(xenv->isolate, "DELETE");
 	else if (TRIGGER_FIRED_BY_UPDATE(event))
-		args[5] = String::NewFromUtf8(xenv->isolate, "UPDATE").ToLocalChecked();
+		args[5] = String::NewFromUtf8Literal(xenv->isolate, "UPDATE");
 #ifdef TRIGGER_FIRED_BY_TRUNCATE
 	else if (TRIGGER_FIRED_BY_TRUNCATE(event))
-		args[5] = String::NewFromUtf8(xenv->isolate, "TRUNCATE").ToLocalChecked();
+		args[5] = String::NewFromUtf8Literal(xenv->isolate, "TRUNCATE");
 #endif
 	else
-		args[5] = String::NewFromUtf8(xenv->isolate, "?").ToLocalChecked();
+		args[5] = String::NewFromUtf8Literal(xenv->isolate, "?");
 
 	// 6: TG_RELID
 	args[6] = Uint32::New(xenv->isolate, RelationGetRelid(rel));
@@ -1391,13 +1390,13 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 		case PLV8_DIALECT_COFFEE:
 			if (coffee_script_binary_data[0] == '\0')
 				throw js_error("CoffeeScript is not enabled");
-			key = String::NewFromUtf8(isolate, "CoffeeScript", NewStringType::kInternalized).ToLocalChecked();
+			key = String::NewFromUtf8Literal(isolate, "CoffeeScript", NewStringType::kInternalized);
 			dialect_binary_data = (const char *) coffee_script_binary_data;
 			break;
 		case PLV8_DIALECT_LIVESCRIPT:
 			if (livescript_binary_data[0] == '\0')
 				throw js_error("LiveScript is not enabled");
-			key = String::NewFromUtf8(isolate, "LiveScript", NewStringType::kInternalized).ToLocalChecked();
+			key = String::NewFromUtf8Literal(isolate, "LiveScript", NewStringType::kInternalized);
 			dialect_binary_data = (const char *) livescript_binary_data;
 			break;
 		default:
@@ -1425,8 +1424,8 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 
 	Local<Object> compiler = Local<Object>::Cast(ctx->Global()->Get(ctx, key).ToLocalChecked());
     Local<Function>	func = Local<Function>::Cast(
-            compiler->Get(ctx, String::NewFromUtf8(isolate, "compile",
-												   NewStringType::kInternalized).ToLocalChecked()).ToLocalChecked());
+            compiler->Get(ctx, String::NewFromUtf8Literal(isolate, "compile",
+												   NewStringType::kInternalized)).ToLocalChecked());
 	const int		nargs = 1;
 	Handle<v8::Value>	args[nargs];
 
@@ -1804,8 +1803,8 @@ GetPlv8Context() {
 
 		new(&my_context->plan_template) Persistent<ObjectTemplate>();
 		Local<FunctionTemplate> base = FunctionTemplate::New(isolate);
-		Local<String> planClassName = String::NewFromUtf8(isolate, "PreparedPlan", NewStringType::kInternalized)
-				.ToLocalChecked();
+		Local<String> planClassName = String::NewFromUtf8Literal(isolate, "PreparedPlan",
+														   NewStringType::kInternalized);
 		base->SetClassName(planClassName);
 		base->PrototypeTemplate()->Set(toStringSymbol, planClassName, toStringAttr);
 		templ = base->InstanceTemplate();
@@ -1814,8 +1813,8 @@ GetPlv8Context() {
 
 		new(&my_context->cursor_template) Persistent<ObjectTemplate>();
 		base = FunctionTemplate::New(isolate);
-		Local<String> cursorClassName = String::NewFromUtf8(isolate, "Cursor", NewStringType::kInternalized)
-				.ToLocalChecked();
+		Local<String> cursorClassName = String::NewFromUtf8Literal(isolate, "Cursor",
+															 NewStringType::kInternalized);
 		base->SetClassName(cursorClassName);
 		base->PrototypeTemplate()->Set(toStringSymbol, cursorClassName, toStringAttr);
 		templ = base->InstanceTemplate();
@@ -1824,8 +1823,8 @@ GetPlv8Context() {
 
 		new(&my_context->window_template) Persistent<ObjectTemplate>();
 		base = FunctionTemplate::New(isolate);
-		Local<String> windowClassName = String::NewFromUtf8(isolate, "WindowObject", NewStringType::kInternalized)
-				.ToLocalChecked();
+		Local<String> windowClassName = String::NewFromUtf8Literal(isolate, "WindowObject",
+															 NewStringType::kInternalized);
         base->SetClassName(windowClassName);
 		base->PrototypeTemplate()->Set(toStringSymbol, windowClassName, toStringAttr);
 		templ = base->InstanceTemplate();
@@ -1944,39 +1943,39 @@ GetGlobalObjectTemplate(Isolate *isolate)
 
 		Local<ObjectTemplate> templ = ObjectTemplate::New(isolate);
 		// ERROR levels for elog
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG5", NewStringType::kInternalized).ToLocalChecked(),
+		templ->Set(String::NewFromUtf8Literal(isolate, "DEBUG5", NewStringType::kInternalized),
 				   Int32::New(isolate, DEBUG5));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG4", NewStringType::kInternalized).ToLocalChecked(),
+		templ->Set(String::NewFromUtf8Literal(isolate, "DEBUG4", NewStringType::kInternalized),
 				   Int32::New(isolate, DEBUG4));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG3", NewStringType::kInternalized).ToLocalChecked(),
+		templ->Set(String::NewFromUtf8Literal(isolate, "DEBUG3", NewStringType::kInternalized),
 				   Int32::New(isolate, DEBUG3));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG2", NewStringType::kInternalized).ToLocalChecked(),
+		templ->Set(String::NewFromUtf8Literal(isolate, "DEBUG2", NewStringType::kInternalized),
 				   Int32::New(isolate, DEBUG2));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG1", NewStringType::kInternalized).ToLocalChecked(),
+		templ->Set(String::NewFromUtf8Literal(isolate, "DEBUG1", NewStringType::kInternalized),
 				   Int32::New(isolate, DEBUG1));
-		templ->Set(String::NewFromUtf8(isolate, "DEBUG", NewStringType::kInternalized).ToLocalChecked(),
+		templ->Set(String::NewFromUtf8Literal(isolate, "DEBUG", NewStringType::kInternalized),
 				   Int32::New(isolate, DEBUG5));
-		templ->Set(String::NewFromUtf8(isolate, "LOG", NewStringType::kInternalized).ToLocalChecked(),
+		templ->Set(String::NewFromUtf8Literal(isolate, "LOG", NewStringType::kInternalized),
 				   Int32::New(isolate, LOG));
-		templ->Set(String::NewFromUtf8(isolate, "INFO", NewStringType::kInternalized).ToLocalChecked(),
+		templ->Set(String::NewFromUtf8Literal(isolate, "INFO", NewStringType::kInternalized),
 				   Int32::New(isolate, INFO));
-		templ->Set(String::NewFromUtf8(isolate, "NOTICE", NewStringType::kInternalized).ToLocalChecked(),
+		templ->Set(String::NewFromUtf8Literal(isolate, "NOTICE", NewStringType::kInternalized),
 				   Int32::New(isolate, NOTICE));
-		templ->Set(String::NewFromUtf8(isolate, "WARNING", NewStringType::kInternalized).ToLocalChecked(),
+		templ->Set(String::NewFromUtf8Literal(isolate, "WARNING", NewStringType::kInternalized),
 				   Int32::New(isolate, WARNING));
-		templ->Set(String::NewFromUtf8(isolate, "ERROR", NewStringType::kInternalized).ToLocalChecked(),
+		templ->Set(String::NewFromUtf8Literal(isolate, "ERROR", NewStringType::kInternalized),
 				   Int32::New(isolate, ERROR));
 		global.Reset(isolate, templ);
 
 		Local<ObjectTemplate> plv8 = ObjectTemplate::New(isolate);
 
 		SetupPlv8Functions(plv8);
-		plv8->Set(String::NewFromUtf8(isolate, "version", NewStringType::kInternalized).ToLocalChecked(),
-				  String::NewFromUtf8(isolate, PLV8_VERSION).ToLocalChecked());
-		plv8->Set(String::NewFromUtf8(isolate, "v8_version", NewStringType::kInternalized).ToLocalChecked(),
-				  String::NewFromUtf8(isolate, V8_VERSION_STRING).ToLocalChecked());
+		plv8->Set(String::NewFromUtf8Literal(isolate, "version", NewStringType::kInternalized),
+				  String::NewFromUtf8Literal(isolate, PLV8_VERSION));
+		plv8->Set(String::NewFromUtf8Literal(isolate, "v8_version", NewStringType::kInternalized),
+				  String::NewFromUtf8Literal(isolate, V8_VERSION_STRING));
 
-		templ->Set(String::NewFromUtf8(isolate, "plv8", NewStringType::kInternalized).ToLocalChecked(), plv8);
+		templ->Set(String::NewFromUtf8Literal(isolate, "plv8", NewStringType::kInternalized), plv8);
 	}
 	return Local<ObjectTemplate>::New(isolate, global);
 }
@@ -2241,7 +2240,7 @@ js_error::js_error(TryCatch &try_catch) throw()
             {
                 v8::Local<v8::Value> errCode;
                 if (err->Get(context,
-                             String::NewFromUtf8(isolate, "code").ToLocalChecked()).ToLocal(&errCode))
+                             String::NewFromUtf8Literal(isolate, "code")).ToLocal(&errCode))
                 {
                     if (!errCode->IsUndefined() && !errCode->IsNull())
                     {
@@ -2252,7 +2251,7 @@ js_error::js_error(TryCatch &try_catch) throw()
 
                 v8::Local<v8::Value> errDetail;
                 if (err->Get(context,
-                             String::NewFromUtf8(isolate, "detail").ToLocalChecked()).ToLocal(&errDetail))
+                             String::NewFromUtf8Literal(isolate, "detail")).ToLocal(&errDetail))
                 {
                     if (!errDetail->IsUndefined() && !errDetail->IsNull())
                     {
@@ -2264,7 +2263,7 @@ js_error::js_error(TryCatch &try_catch) throw()
 
                 v8::Local<v8::Value> errHint;
                 if (err->Get(context,
-                             String::NewFromUtf8(isolate, "hint").ToLocalChecked()).ToLocal(&errHint))
+                             String::NewFromUtf8Literal(isolate, "hint")).ToLocal(&errHint))
                 {
                     if (!errHint->IsUndefined() && !errHint->IsNull())
                     {
@@ -2275,7 +2274,7 @@ js_error::js_error(TryCatch &try_catch) throw()
                 }
 
                 v8::Local<v8::Value> errContext;
-                if (err->Get(context, String::NewFromUtf8(isolate, "context").ToLocalChecked()).ToLocal(&errContext))
+                if (err->Get(context, String::NewFromUtf8Literal(isolate, "context")).ToLocal(&errContext))
                     if (!errContext->IsUndefined() && !errContext->IsNull())
                     {
                         CString str_context(errContext);

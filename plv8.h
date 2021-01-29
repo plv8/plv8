@@ -53,13 +53,16 @@ private:
 	char	   *m_detail;
 	char	   *m_hint;
 	char	   *m_context;
+	void init(v8::Local<v8::Value> exception, v8::Local<v8::Message> message) noexcept;
 
 public:
-	js_error() throw();
-	js_error(const char *msg) throw();
-	js_error(v8::TryCatch &try_catch) throw();
+	js_error() noexcept;
+	explicit js_error(const char *msg) noexcept;
+	explicit js_error(v8::Local<v8::Value> exception) noexcept;
+	explicit js_error(v8::TryCatch &try_catch) noexcept;
 	v8::Local<v8::Value> error_object();
-	__attribute__((noreturn)) void rethrow() throw();
+	__attribute__((noreturn)) void rethrow() noexcept;
+	void log(int elevel, const char *msg_format = nullptr);
 };
 
 /*

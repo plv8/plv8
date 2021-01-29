@@ -251,6 +251,21 @@ size_t NearHeapLimitHandler(void* data, size_t current_heap_limit,
 	return current_heap_limit + 1_MB;
 }
 
+void PromiseRejectCB(PromiseRejectMessage rejection) {
+	auto event = rejection.GetEvent();
+	if (event == kPromiseRejectAfterResolved || event == kPromiseResolveAfterResolved)
+		return;
+
+	if (event == kPromiseRejectWithNoHandler) {
+		js_error error(rejection.GetValue());
+		error.log(WARNING, "Unhandled Promise rejection: %s");
+	} else if (event == kPromiseHandlerAddedAfterReject) {
+		// all "native" promises are running synchronously, it should not happen
+		js_error error(rejection.GetValue());
+		error.log(WARNING, "Unexpected Promise handler added after reject: %s");
+	}
+}
+
 static void
 CreateIsolate(plv8_context *context) {
 	Isolate *isolate;
@@ -263,6 +278,7 @@ CreateIsolate(plv8_context *context) {
 	isolate->SetOOMErrorHandler(OOMErrorHandler);
 	isolate->AddGCEpilogueCallback(GCEpilogueCallback);
 	isolate->AddNearHeapLimitCallback(NearHeapLimitHandler, NULL);
+	isolate->SetPromiseRejectCallback(PromiseRejectCB);
 	context->isolate = isolate;
 	context->array_buffer_allocator = params.array_buffer_allocator;
 }
@@ -2196,37 +2212,42 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 	return result;
 }
 
-js_error::js_error() throw()
-	: m_msg(NULL), m_code(0), m_detail(NULL), m_hint(NULL), m_context(NULL)
+js_error::js_error() noexcept
+	: m_msg(nullptr), m_code(0), m_detail(nullptr), m_hint(nullptr), m_context(nullptr)
 {
 }
 
-js_error::js_error(const char *msg) throw()
+js_error::js_error(const char *msg) noexcept : js_error()
 {
 	m_msg = pstrdup(msg);
-	m_code = 0;
-	m_detail = NULL;
-	m_hint = NULL;
-	m_context = NULL;
 }
 
-js_error::js_error(TryCatch &try_catch) throw()
-{
-	Isolate		   *isolate = Isolate::GetCurrent();
-	HandleScope		handle_scope(isolate);
-	String::Utf8Value	exception(isolate, try_catch.Exception());
-	Handle<Message>		message = try_catch.Message();
-    Local<Context>      context = isolate->GetCurrentContext();
+js_error::js_error(v8::Local<v8::Value> exception) noexcept : js_error() {
+	Isolate		   		*isolate = Isolate::GetCurrent();
+	HandleScope			handle_scope(isolate);
+	Local<Message>		message = v8::Exception::CreateMessage(isolate, exception);
 
-	m_msg = NULL;
-	m_code = 0;
-	m_detail = NULL;
-	m_hint = NULL;
-	m_context = NULL;
+	init(exception, message);
+}
+
+js_error::js_error(v8::TryCatch &try_catch) noexcept : js_error() {
+	Isolate		   		*isolate = Isolate::GetCurrent();
+	HandleScope			handle_scope(isolate);
+
+	init(try_catch.Exception(), try_catch.Message());
+}
+
+void
+js_error::init(v8::Local<v8::Value> exception, v8::Local<Message> message) noexcept
+{
+	Isolate		   		*isolate = Isolate::GetCurrent();
+	HandleScope			handle_scope(isolate);
+	String::Utf8Value	err_message(isolate, exception);
+	Local<Context>      context = isolate->GetCurrentContext();
 
 	try
 	{
-		m_msg = ToCStringCopy(exception);
+		m_msg = ToCStringCopy(err_message);
         StringInfoData	detailStr;
         StringInfoData	hintStr;
         StringInfoData	contextStr;
@@ -2234,7 +2255,7 @@ js_error::js_error(TryCatch &try_catch) throw()
         initStringInfo(&hintStr);
         initStringInfo(&contextStr);
 		Handle<v8::Object> err;
-		if (try_catch.Exception()->ToObject(context).ToLocal(&err))
+		if (exception->ToObject(context).ToLocal(&err))
         {
             if (!err.IsEmpty())
             {
@@ -2324,18 +2345,23 @@ js_error::error_object()
 	return Exception::Error(message);
 }
 
+void
+js_error::log(int elevel, const char *msg_format) {
+	ereport(elevel,
+			(
+					m_code ? errcode(m_code): 0,
+					m_msg ? errmsg((msg_format ? msg_format : "%s"), m_msg) : 0,
+					m_detail ? errdetail("%s", m_detail) : 0,
+					m_hint ? errhint("%s", m_hint) : 0,
+					m_context ? errcontext("%s", m_context) : 0
+			));
+}
+
 __attribute__((noreturn))
 void
-js_error::rethrow() throw()
+js_error::rethrow() noexcept
 {
-	ereport(ERROR,
-		(
-			m_code ? errcode(m_code): 0,
-			m_msg ? errmsg("%s", m_msg) : 0,
-			m_detail ? errdetail("%s", m_detail) : 0,
-			m_hint ? errhint("%s", m_hint) : 0,
-			m_context ? errcontext("%s", m_context) : 0
-                ));
+	log(ERROR);
 	exit(0);	// keep compiler quiet
 }
 

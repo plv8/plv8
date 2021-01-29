@@ -677,9 +677,9 @@ void *term_handler = NULL;
 void
 signal_handler (int sig) {
 	elog(DEBUG1, "cancelling execution");
-	Isolate *isolate = Isolate::GetCurrent();
-	isolate->ThrowException(
-			String::NewFromUtf8Literal(isolate, "Signal caught"));
+	auto running_context = GetPlv8Context();
+	running_context->interrupted = true;
+	running_context->isolate->TerminateExecution();
 }
 
 /*
@@ -741,19 +741,22 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 #endif
 #endif
 
+	// reset signal handlers
 	signal(SIGINT, (void (*)(int)) int_handler);
 	signal(SIGTERM, (void (*)(int)) term_handler);
-
-#ifdef EXECUTION_TIMEOUT
-	if (timeout) {
-		isolate->CancelTerminateExecution();
-		throw js_error("execution timeout exceeded");
-	}
-#endif
 
 	if (result.IsEmpty()) {
 		if (isolate->IsExecutionTerminating()) {
 			isolate->CancelTerminateExecution();
+			if (current_context->interrupted) {
+				current_context->interrupted = false;
+				throw js_error("Signal caught: interrupted");
+			}
+#ifdef EXECUTION_TIMEOUT
+			if (timeout) {
+				throw js_error("execution timeout exceeded");
+			}
+#endif
 			throw js_error("Out of memory error");
 		}
 		throw js_error(try_catch);
@@ -1630,16 +1633,18 @@ CompileFunction(
 	signal(SIGINT, (void (*)(int)) int_handler);
 	signal(SIGTERM, (void (*)(int)) term_handler);
 
-#ifdef EXECUTION_TIMEOUT
-	if (timeout) {
-		isolate->CancelTerminateExecution();
-		throw js_error("compiler timeout exceeded");
-	}
-#endif
-
 	if (result.IsEmpty()) {
 		if (isolate->IsExecutionTerminating()) {
 			isolate->CancelTerminateExecution();
+			if (current_context->interrupted) {
+				current_context->interrupted = false;
+				throw js_error("Signal caught: interrupted");
+			}
+#ifdef EXECUTION_TIMEOUT
+			if (timeout) {
+				throw js_error("compiler timeout exceeded");
+			}
+#endif
 			throw js_error("Script is out of memory");
 		}
 		throw js_error(try_catch);
@@ -1794,6 +1799,7 @@ GetPlv8Context() {
 		my_context = (plv8_context *) MemoryContextAlloc(TopMemoryContext,
 														 sizeof(plv8_context));
 		my_context->is_dead = false;
+		my_context->interrupted = false;
 		CreateIsolate(my_context);
 		Isolate 			   *isolate = my_context->isolate;
 		Isolate::Scope			scope(isolate);

@@ -124,6 +124,7 @@ typedef struct plv8_context
 	v8::Persistent<v8::ObjectTemplate>  window_template;
 	v8::Local<v8::Context> localContext() { return v8::Local<v8::Context>::New(isolate, context) ; }
 	bool 						is_dead;
+	bool						interrupted;
 	Oid							user_id;
 } plv8_context;
 

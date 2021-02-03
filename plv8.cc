@@ -255,15 +255,63 @@ void PromiseRejectCB(PromiseRejectMessage rejection) {
 	auto event = rejection.GetEvent();
 	if (event == kPromiseRejectAfterResolved || event == kPromiseResolveAfterResolved)
 		return;
+	auto	promise = rejection.GetPromise();
+	auto	isolate = promise->GetIsolate();
 
-	if (event == kPromiseRejectWithNoHandler) {
-		js_error error(rejection.GetValue());
-		error.log(WARNING, "Unhandled Promise rejection: %s");
-	} else if (event == kPromiseHandlerAddedAfterReject) {
-		// all "native" promises are running synchronously, it should not happen
-		js_error error(rejection.GetValue());
-		error.log(WARNING, "Unexpected Promise handler added after reject: %s");
+	if (rejection.GetEvent() == v8::kPromiseHandlerAddedAfterReject) {
+		if (current_context->ignore_unhandled_promises) return;
+		// Remove handled promises from the list
+		auto& unhandled_promises = current_context->unhandled_promises;
+		for (auto it = unhandled_promises.begin(); it != unhandled_promises.end(); ++it) {
+			auto unhandled_promise = std::get<0>(*it).Get(isolate);
+			if (unhandled_promise == promise) {
+				unhandled_promises.erase(it--);
+			}
+		}
+		return;
 	}
+
+	auto exception = rejection.GetValue();
+	Local<Message> message;
+	// Assume that all objects are stack-traces.
+	if (exception->IsObject()) {
+		message = Exception::CreateMessage(isolate, exception);
+	}
+	if (!exception->IsNativeError() &&
+		(message.IsEmpty() || message->GetStackTrace().IsEmpty())) {
+		// If there is no real Error object, manually throw and catch a stack trace.
+		TryCatch try_catch(isolate);
+		try_catch.SetVerbose(true);
+		isolate->ThrowException(Exception::Error(
+				String::NewFromUtf8Literal(isolate, "Unhandled Promise.")));
+		message = try_catch.Message();
+		exception = try_catch.Exception();
+	}
+	if (current_context->ignore_unhandled_promises) return;
+	current_context->unhandled_promises.emplace_back(
+			v8::Global<v8::Promise>(isolate, promise),
+			v8::Global<v8::Message>(isolate, message),
+			v8::Global<v8::Value>(isolate, exception));
+}
+
+void HandleUnhandledPromiseRejections() {
+	// Avoid recursive calls to HandleUnhandledPromiseRejections.
+	auto isolate = current_context->isolate;
+	if (current_context->ignore_unhandled_promises) return;
+	current_context->ignore_unhandled_promises = true;
+	HandleScope scope(isolate);
+	// Ignore promises that get added during error reporting.
+	size_t i = 0;
+	auto& unhandled_promises = current_context->unhandled_promises;
+	for (; i < unhandled_promises.size(); i++) {
+		const auto& tuple = unhandled_promises[i];
+		Local<v8::Message> message = std::get<1>(tuple).Get(isolate);
+		Local<v8::Value> exception = std::get<2>(tuple).Get(isolate);
+		js_error error(isolate, exception, message);
+		error.log(WARNING, "Unhandled Promise rejection: %s");
+	}
+	unhandled_promises.clear();
+	current_context->ignore_unhandled_promises = false;
 }
 
 static void
@@ -744,6 +792,8 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 	// reset signal handlers
 	signal(SIGINT, (void (*)(int)) int_handler);
 	signal(SIGTERM, (void (*)(int)) term_handler);
+
+	HandleUnhandledPromiseRejections();
 
 	if (result.IsEmpty()) {
 		if (isolate->IsExecutionTerminating()) {
@@ -1434,6 +1484,7 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 		v8::Local<v8::Value> result;
 		if (!script->Run(isolate->GetCurrentContext()).ToLocal(&result))
 			throw js_error(try_catch);
+		HandleUnhandledPromiseRejections();
 		if (result.IsEmpty()) {
 			if (isolate->IsExecutionTerminating())
 				throw js_error("Script is out of memory");
@@ -1450,6 +1501,8 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 
 	args[0] = ToString(src);
 	MaybeLocal<v8::Value>	value = func->Call(ctx, compiler, nargs, args);
+
+	HandleUnhandledPromiseRejections();
 
 	if (value.IsEmpty()) {
 		if (isolate->IsExecutionTerminating())
@@ -1633,6 +1686,8 @@ CompileFunction(
 	signal(SIGINT, (void (*)(int)) int_handler);
 	signal(SIGTERM, (void (*)(int)) term_handler);
 
+	HandleUnhandledPromiseRejections();
+
 	if (result.IsEmpty()) {
 		if (isolate->IsExecutionTerminating()) {
 			isolate->CancelTerminateExecution();
@@ -1800,6 +1855,7 @@ GetPlv8Context() {
 														 sizeof(plv8_context));
 		my_context->is_dead = false;
 		my_context->interrupted = false;
+		my_context->ignore_unhandled_promises = false;
 		CreateIsolate(my_context);
 		Isolate 			   *isolate = my_context->isolate;
 		Isolate::Scope			scope(isolate);
@@ -2228,25 +2284,20 @@ js_error::js_error(const char *msg) noexcept : js_error()
 	m_msg = pstrdup(msg);
 }
 
-js_error::js_error(v8::Local<v8::Value> exception) noexcept : js_error() {
-	Isolate		   		*isolate = Isolate::GetCurrent();
-	HandleScope			handle_scope(isolate);
-	Local<Message>		message = v8::Exception::CreateMessage(isolate, exception);
-
-	init(exception, message);
+js_error::js_error(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<v8::Message> message) noexcept : js_error() {
+	init(isolate, exception, message);
 }
 
 js_error::js_error(v8::TryCatch &try_catch) noexcept : js_error() {
 	Isolate		   		*isolate = Isolate::GetCurrent();
 	HandleScope			handle_scope(isolate);
 
-	init(try_catch.Exception(), try_catch.Message());
+	init(isolate, try_catch.Exception(), try_catch.Message());
 }
 
 void
-js_error::init(v8::Local<v8::Value> exception, v8::Local<Message> message) noexcept
+js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Message> message) noexcept
 {
-	Isolate		   		*isolate = Isolate::GetCurrent();
 	HandleScope			handle_scope(isolate);
 	String::Utf8Value	err_message(isolate, exception);
 	Local<Context>      context = isolate->GetCurrentContext();
@@ -2352,7 +2403,10 @@ js_error::error_object()
 }
 
 void
-js_error::log(int elevel, const char *msg_format) {
+js_error::log(int elevel, const char *msg_format) noexcept {
+	if (elevel >= ERROR) {
+		return rethrow(msg_format);
+	}
 	ereport(elevel,
 			(
 					m_code ? errcode(m_code): 0,
@@ -2365,9 +2419,16 @@ js_error::log(int elevel, const char *msg_format) {
 
 __attribute__((noreturn))
 void
-js_error::rethrow() noexcept
+js_error::rethrow(const char *msg_format) noexcept
 {
-	log(ERROR);
+	ereport(ERROR,
+			(
+					m_code ? errcode(m_code): 0,
+					m_msg ? errmsg((msg_format ? msg_format : "%s"), m_msg) : 0,
+					m_detail ? errdetail("%s", m_detail) : 0,
+					m_hint ? errhint("%s", m_hint) : 0,
+					m_context ? errcontext("%s", m_context) : 0
+			));
 	exit(0);	// keep compiler quiet
 }
 

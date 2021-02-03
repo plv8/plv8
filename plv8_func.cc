@@ -1114,6 +1114,8 @@ plv8_Subtransaction(const FunctionCallbackInfo<v8::Value>& args)
 
 	subtran.exit(!result.IsEmpty());
 
+	HandleUnhandledPromiseRejections();
+
 	if (result.IsEmpty())
 		throw js_error(try_catch);
 	args.GetReturnValue().Set(result.ToLocalChecked());

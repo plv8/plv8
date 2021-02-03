@@ -53,16 +53,16 @@ private:
 	char	   *m_detail;
 	char	   *m_hint;
 	char	   *m_context;
-	void init(v8::Local<v8::Value> exception, v8::Local<v8::Message> message) noexcept;
+	void init(v8::Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<v8::Message> message) noexcept;
 
 public:
 	js_error() noexcept;
 	explicit js_error(const char *msg) noexcept;
-	explicit js_error(v8::Local<v8::Value> exception) noexcept;
+	explicit js_error(v8::Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<v8::Message> message) noexcept;
 	explicit js_error(v8::TryCatch &try_catch) noexcept;
 	v8::Local<v8::Value> error_object();
-	__attribute__((noreturn)) void rethrow() noexcept;
-	void log(int elevel, const char *msg_format = nullptr);
+	__attribute__((noreturn)) void rethrow(const char *msg_format = nullptr) noexcept;
+	void log(int elevel, const char *msg_format = nullptr) noexcept;
 };
 
 /*
@@ -126,6 +126,8 @@ typedef struct plv8_context
 	bool 						is_dead;
 	bool						interrupted;
 	Oid							user_id;
+	std::vector<std::tuple<v8::Global<v8::Promise>, v8::Global<v8::Message>, v8::Global<v8::Value>>> unhandled_promises;
+	bool 						ignore_unhandled_promises;
 } plv8_context;
 
 /*
@@ -299,6 +301,8 @@ extern void SetupPlv8Functions(v8::Handle<v8::ObjectTemplate> plv8);
 extern void SetupPrepFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupCursorFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupWindowFunctions(v8::Handle<v8::ObjectTemplate> templ);
+
+extern void HandleUnhandledPromiseRejections();
 
 extern void GetMemoryInfo(v8::Local<v8::Object> obj);
 

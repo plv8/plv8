@@ -11,7 +11,7 @@ The documentation covers the following implemented features:
 - [Installing PL/v8](#installing-plv8)
 - [Install the PL/v8 Extensions on a Database](#install-the-plv8-extensions-on-a-database)
 - [Scalar function calls](#scalar-function-calls)
-- [Set returing function calls](#set-returning-function-calls)
+- [Set returning function calls](#set-returning-function-calls)
 - [Trigger function calls](#trigger-function-calls)
 - [Inline statement calls](#inline-statement-calls)
 - [Auto mapping between JS and database built-in types](#auto-mapping-between-js-and-database-built-in-types)
@@ -72,8 +72,8 @@ in Ubuntu:
 
     $ make PG_CONFIG=/usr/lib/postgresql/9.5/bin/pg_config
 
-> Note: You may run into problems with your C++ complier version. You can pass
-`make` the `CUSTOM_CC` variable to change the complier. For example, to use
+> Note: You may run into problems with your C++ compiler version. You can pass
+`make` the `CUSTOM_CC` variable to change the compiler. For example, to use
 `g++` version 4.9:
 
     $ make CUSTOM_CC g++-4.9
@@ -370,7 +370,7 @@ automatically. If the desired database type is one of:
 
 and the JS value looks compatible, then the conversion succeeds. Otherwise,
 PL/v8 tries to convert them via cstring representation. An array type is
-supported only if the dimention is one. A JS object will be mapped to
+supported only if the dimension is one. A JS object will be mapped to
 a tuple when applicable. In addition to these types, PL/v8 supports
 polymorphic types such like `anyelement` and `anyarray`. Conversion of `bytea` is
 a little different story. See the [`TypedArray` section](#typed-array).

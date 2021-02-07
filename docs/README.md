@@ -33,7 +33,7 @@ Alternately, you can run the following on all versions of PLV8:
 ## Updating PLV8
 
 As of PLV8 version `2.3.3`, you can use upgrade scripts to upgrade your
-installation from any verion higher than `1.5.0`:
+installation from any version higher than `1.5.0`:
 
 ```
 =# ALTER EXTENSION plv8 UPDATE TO `2.3.8`;

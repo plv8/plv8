@@ -51,7 +51,7 @@ plv8_config.h plv8.so: v8
 
 $(AUTOV8_DEPOT_TOOLS):
 	mkdir -p build
-	cd build; git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+	cd build; git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git; cd chromium; git checkout 3600164d99d9593faa4285cf79ced33caa999c223
 
 ifeq ($(PLATFORM),arm64.release)
 $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)

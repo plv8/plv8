@@ -1,5 +1,9 @@
 Revision history for plv8
 
+3.0.0       2021-05-31
+            - update to v8 8.6.405
+            - support postgres 14
+
 3.0alpha
             - update to v8 7.4
             - add Bigint support

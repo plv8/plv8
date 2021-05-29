@@ -102,9 +102,10 @@ SetCallback(Handle<ObjectTemplate> obj, const char *name,
 			FunctionCallback func, PropertyAttribute attr = None)
 {
 	Isolate* isolate = Isolate::GetCurrent();
-	obj->Set(String::NewFromUtf8(isolate, name, String::kInternalizedString),
+	Local<Context>		context = isolate->GetCurrentContext();
+	obj->Set(isolate, name,
 				FunctionTemplate::New(isolate, plv8_FunctionInvoker,
-					WrapCallback(func)), attr);
+					WrapCallback(func)));
 }
 
 class SubTranBlock
@@ -135,10 +136,11 @@ static Handle<v8::Value>
 SPIResultToValue(int status)
 {
 	Isolate* isolate = Isolate::GetCurrent();
+	Local<Context>		context = isolate->GetCurrentContext();
 	Local<v8::Value>	result;
 
 	if (status < 0) {
-		isolate->ThrowException(String::NewFromUtf8(isolate, FormatSPIStatus(status)));
+		isolate->ThrowException(String::NewFromUtf8(isolate, FormatSPIStatus(status)).ToLocalChecked());
 		return result;
 	}
 
@@ -163,7 +165,7 @@ SPIResultToValue(int status)
 		Local<Array>	rows = Array::New(isolate, nrows);
 
 		for (int r = 0; r < nrows; r++)
-			rows->Set(r, conv.ToValue(SPI_tuptable->vals[r]));
+			rows->Set(context, r, conv.ToValue(SPI_tuptable->vals[r]));
 
 		result = rows;
 		break;
@@ -210,7 +212,7 @@ JSONObject::JSONObject()
 	Isolate* isolate = v8::Isolate::GetCurrent();
 	Handle<Context> context = isolate->GetCurrentContext();
 	Handle<Object> global = context->Global();
-	MaybeLocal<v8::Object> maybeJson = global->Get(String::NewFromUtf8(isolate, "JSON", String::kInternalizedString))->ToObject(isolate->GetCurrentContext());
+	MaybeLocal<v8::Object> maybeJson = global->Get(context, String::NewFromUtf8(isolate, "JSON").ToLocalChecked()).ToLocalChecked()->ToObject(isolate->GetCurrentContext());
 	if (maybeJson.IsEmpty())
 		throw js_error("JSON not found");
 	m_json = maybeJson.ToLocalChecked();
@@ -223,14 +225,15 @@ Handle<v8::Value>
 JSONObject::Parse(Handle<v8::Value> str)
 {
 	Isolate* isolate = v8::Isolate::GetCurrent();
+	Handle<Context> context = isolate->GetCurrentContext();
 	Handle<Function> parse_func =
-		Handle<Function>::Cast(m_json->Get(String::NewFromUtf8(isolate, "parse", String::kInternalizedString)));
+		Handle<Function>::Cast(m_json->Get(context, String::NewFromUtf8(isolate, "parse").ToLocalChecked()).ToLocalChecked());
 
 	if (parse_func.IsEmpty())
 		throw js_error("JSON.parse() not found");
 
 	TryCatch try_catch(isolate);
-	MaybeLocal<v8::Value> value = parse_func->Call(isolate->GetCurrentContext(), m_json, 1, &str);
+	MaybeLocal<v8::Value> value = parse_func->Call(context, m_json, 1, &str);
 	if (value.IsEmpty())
 		throw js_error(try_catch);
 	return value.ToLocalChecked();
@@ -243,8 +246,9 @@ Handle<v8::Value>
 JSONObject::Stringify(Handle<v8::Value> val)
 {
 	Isolate* isolate = v8::Isolate::GetCurrent();
+	Handle<Context> context = isolate->GetCurrentContext();
 	Handle<Function> stringify_func =
-		Handle<Function>::Cast(m_json->Get(String::NewFromUtf8(isolate, "stringify", String::kInternalizedString)));
+		Handle<Function>::Cast(m_json->Get(context, String::NewFromUtf8(isolate, "stringify").ToLocalChecked()).ToLocalChecked());
 
 	if (stringify_func.IsEmpty())
 		throw js_error("JSON.stringify() not found");
@@ -303,6 +307,7 @@ void
 SetupWindowFunctions(Handle<ObjectTemplate> templ)
 {
 	Isolate *isolate = Isolate::GetCurrent();
+
 	/* We store fcinfo here. */
 	templ->SetInternalFieldCount(1);
 
@@ -318,9 +323,9 @@ SetupWindowFunctions(Handle<ObjectTemplate> templ)
 	SetCallback(templ, "get_func_arg_current", plv8_WinGetFuncArgCurrent);
 
 	/* Constants for get_func_in_XXX() */
-	templ->Set(String::NewFromUtf8(isolate, "SEEK_CURRENT", String::kInternalizedString), Int32::New(isolate, WINDOW_SEEK_CURRENT));
-	templ->Set(String::NewFromUtf8(isolate, "SEEK_HEAD", String::kInternalizedString), Int32::New(isolate, WINDOW_SEEK_HEAD));
-	templ->Set(String::NewFromUtf8(isolate, "SEEK_TAIL", String::kInternalizedString), Int32::New(isolate, WINDOW_SEEK_TAIL));
+	templ->Set(String::NewFromUtf8(isolate, "SEEK_CURRENT").ToLocalChecked(), Int32::New(isolate, WINDOW_SEEK_CURRENT));
+	templ->Set(String::NewFromUtf8(isolate, "SEEK_HEAD").ToLocalChecked(), Int32::New(isolate, WINDOW_SEEK_HEAD));
+	templ->Set(String::NewFromUtf8(isolate, "SEEK_TAIL").ToLocalChecked(), Int32::New(isolate, WINDOW_SEEK_TAIL));
 }
 
 /*
@@ -331,6 +336,7 @@ static void
 plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 {
 	Isolate *		isolate = args.GetIsolate();
+	Handle<Context> context = isolate->GetCurrentContext();
 	HandleScope		handle_scope(isolate);
 	MemoryContext	ctx = CurrentMemoryContext;
 	FunctionCallback	fn = UnwrapCallback(args.Data());
@@ -351,7 +357,7 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 		Handle<String> message = ToString(edata->message);
 		Handle<String> sqlerrcode = ToString(unpack_sql_state(edata->sqlerrcode));
 #if PG_VERSION_NUM >= 90300
-		Handle<Primitive> schema_name = edata->schema_name ?
+		Handle<v8::Value> schema_name = edata->schema_name ?
 			Handle<Primitive>(ToString(edata->schema_name)) : Null(isolate);
 		Handle<Primitive> table_name = edata->table_name ?
 			Handle<Primitive>(ToString(edata->table_name)) : Null(isolate);
@@ -365,7 +371,7 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 			Handle<Primitive>(ToString(edata->detail)) : Null(isolate);
 		Handle<Primitive> hint = edata->hint ?
 			Handle<Primitive>(ToString(edata->hint)) : Null(isolate);
-		Handle<Primitive> context = edata->context ?
+		Handle<Primitive> sql_context = edata->context ?
 			Handle<Primitive>(ToString(edata->context)) : Null(isolate);
 		Handle<Primitive> internalquery = edata->internalquery ?
 			Handle<Primitive>(ToString(edata->internalquery)) : Null(isolate);
@@ -377,18 +383,18 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 		FreeErrorData(edata);
 
 		Handle<v8::Object> err = Exception::Error(message)->ToObject(isolate->GetCurrentContext()).ToLocalChecked();
-		err->Set(String::NewFromUtf8(isolate, "sqlerrcode"), sqlerrcode);
+		err->Set(context, String::NewFromUtf8(isolate, "sqlerrcode").ToLocalChecked(), sqlerrcode);
 #if PG_VERSION_NUM >= 90300
-		err->Set(String::NewFromUtf8(isolate, "schema_name"), schema_name);
-		err->Set(String::NewFromUtf8(isolate, "table_name"), table_name);
-		err->Set(String::NewFromUtf8(isolate, "column_name"), column_name);
-		err->Set(String::NewFromUtf8(isolate, "datatype_name"), datatype_name);
-		err->Set(String::NewFromUtf8(isolate, "constraint_name"), constraint_name);
-		err->Set(String::NewFromUtf8(isolate, "detail"), detail);
-		err->Set(String::NewFromUtf8(isolate, "hint"), hint);
-		err->Set(String::NewFromUtf8(isolate, "context"), context);
-		err->Set(String::NewFromUtf8(isolate, "internalquery"), internalquery);
-		err->Set(String::NewFromUtf8(isolate, "code"), code);
+		err->Set(context, String::NewFromUtf8(isolate, "schema_name").ToLocalChecked(), schema_name);
+		err->Set(context, String::NewFromUtf8(isolate, "table_name").ToLocalChecked(), table_name);
+		err->Set(context, String::NewFromUtf8(isolate, "column_name").ToLocalChecked(), column_name);
+		err->Set(context, String::NewFromUtf8(isolate, "datatype_name").ToLocalChecked(), datatype_name);
+		err->Set(context, String::NewFromUtf8(isolate, "constraint_name").ToLocalChecked(), constraint_name);
+		err->Set(context, String::NewFromUtf8(isolate, "detail").ToLocalChecked(), detail);
+		err->Set(context, String::NewFromUtf8(isolate, "hint").ToLocalChecked(), hint);
+		err->Set(context, String::NewFromUtf8(isolate, "context").ToLocalChecked(), sql_context);
+		err->Set(context, String::NewFromUtf8(isolate, "internalquery").ToLocalChecked(), internalquery);
+		err->Set(context, String::NewFromUtf8(isolate, "code").ToLocalChecked(), code);
 #endif
 
 		args.GetReturnValue().Set(isolate->ThrowException(err));
@@ -405,7 +411,7 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 	Isolate *		isolate = args.GetIsolate();
 
 	if (args.Length() < 2) {
-		args.GetReturnValue().Set(isolate->ThrowException(String::NewFromUtf8(args.GetIsolate(), "usage: plv8.elog(elevel, ...)")));
+		args.GetReturnValue().Set(isolate->ThrowException(String::NewFromUtf8(args.GetIsolate(), "usage: plv8.elog(elevel, ...)").ToLocalChecked()));
 		return;
 	}
 
@@ -424,7 +430,7 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 	case ERROR:
 		break;
 	default:
-		args.GetReturnValue().Set(isolate->ThrowException(String::NewFromUtf8(args.GetIsolate(), "invalid error level")));
+		args.GetReturnValue().Set(isolate->ThrowException(String::NewFromUtf8(args.GetIsolate(), "invalid error level").ToLocalChecked()));
 		return;
 	}
 
@@ -435,10 +441,15 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 		if (i > 1){
 			msg += " ";
 		}
+		//elog(NOTICE, "msg -> %s", msg.c_str());
+		//elog(NOTICE, "buf -> %s", buf.c_str());
+
 		if (!CString::toStdString(args[i],buf)){
 			args.GetReturnValue().Set(Undefined(isolate));
 			return;
 		}
+		
+		CString::toStdString(args[i],buf);
 		msg += buf;
 	}
 
@@ -507,6 +518,9 @@ plv8_execute_params(const char *sql, Handle<Array> params)
 	int				nparam = params->Length();
 	Datum		   *values = (Datum *) palloc(sizeof(Datum) * nparam);
 	char		   *nulls = (char *) palloc(sizeof(char) * nparam);
+	Isolate *isolate = Isolate::GetCurrent();
+	Handle<Context> context = isolate->GetCurrentContext();
+
 /*
  * Since 9.0, SPI may have the parser deduce the parameter types.  In prior
  * versions, we infer the types from the input JS values.
@@ -524,7 +538,7 @@ plv8_execute_params(const char *sql, Handle<Array> params)
 				parstate.numParams, nparam);
 	for (int i = 0; i < nparam; i++)
 	{
-		Handle<v8::Value>	param = params->Get(i);
+		Handle<v8::Value>	param = params->Get(context, i).ToLocalChecked();
 		values[i] = value_get_datum(param,
 								  parstate.paramTypes[i], &nulls[i]);
 	}
@@ -535,7 +549,7 @@ plv8_execute_params(const char *sql, Handle<Array> params)
 
 	for (int i = 0; i < nparam; i++)
 	{
-		Handle<v8::Value>	param = params->Get(i);
+		Handle<v8::Value>	param = params->Get(context, i);
 
 		types[i] = inferred_datum_type(param);
 		if (types[i] == InvalidOid)
@@ -556,10 +570,12 @@ plv8_execute_params(const char *sql, Handle<Array> params)
 static Handle<Array>
 convertArgsToArray(const FunctionCallbackInfo<v8::Value> &args, int start, int downshift)
 {
+	Isolate *isolate = Isolate::GetCurrent();
+	Handle<Context> context = isolate->GetCurrentContext();
 	Local<Array> result = Array::New(args.GetIsolate(), args.Length() - start);
 	for (int i = start; i < args.Length(); i++)
 	{
-		result->Set(i - downshift, args[i]);
+		result->Set(context, i - downshift, args[i]);
 	}
 	return result;
 }
@@ -620,6 +636,7 @@ static void
 plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 {
 	Isolate *		isolate = args.GetIsolate();
+	Handle<Context> context = isolate->GetCurrentContext();
 	SPIPlanPtr		initial = NULL, saved;
 	CString			sql(args[0]);
 	Handle<Array>	array;
@@ -639,7 +656,7 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 
 	for (int i = 0; i < arraylen; i++)
 	{
-		CString			typestr(array->Get(i));
+		CString			typestr(array->Get(context, i).ToLocalChecked());
 		int32			typemod;
 
 #if PG_VERSION_NUM >= 90400
@@ -688,6 +705,7 @@ static void
 plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 {
 	Isolate *			isolate = args.GetIsolate();
+	Handle<Context> context = isolate->GetCurrentContext();
 	Handle<v8::Object>	self = args.This();
 	SPIPlanPtr			plan;
 	Datum			   *values = NULL;
@@ -748,7 +766,7 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 
 	for (int i = 0; i < nparam; i++)
 	{
-		Handle<v8::Value>	param = params->Get(i);
+		Handle<v8::Value>	param = params->Get(context, i).ToLocalChecked();
 		Oid					typid;
 
 		if (parstate)
@@ -803,6 +821,9 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 	SubTranBlock		subtran;
 	int					status;
 	plv8_param_state   *parstate = NULL;
+	Isolate *		isolate = args.GetIsolate();
+	Local<Context>		context = isolate->GetCurrentContext();
+
 
 	plan = static_cast<SPIPlanPtr>(
 			Handle<External>::Cast(self->GetInternalField(0))->Value());
@@ -846,7 +867,7 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 
 	for (int i = 0; i < nparam; i++)
 	{
-		Handle<v8::Value>	param = params->Get(i);
+		Handle<v8::Value>	param = params->Get(context, i).ToLocalChecked();
 		Oid					typid;
 
 		if (parstate)
@@ -922,6 +943,7 @@ static void
 plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 {
 	Isolate*			isolate = args.GetIsolate();
+	Handle<Context> context = isolate->GetCurrentContext();
 	Handle<v8::Object>	self = args.This();
 	CString				cname(self->GetInternalField(0));
 	Portal				cursor = SPI_cursor_find(cname);
@@ -968,7 +990,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 		{
 			Handle<Array> array = Array::New(isolate);
 			for (unsigned int i = 0; i < SPI_processed; i++)
-				array->Set(i, conv.ToValue(SPI_tuptable->vals[i]));
+				array->Set(context, i, conv.ToValue(SPI_tuptable->vals[i]));
 			args.GetReturnValue().Set(array);
 			SPI_freetuptable(SPI_tuptable);
 			return;
@@ -1454,7 +1476,7 @@ plv8_WinGetFuncArgInPartition(const FunctionCallbackInfo<v8::Value>& args)
 	int			argno = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
 	int			relpos = args[1]->Int32Value(isolate->GetCurrentContext()).ToChecked();
 	int			seektype = args[2]->Int32Value(isolate->GetCurrentContext()).ToChecked();
-	bool		set_mark = args[3]->BooleanValue(isolate->GetCurrentContext()).ToChecked();
+	bool		set_mark = args[3]->BooleanValue(isolate);
 	bool		isnull, isout;
 	Datum		res;
 
@@ -1499,7 +1521,7 @@ plv8_WinGetFuncArgInFrame(const FunctionCallbackInfo<v8::Value>& args)
 	int			argno = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
 	int			relpos = args[1]->Int32Value(isolate->GetCurrentContext()).ToChecked();
 	int			seektype = args[2]->Int32Value(isolate->GetCurrentContext()).ToChecked();
-	bool		set_mark = args[3]->BooleanValue(isolate->GetCurrentContext()).ToChecked();
+	bool		set_mark = args[3]->BooleanValue(isolate);
 	bool		isnull, isout;
 	Datum		res;
 
@@ -1652,6 +1674,7 @@ plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args)
 	// V8 memory usage
   	HeapStatistics v8_heap_stats;
 	Isolate *		isolate = args.GetIsolate();
+	Handle<Context> context = isolate->GetCurrentContext();
 	isolate->GetHeapStatistics(&v8_heap_stats);
 
 	Local<v8::Value>	result;
@@ -1665,6 +1688,7 @@ plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args)
 void GetMemoryInfo(v8::Local<v8::Object> obj) {
 	HeapStatistics  	v8_heap_stats;
 	Isolate 		   *isolate = obj->GetIsolate();
+	Handle<Context> context = isolate->GetCurrentContext();
 
 	isolate->GetHeapStatistics(&v8_heap_stats);
 
@@ -1672,9 +1696,9 @@ void GetMemoryInfo(v8::Local<v8::Object> obj) {
 	Local<v8::Value> used = Local<v8::Value>::New(isolate, Number::New(isolate, v8_heap_stats.used_heap_size()));
 	Local<v8::Value> external = Local<v8::Value>::New(isolate, Number::New(isolate, v8_heap_stats.external_memory()));
 
-	obj->Set(String::NewFromUtf8(isolate, "total_heap_size"), total);
-	obj->Set(String::NewFromUtf8(isolate, "used_heap_size"), used);
-	obj->Set(String::NewFromUtf8(isolate, "external_memory"), external);
+	obj->Set(context, String::NewFromUtf8(isolate, "total_heap_size").ToLocalChecked(), total);
+	obj->Set(context, String::NewFromUtf8(isolate, "used_heap_size").ToLocalChecked(), used);
+	obj->Set(context, String::NewFromUtf8(isolate, "external_memory").ToLocalChecked(), external);
 }
 
 #if PG_VERSION_NUM >= 110000

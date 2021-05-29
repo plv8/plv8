@@ -69,7 +69,7 @@ This will build and package the extension for installation.
 
 To install, you simply need to `unzip` the file created.  The name will depend
 on the version of PLV8 and the version of Postgres.  An example is
-`plv8-2.3.1-postgresql-10-x64.zip`.
+`plv8-3.0.0-postgresql-10-x64.zip`.
 
 ## TODO
 

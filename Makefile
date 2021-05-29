@@ -29,16 +29,17 @@ else
 	endif
 endif
 
-AUTOV8_VERSION = 7.4.288.28
+AUTOV8_VERSION = 8.6.405
 AUTOV8_DIR = build/v8
 AUTOV8_OUT = build/v8/out.gn/$(PLATFORM)/obj
 AUTOV8_DEPOT_TOOLS = build/depot_tools
 AUTOV8_LIB = $(AUTOV8_OUT)/libv8_snapshot.a
-AUTOV8_STATIC_LIBS = -lv8_base -lv8_snapshot -lv8_libplatform -lv8_libbase -lv8_libsampler
+AUTOV8_STATIC_LIBS = -lv8_monolith
 export PATH := $(abspath $(AUTOV8_DEPOT_TOOLS)):$(PATH)
 
 SHLIB_LINK += -L$(AUTOV8_OUT) -L$(AUTOV8_OUT)/third_party/icu $(AUTOV8_STATIC_LIBS)
-V8_OPTIONS = is_component_build=false v8_static_library=true v8_use_snapshot=true v8_use_external_startup_data=false use_custom_libcxx=false
+V8_OPTIONS = use_custom_libcxx=false v8_monolithic=true v8_use_external_startup_data=false is_component_build=false is_debug=true
+
 
 ifndef USE_ICU
 	V8_OPTIONS += v8_enable_i18n_support=false
@@ -73,7 +74,7 @@ $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
 	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync
 
 	# patch v8 with our clang and gn
-	cd build/v8; rm -r third_party/llvm-build/Release+Asserts/; mv ../clang+llvm-7.0.1-aarch64-linux-gnu third_party/llvm-build/Release+Asserts; cp ../gn/out/gn buildtools/linux64/gn; 
+	cd build/v8; rm -r third_party/llvm-build/Release+Asserts/; mv ../clang+llvm-7.0.1-aarch64-linux-gnu third_party/llvm-build/Release+Asserts; cp ../gn/out/gn buildtools/linux64/gn;
 
 	cd build/v8; sed -i -e "s/target_cpu=\"x64\" v8_target_cpu=\"arm64/target_cpu=\"arm64\" v8_target_cpu=\"arm64/" infra/mb/mb_config.pyl; tools/dev/v8gen.py $(PLATFORM) -- $(V8_OPTIONS)
 else
@@ -86,7 +87,7 @@ $(AUTOV8_OUT)/third_party/icu/common/icudtb.dat:
 $(AUTOV8_OUT)/third_party/icu/common/icudtl.dat:
 
 v8: $(AUTOV8_DIR)
-	cd $(AUTOV8_DIR) ; env CXXFLAGS=-fPIC CFLAGS=-fPIC ninja -C out.gn/$(PLATFORM) d8
+	cd $(AUTOV8_DIR) ; env CXXFLAGS=-fPIC CFLAGS=-fPIC ninja -C out.gn/$(PLATFORM) v8_monolith
 
 include Makefile.shared
 
@@ -100,6 +101,8 @@ endif
 
 # enable direct jsonb conversion by default
 CCFLAGS += -DJSONB_DIRECT_CONVERSION
+
+CCFLAGS += -DV8_COMPRESS_POINTERS=1 -DV8_31BIT_SMIS_ON_64BIT_ARCH=1
 
 CCFLAGS += -I$(AUTOV8_DIR)/include -I$(AUTOV8_DIR)
 # We're gonna build static link.  Rip it out after include Makefile

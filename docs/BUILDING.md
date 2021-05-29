@@ -22,9 +22,9 @@ is not meant to be an exhaustive list.
 Downloading the source code is very straightforward:
 
 ```
-$ wget https://github.com/plv8/plv8/archive/v2.3.15.tar.gz
-$ tar -xvzf v2.3.15.tar.gz
-$ cd plv8-2.3.15
+$ wget https://github.com/plv8/plv8/archive/v3.0.0.tar.gz
+$ tar -xvzf v3.0.0.tar.gz
+$ cd plv8-3.0.0
 $ make
 ```
 
@@ -41,7 +41,7 @@ This will download `v8` and compile it as well.
 | Note: If you have multiple versions of PostgreSQL installed like 9.5 and 9.6, Plv8 will only be built for PostgreSQL 9.6. This is because make calls pg_config to get the version number, which will always be the latest version installed. If you need to build Plv8 for PostgreSQL 9.5 while you have 9.6 installed pass make the PG_CONFIG variable to your 9.5 version of pg_config. This works for `make`, and `make install`. For example in Ubuntu:
 
 ```
-$ make PG_CONFIG=/usr/lib/postgresql/9.5/bin/pg_config
+$ make PG_CONFIG=/usr/lib/postgresql/13/bin/pg_config
 ```
 
 ### Building with Execution Timeout
@@ -173,7 +173,7 @@ This will build and package the extension for installation.
 
 To install, you simply need to `unzip` the file created.  The name will depend
 on the version of PLV8 and the version of Postgres.  An example is
-`plv8-2.3.1-postgresql-10-x64.zip`.
+`plv8-3.0.0-postgresql-10-x64.zip`.
 
 # Build FAQ
 

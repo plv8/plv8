@@ -29,6 +29,6 @@ DO $$
   if (result === test) {
     plv8.elog(INFO, 'OK');
   } else {
-    plv8.elog(WARN, 'FAIL');
+    plv8.elog(WARNING, 'FAIL');
   }
 $$ language plv8;

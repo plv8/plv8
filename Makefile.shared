@@ -25,7 +25,7 @@ CUSTOM_CC = g++
 JSS  = coffee-script.js livescript.js
 # .cc created from .js
 JSCS = $(JSS:.js=.cc)
-SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc $(JSCS)
+SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc plv8_guc.cc $(JSCS)
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8-$(PLV8_VERSION)
 EXTENSION = plv8
@@ -37,9 +37,9 @@ DATA += plcoffee.control plcoffee--$(PLV8_VERSION).sql \
 		plls.control plls--$(PLV8_VERSION).sql
 endif
 DATA_built = plv8.sql
-REGRESS = init-extension plv8 plv8-errors inline json startup_pre startup varparam json_conv \
+REGRESS = init-extension plv8 plv8-errors inline json startup_pre startup boot_proc varparam json_conv \
 		  jsonb_conv window guc es6 arraybuffer composites currentresource startup_perms bytea find_function_perms \
-		  memory_limits array_spread reset show
+		  user_contexts memory_limits array_spread reset show exploits
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif
@@ -71,7 +71,7 @@ endif
 # for older g++ (e.g. 4.6.x), which do not support c++11
 #OPTFLAGS = -O2 -std=gnu++0x -fno-rtti
 
-OPTFLAGS = -std=c++11 -fno-rtti -O2 -g
+OPTFLAGS = -std=c++14 -fno-rtti -O2 -g
 
 CCFLAGS = -Wall $(OPTFLAGS) $(OPT_ENABLE_DEBUGGER_SUPPORT) -g
 

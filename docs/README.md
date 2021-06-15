@@ -118,3 +118,73 @@ any subsequent function as global variables.
 
 Remember `CREATE FUNCTION` also starts the `plv8` runtime environment, so make
 sure to `SET` this GUC before any `plv8` actions including `CREATE FUNCTION`.
+
+## Stored procedures
+
+There are a couple of utility procedures that will get installed.
+
+These are useful for long-running connections from various backend services.
+
+### plv8_info
+
+Get information about all the current running environments 
+on a specific connection from all users.
+
+Can be run by superuser only.
+
+```sql
+SELECT plv8_info();
+```
+
+Outputs JSON
+
+```json
+[
+  {
+    "user":"user1",
+    "total_heap_size":1327104,
+    "total_physical_size":474336,
+    "used_heap_size":386680,
+    "heap_size_limit":270008320,
+    "external_memory":0,
+    "number_of_native_contexts":2,
+    "contexts":[]
+  },
+  {
+    "user":"user2",
+    "total_heap_size":1327104,
+    "total_physical_size":474336,
+    "used_heap_size":386680,
+    "heap_size_limit":270008320,
+    "external_memory":0,
+    "number_of_native_contexts":3,
+    "contexts":["my context"]
+  }
+]
+```
+
+_Note: "number_of_native_contexts" = "contexts".length + 2_
+
+### plv8_reset
+
+Reset user isolate or context
+
+To reset a specific context run:
+```sql
+SELECT plv8_reset('my context');
+```
+
+Will reset the context and re-create `globalThis` on a next invocation of that context.
+
+To reset all contexts and reboot the whole environment of a specfifc user:
+```sql
+SELECT plv8_reset();
+```
+
+Superusers can kill a specific user environment by impersonating the user:
+
+```sql
+SET ROLE "some_user";
+SELECT plv8_reset();
+RESET ROLE;
+```

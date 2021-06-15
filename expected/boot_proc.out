@@ -1,0 +1,30 @@
+-- test startup failure
+set plv8.boot_proc = foo;
+do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;
+WARNING:  failed to find js function function "foo" does not exist
+ERROR:  ReferenceError: foo is not defined
+CONTEXT:  undefined() LINE 1:  plv8.elog(NOTICE, 'foo = ' + foo) 
+\c
+set plv8.boot_proc = startup;
+do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;
+NOTICE:  foo = 14378
+update plv8_modules set code = 'foo=98765;' where modname = 'startup';
+-- startup code should not be reloaded
+do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;
+NOTICE:  foo = 14378
+do $$ load_module('testme'); plv8.elog (NOTICE,'bar = ' + bar);$$ language plv8;
+NOTICE:  loaded module: testme
+NOTICE:  bar = 98765
+reset plv8.boot_proc;
+CREATE ROLE someone_else;
+SET ROLE to someone_else;
+-- should fail because of a reference error
+do $$ plv8.elog(NOTICE, 'foo = ' + foo) $$ language plv8;
+ERROR:  ReferenceError: foo is not defined
+CONTEXT:  undefined() LINE 1:  plv8.elog(NOTICE, 'foo = ' + foo) 
+-- should fail on permission
+set plv8.boot_proc = startup;
+ERROR:  permission denied to set parameter "plv8.boot_proc"
+set plv8.start_proc = startup;
+RESET ROLE;
+DROP ROLE someone_else;

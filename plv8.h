@@ -15,6 +15,8 @@
 #endif  // ENABLE_DEBUGGER_SUPPORT
 #include <v8-version-string.h>
 #include <vector>
+#include <list>
+#include <unordered_map>
 
 extern "C" {
 #include "postgres.h"
@@ -53,13 +55,16 @@ private:
 	char	   *m_detail;
 	char	   *m_hint;
 	char	   *m_context;
+	void init(v8::Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<v8::Message> message) noexcept;
 
 public:
-	js_error() throw();
-	js_error(const char *msg) throw();
-	js_error(v8::TryCatch &try_catch) throw();
+	js_error() noexcept;
+	explicit js_error(const char *msg) noexcept;
+	explicit js_error(v8::Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<v8::Message> message) noexcept;
+	explicit js_error(v8::TryCatch &try_catch) noexcept;
 	v8::Local<v8::Value> error_object();
-	__attribute__((noreturn)) void rethrow() throw();
+	__attribute__((noreturn)) void rethrow(const char *msg_format = nullptr) noexcept;
+	void log(int elevel, const char *msg_format = nullptr) noexcept;
 };
 
 /*
@@ -106,22 +111,31 @@ typedef struct plv8_type
 } plv8_type;
 
 /*
- * For the security reasons, the global context is separated
+ * For the security reasons, the runtime is separated
  * between users and it's associated with user id.
  */
-typedef struct plv8_context
+typedef struct plv8_runtime
 {
 	v8::Isolate				   	   	   *isolate;
 	v8::ArrayBuffer::Allocator	   	   *array_buffer_allocator;
-	v8::Persistent<v8::Context>			context;
+	v8::Persistent<v8::Context>			default_context;
 	v8::Persistent<v8::ObjectTemplate>	recv_templ;
 	v8::Persistent<v8::Context>			compile_context;
+	v8::Persistent<v8::ObjectTemplate>  global_template;
 	v8::Persistent<v8::ObjectTemplate>  plan_template;
 	v8::Persistent<v8::ObjectTemplate>  cursor_template;
 	v8::Persistent<v8::ObjectTemplate>  window_template;
-	v8::Local<v8::Context> localContext() { return v8::Local<v8::Context>::New(isolate, context) ; }
+	v8::Local<v8::Context> localContext() const;
+	bool 						is_dead;
+	bool						interrupted;
 	Oid							user_id;
-} plv8_context;
+	std::list<std::tuple<std::string, v8::Global<v8::Context>>> ctx_queue;
+	std::unordered_map<std::string, std::list<std::tuple<std::string, v8::Global<v8::Context>>>::iterator> ctx_map;
+	void touchContext(const char *context_id);
+	void removeContext(const char *context_id);
+	void disposeContext (std::tuple<std::string, v8::Global<v8::Context>> &tuple) const;
+	bool wasKilled() const { return is_dead || (isolate != nullptr && isolate->IsDead()); }
+} plv8_runtime;
 
 /*
  * A multibyte string in the database encoding. It works more effective
@@ -209,9 +223,10 @@ public:
 		if (WindowObjectIsValid(m_winobj))
 		{
 			m_plv8obj = v8::Handle<v8::Object>::Cast(
-					context->Global()->Get(context, v8::String::NewFromUtf8(
+					context->Global()->Get(context, v8::String::NewFromUtf8Literal(
 						context->GetIsolate(),
-						"plv8").ToLocalChecked()).ToLocalChecked());
+						"plv8",
+						v8::NewStringType::kInternalized)).ToLocalChecked());
 			if (m_plv8obj.IsEmpty())
 				throw js_error("plv8 object not found");
 			/* Stash the current item, just in case of nested call */
@@ -247,12 +262,13 @@ public:
 	SRFSupport(v8::Handle<v8::Context> context,
 			   Converter *conv, Tuplestorestate *tupstore)
 	{
-		m_plv8obj = v8::Handle<v8::Object>::Cast(
-				context->Global()->Get(context, v8::String::NewFromUtf8(
-					context->GetIsolate(),
-					"plv8").ToLocalChecked()).ToLocalChecked());
-		if (m_plv8obj.IsEmpty())
-			throw js_error("plv8 object not found");
+	    v8::Local<v8::Value> m_val;
+	    if (!context->Global()->Get(context, v8::String::NewFromUtf8Literal(
+                context->GetIsolate(),
+                "plv8",
+                v8::NewStringType::kInternalized)).ToLocal(&m_val))
+            throw js_error("plv8 object not found");
+	    m_plv8obj = v8::Handle<v8::Object>::Cast(m_val);
 		m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV);
 		m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE);
 		m_plv8obj->SetInternalField(PLV8_INTNL_CONV,
@@ -268,7 +284,7 @@ public:
 	}
 };
 
-extern plv8_context* current_context;
+extern plv8_runtime* current_runtime;
 extern v8::Local<v8::Function> find_js_function(Oid fn_oid);
 extern v8::Local<v8::Function> find_js_function_by_name(const char *signature);
 extern const char *FormatSPIStatus(int status) throw();
@@ -294,5 +310,9 @@ extern void SetupCursorFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupWindowFunctions(v8::Handle<v8::ObjectTemplate> templ);
 
 extern void GetMemoryInfo(v8::Local<v8::Object> obj);
+
+extern struct config_generic *plv8_find_option(const char *name);
+char *plv8_string_option(struct config_generic * record);
+int plv8_int_option(struct config_generic * record);
 
 #endif	// _PLV8_

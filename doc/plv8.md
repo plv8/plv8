@@ -469,6 +469,8 @@ PL/v8 provides the following utility built-in functions.
 - `plv8.nullable(str)`
 - `plv8.quote_ident(str)`
 - `plv8.version`
+- `plv8.memory_usage`
+- `plv8.run_script`
 
 ### plv8.elog
 `plv8.elog` emits message to the client or the log file. The `elevel` is one of:
@@ -514,6 +516,39 @@ make sure any invocation from SQL statements should not happen.
 ### plv8.version
 The `plv8` object provides version string as `plv8.version`. This string
 corresponds to `plv8` module version. Note this is not the extension version.
+
+### plv8.memory_usage
+
+You can get your own memory usage by calling `plv8.memory_usage()` with no params.
+The resulting object looks like this:
+```json
+{
+  "total_heap_size":1327104,
+  "total_physical_size":472712,
+  "used_heap_size":381748,
+  "heap_size_limit":270008320,
+  "external_memory":0,
+  "number_of_native_contexts":2
+}
+```
+
+See nodejs [v8.getHeapStatistics()](https://nodejs.org/api/v8.html#v8_v8_getheapstatistics)
+
+### plv8.run_script
+
+Run a script from source code, it's like `eval()` but takes a second argument: script name  
+Can be pretty useful for debugging
+
+Can be used like this
+```js
+const sourceCode = `globalThis.myFunc = () => 42`
+try {
+    plv8.run_script(sourceCode, 'myScript.js')
+    myFunc()
+} catch (e) {
+    plv8.elog(NOTICE, e.message)
+}
+```
 
 ## Window function API
 You can define user-defined window functions with PL/v8. It wraps the C-level

@@ -4,7 +4,7 @@
 #include <v8.h>
 #include "plv8.h"
 
-size_t operator""_MB( unsigned long long x );
+size_t operator""_MB( unsigned long long x ) noexcept;
 
 class ArrayAllocator : public v8::ArrayBuffer::Allocator {
 private:
@@ -20,6 +20,7 @@ public:
 	void* Allocate(size_t length) final;
 	void* AllocateUninitialized(size_t length) final;
 	void Free(void* data, size_t length) final;
+	void* Reallocate(void *data, size_t old_length, size_t new_length) final;
 };
 
 #endif //PLV8_PLV8_ALLOCATOR_H

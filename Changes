@@ -1,5 +1,13 @@
 Revision history for plv8
 
+3.0.1       2021-06-30
+            - fix aws arm64 compilation issues with new v8
+
+3.0.0       2021-05-31
+            - update to v8 8.6.405
+            - support postgres 14
+
+
 3.0alpha
             - update to v8 7.4
             - add Bigint support
@@ -9,6 +17,7 @@ Revision history for plv8
             - support postgres 13
             - SPI fixes
             - add per user v8 isolates
+            - fix outstanding BYTEA bug
 
 2.3.12      2019-06-28
             - support postgres 12

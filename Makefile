@@ -29,7 +29,7 @@ else
 	endif
 endif
 
-AUTOV8_VERSION = 8.6.405
+AUTOV8_VERSION = 9.4.146.21
 AUTOV8_DIR = build/v8
 AUTOV8_OUT = build/v8/out.gn/$(PLATFORM)/obj
 AUTOV8_DEPOT_TOOLS = build/depot_tools

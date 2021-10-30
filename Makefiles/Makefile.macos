@@ -1,0 +1,48 @@
+ifneq ("$(wildcard /opt/homebrew/bin/brew)","")
+	LLVM_BINPATH = /opt/homebrew/opt/llvm
+
+	ifeq ("$(wildcard /opt/homebrew/bin/clang++)", "")
+		@echo "Unable to find clang++ please make sure the clang package is installed"
+		exit 1
+	endif
+endif
+
+ifneq ("$(wildcard /usr/local/bin/brew)","")
+	LLVM_BINPATH = /usr/local/opt/llvm
+
+	ifeq ("$(wildcard /usr/local/opt/llvm/bin/clang++)", "")
+		@echo "Unable to find brew, please make sure that it is installed"
+		exit 1
+	endif
+endif
+
+
+GN_ARGS = is_component_build=false v8_use_external_startup_data=false v8_enable_i18n_support=false clang_base_path=\"$(LLVM_BINPATH)\" clang_use_chrome_plugins=false use_custom_libcxx=false treat_warnings_as_errors=false use_lld=false v8_monolithic=true
+
+v8:
+	mkdir build
+	git clone https://github.com/v8/v8 build/v8
+	cd build/v8 && git checkout 9.4.146.21
+	git clone https://gn.googlesource.com/gn.git build/gn
+	cd build/gn && git checkout eea3906f0e2a8d3622080127d2005ff214d51383
+	git clone https://chromium.googlesource.com/chromium/src/base/trace_event/common.git build/v8/base/trace_event/common
+	cd build/v8/base/trace_event/common && git checkout 3da1e2fcf66acd5c7194497b4285ac163f32e239
+	git clone https://chromium.googlesource.com/chromium/src/build.git build/v8/build
+	cd build/v8/build && git checkout bbf7f0ed65548c4df862d2a2748e3a9b908a3217
+	git clone https://chromium.googlesource.com/external/github.com/google/googletest.git build/v8/third_party/googletest/src
+	cd build/v8/third_party/googletest/src && git checkout 47f819c3ca54fb602f432904443e00a0a1fe2f42
+	git clone https://chromium.googlesource.com/chromium/deps/icu.git build/v8/third_party/icu
+	cd build/v8/third_party/icu && git checkout 75e34bcccea0be165c31fdb278b3712c516c5876
+	git clone https://chromium.googlesource.com/chromium/src/third_party/jinja2.git build/v8/third_party/jinja2
+	cd build/v8/third_party/jinja2 && git checkout 7c54c1f227727e0c4c1d3dc19dd71cd601a2db95
+	git clone https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git build/v8/third_party/markupsafe
+	cd build/v8/third_party/markupsafe && git checkout 1b882ef6372b58bfd55a3285f37ed801be9137cd
+	git clone https://chromium.googlesource.com/chromium/src/third_party/zlib.git build/v8/third_party/zlib
+	cd build/v8/third_party/zlib && git checkout 563140dd9c24f84bf40919196e9e7666d351cc0d
+	cd build/gn && python3 build/gen.py && ninja -C out/ gn
+	set PATH=$PATH:build/gn/out
+	cp Makefiles/gclient_args.gni build/v8/build/config/gclient_args.gni
+	cd build/v8 && gn gen out.gn --args="$(GN_ARGS)"
+	cd build/v8 && ninja -C ./out.gn
+
+##  use_custom_libcxx=false v8_monolithic=true v8_use_external_startup_data=false is_component_build=false is_debug=true clang_base_path=/usr/bin clang_use_chrome_plugins=false treat_warnings_as_errors=false use_lld=false

@@ -1,26 +1,26 @@
+.phony: v8
+
 ifneq ("$(wildcard /opt/homebrew/bin/brew)","")
-	LLVM_BINPATH = /opt/homebrew/opt/llvm
+	LLVM_BINPATH := /opt/homebrew/opt/llvm
 
 	ifeq ("$(wildcard /opt/homebrew/bin/clang++)", "")
-		@echo "Unable to find clang++ please make sure the clang package is installed"
+		@echo "Unable to find clang++, please make sure the llvm package is installed"
 		exit 1
 	endif
 endif
 
 ifneq ("$(wildcard /usr/local/bin/brew)","")
-	LLVM_BINPATH = /usr/local/opt/llvm
+	LLVM_BINPATH := /usr/local/opt/llvm
 
 	ifeq ("$(wildcard /usr/local/opt/llvm/bin/clang++)", "")
-		@echo "Unable to find brew, please make sure that it is installed"
+		@echo "Unable to find clang++, please make sure the llvm package is installed"
 		exit 1
 	endif
 endif
-
-
 GN_ARGS = is_component_build=false v8_use_external_startup_data=false v8_enable_i18n_support=false clang_base_path=\"$(LLVM_BINPATH)\" clang_use_chrome_plugins=false use_custom_libcxx=false treat_warnings_as_errors=false use_lld=false v8_monolithic=true
 
 v8:
-	mkdir build
+	mkdir -p build
 	git clone https://github.com/v8/v8 build/v8
 	cd build/v8 && git checkout 9.4.146.21
 	git clone https://gn.googlesource.com/gn.git build/gn
@@ -40,9 +40,8 @@ v8:
 	git clone https://chromium.googlesource.com/chromium/src/third_party/zlib.git build/v8/third_party/zlib
 	cd build/v8/third_party/zlib && git checkout 563140dd9c24f84bf40919196e9e7666d351cc0d
 	cd build/gn && python3 build/gen.py && ninja -C out/ gn
-	set PATH=$PATH:build/gn/out
 	cp Makefiles/gclient_args.gni build/v8/build/config/gclient_args.gni
-	cd build/v8 && gn gen out.gn --args="$(GN_ARGS)"
-	cd build/v8 && ninja -C ./out.gn
+	cd build/v8 && ../gn/out/gn gen out.gn --args="$(GN_ARGS)"
+	cd build/v8 && ninja -C ./out.gn d8
 
 ##  use_custom_libcxx=false v8_monolithic=true v8_use_external_startup_data=false is_component_build=false is_debug=true clang_base_path=/usr/bin clang_use_chrome_plugins=false treat_warnings_as_errors=false use_lld=false

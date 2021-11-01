@@ -1,27 +1,32 @@
 .phony: v8
 
-BREW = $(shell which brew)
-ifeq ($(BREW),/opt/homebrew/bin/brew)
-	LLVM_BINPATH = /opt/homebrew/opt/llvm
+ARCH := $(shell uname -m)
+ifeq ($(ARCH),aarch64)
+	LLVM := https://github.com/llvm/llvm-project/releases/download/llvmorg-13.0.0/clang+llvm-13.0.0-aarch64-linux-gnu.tar.xz
+	LLVM_BINPATH := $(shell pwd)/build/clang+llvm-13.0.0-aarch64-linux-gnu
+	ARCH := arm64
+endif
+ifeq ($(ARCH),x86_64)
+	LLVM := https://github.com/llvm/llvm-project/releases/download/llvmorg-13.0.0/clang+llvm-13.0.0-x86_64-linux-gnu-ubuntu-20.04.tar.xz
+	LLVM_BINPATH := $(shell pwd)/build/clang+llvm-13.0.0-x86_64-linux-gnu-ubuntu-20.04
+	ARCH := x64
 endif
 
-ifeq ($(BREW),/usr/local/bin/brew)
-	LLVM_BINPATH = /usr/local/opt/llvm
-endif
 GN_ARGS = is_component_build=false v8_use_external_startup_data=false v8_enable_i18n_support=false clang_base_path=\"$(LLVM_BINPATH)\" clang_use_chrome_plugins=false use_custom_libcxx=false treat_warnings_as_errors=false use_lld=false v8_monolithic=true
 
+
 v8:
-ifeq ($(LLVM_BINPATH)/bin/clang++,)
-	@echo "Unable to find clang++" && exit 1
-endif
 	@echo "Setting up build directory"
 	@mkdir -p build
+	@echo "Downloading LLVM"
+	@wget -q -O build/llvm.tar.xz $(LLVM)
+	@cd build && tar -Jxf llvm.tar.xz
 	@echo "Downloading gn source"
 	@git clone -q https://gn.googlesource.com/gn.git build/gn
 	@cd build/gn && git checkout -q eea3906f0e2a8d3622080127d2005ff214d51383
 	@echo "Building gn"
-	@cd build/gn && python3 build/gen.py && ninja -C out/ gn
-	@echo "Downloading v8" source
+	cd build/gn && export PATH=$$PATH:$(LLVM_BINPATH)/bin && python3 build/gen.py && ninja -C out/ gn
+	@echo "Downloading v8 source"
 	@git clone -q https://github.com/v8/v8 build/v8
 	@cd build/v8 && git checkout -q 9.4.146.21
 	@git clone -q https://chromium.googlesource.com/chromium/src/base/trace_event/common.git build/v8/base/trace_event/common
@@ -39,7 +44,10 @@ endif
 	@git clone -q https://chromium.googlesource.com/chromium/src/third_party/zlib.git build/v8/third_party/zlib
 	@cd build/v8/third_party/zlib && git checkout -q 563140dd9c24f84bf40919196e9e7666d351cc0d
 	@cp Makefiles/gclient_args.gni build/v8/build/config/gclient_args.gni
-	@echo "Building v8"
+	@echo "Setting up sysroot"
+	@cd build/v8 && python3 build/linux/sysroot_scripts/install-sysroot.py --arch=$(ARCH)
+	@echo "Generating v8 configuration"
 	@cd build/v8 && ../gn/out/gn gen out.gn --args="$(GN_ARGS)"
-	@cd build/v8 && ninja -C ./out.gn v8_monolith
+	@echo "Building v8"
+	@cd build/v8 && export PATH=$$PATH:$(LLVM_BINPATH)/bin && ninja -C ./out.gn v8_monolith
 

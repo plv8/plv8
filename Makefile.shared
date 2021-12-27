@@ -75,6 +75,20 @@ OPTFLAGS = -std=c++14 -fno-rtti -O2 -g
 
 CCFLAGS = -Wall $(OPTFLAGS) $(OPT_ENABLE_DEBUGGER_SUPPORT) -g
 
+ifdef EXECUTION_TIMEOUT
+	CCFLAGS += -DEXECUTION_TIMEOUT
+endif
+
+ifdef BIGINT_GRACEFUL
+	CCFLAGS += -DBIGINT_GRACEFUL
+endif
+
+# enable direct jsonb conversion by default
+CCFLAGS += -DJSONB_DIRECT_CONVERSION
+
+# enable pointer compression support (default for v8 > 8.x)
+CCFLAGS += -DV8_COMPRESS_POINTERS -DV8_31BIT_SMIS_ON_64BIT_ARCH
+
 ifdef V8_SRCDIR
 override CPPFLAGS += -I$(V8_SRCDIR) -I$(V8_SRCDIR)/include
 endif

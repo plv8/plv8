@@ -134,20 +134,6 @@ v8_rebuild: v8_config v8
 
 include Makefile.shared
 
-ifdef EXECUTION_TIMEOUT
-	CCFLAGS += -DEXECUTION_TIMEOUT
-endif
-
-ifdef BIGINT_GRACEFUL
-	CCFLAGS += -DBIGINT_GRACEFUL
-endif
-
-# enable direct jsonb conversion by default
-CCFLAGS += -DJSONB_DIRECT_CONVERSION
-
-# enable pointer compression support (default for v8 > 8.x)
-CCFLAGS += -DV8_COMPRESS_POINTERS -DV8_31BIT_SMIS_ON_64BIT_ARCH
-
 CCFLAGS += -I$(AUTOV8_DIR)/include -I$(AUTOV8_DIR)
 # We're gonna build static link.  Rip it out after include Makefile
 SHLIB_LINK := $(filter-out -lv8, $(SHLIB_LINK))

@@ -7,7 +7,8 @@ const files = [
   'BUILDING.md',
   'CONFIGURATION.md',
   'FUNCTIONS.md',
-  'BUILTINS.md'
+  'BUILTINS.md',
+  'EXTERNAL.md'
 ];
 
 const renderer = new marked.Renderer();

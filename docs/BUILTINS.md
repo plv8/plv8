@@ -277,8 +277,7 @@ is allocated, the size will not change.
 `WindowObject.set_partition_local(obj)`
 
 Stores the partition-local value, which you can retrieve later with
-`get_partition_local()``. This function internally uses `JSON.stringify()` to\
-serialize the object, so if you pass a value that is not able to be serialized
+`get_partition_local()`. This function internally uses `JSON.stringify()` to serialize the object, so if you pass a value that is not able to be serialized
 it may end up being an unexpected value. If the size of a serialized value is
 more than the allocated memory, it will throw an exception.
 

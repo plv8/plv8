@@ -55,12 +55,12 @@ plv8_config.h plv8.so: v8
 
 ifeq ($(PLATFORM),linux)
 v8:
-	make -f Makefiles/Makefile.linux
+	make -f Makefiles/Makefile.linux v8
 endif
 
 ifeq ($(PLATFORM),macos)
 v8:
-	make -f Makefiles/Makefile.macos
+	make -f Makefiles/Makefile.macos v8
 endif
 
 ifdef EXECUTION_TIMEOUT
@@ -104,7 +104,7 @@ endif
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 plv8-errors inline json startup_pre startup varparam json_conv \
 		  jsonb_conv window guc es6 arraybuffer composites currentresource startup_perms bytea find_function_perms \
-		  memory_limits array_spread reset show
+		  memory_limits reset show array_spread 
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif
@@ -127,7 +127,7 @@ endif
 
 OPTFLAGS = -std=c++14 -fno-rtti -O2
 
-CCFLAGS += -Wall $(OPTFLAGS)
+CCFLAGS += -Wall $(OPTFLAGS) -g
 
 ifdef V8_SRCDIR
 override CPPFLAGS += -I$(V8_SRCDIR) -I$(V8_SRCDIR)/include

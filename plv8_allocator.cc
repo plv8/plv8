@@ -16,7 +16,8 @@ bool ArrayAllocator::check(const size_t length) {
 		isolate->GetHeapStatistics(&heap_statistics);
 		heap_size = heap_statistics.total_heap_size();
 		if (heap_size + allocated + length > heap_limit) {
-			// wee need to force GC here,
+			return false;
+			// we need to force GC here,
 			// otherwise the next allocation will fail even if there is a space for it
 			isolate->LowMemoryNotification();
 			heap_size = heap_statistics.total_heap_size();

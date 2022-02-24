@@ -220,17 +220,29 @@ void DispatchDebugMessages() {
 
 void OOMErrorHandler(const char* location, bool is_heap_oom) {
 	Isolate *isolate = Isolate::GetCurrent();
-	isolate->TerminateExecution();
-	throw js_error("OOM error");
+		//isolate->TerminateExecution();
+		elog(ERROR, "Out of Memory, %s", location);
+		const char *error_message = "Out of memory";
+		Local<String>	result = ToString(error_message, 13);
+		isolate->ThrowException(result);
+	//
+		throw js_error("OOM error");
 }
 
 void GCEpilogueCallback(Isolate* isolate, GCType type, GCCallbackFlags /* flags */) {
 	HeapStatistics heap_statistics;
 	isolate->GetHeapStatistics(&heap_statistics);
+	//elog(NOTICE, "Current memory: %lld => %lld", heap_statistics.used_heap_size(), plv8_memory_limit * 1_MB);
 	if (type != GCType::kGCTypeIncrementalMarking
 		&& heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB) {
+		//elog(NOTICE, "Terminating");
+		const char *error_message = "Out of memory";
+		Local<String>	result = ToString(error_message, 13);
+		isolate->ThrowException(result);
+		//isolate->setData(MEM_SOFTLIMIT_REACHED);
 		isolate->TerminateExecution();
-		throw js_error("OOM error in GC");
+		//elog(NOTICE, "Terminated");
+		//throw js_error("OOM error in GC");
 	}
 	if (heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB / 0.9
 		&& plv8_last_heap_size < plv8_memory_limit * 1_MB / 0.9) {
@@ -253,6 +265,8 @@ CreateIsolate(plv8_context *context) {
 	Isolate *isolate;
 	Isolate::CreateParams params;
 	params.array_buffer_allocator = new ArrayAllocator(plv8_memory_limit * 1_MB);
+	//params.array_buffer_allocator =
+  //    v8::ArrayBuffer::Allocator::NewDefaultAllocator();
 	ResourceConstraints rc;
 	rc.ConfigureDefaults(plv8_memory_limit * 1_MB * 2, plv8_memory_limit * 1_MB * 2);
 	params.constraints = rc;
@@ -649,6 +663,7 @@ Breakout (void *d)
 #endif
 void *int_handler = NULL;
 void *term_handler = NULL;
+void *abt_handler = NULL;
 
 /*
  * signal handler
@@ -696,6 +711,7 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 	// set up the signal handlers
 	int_handler = (void *) signal(SIGINT, signal_handler);
 	term_handler = (void *) signal(SIGTERM, signal_handler);
+	abt_handler = (void *) signal(SIGABRT, signal_handler);
 
 #ifdef EXECUTION_TIMEOUT
 #ifdef _MSC_VER // windows
@@ -706,6 +722,7 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 #endif
 #endif
 
+	try {
 	MaybeLocal<v8::Value> result = fn->Call(ctx, receiver, nargs, args);
 	int	status = SPI_finish();
 
@@ -728,6 +745,7 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 
 	signal(SIGINT, (void (*)(int)) int_handler);
 	signal(SIGTERM, (void (*)(int)) term_handler);
+	signal(SIGABRT, (void (*)(int)) abt_handler);
 
 	if (result.IsEmpty()) {
 		if (isolate->IsExecutionTerminating())
@@ -739,6 +757,9 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 		throw js_error(FormatSPIStatus(status));
 
 	return result.ToLocalChecked();
+	} catch (int err) {
+		elog(NOTICE, "Error caught");
+	}
 }
 
 static Datum
@@ -788,6 +809,7 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
 	Local<Function>		fn =
 		Local<Function>::Cast(recv->GetInternalField(0));
+	
 	Local<v8::Value> result =
 		DoCall(context, fn, recv, nargs, args, nonatomic);
 

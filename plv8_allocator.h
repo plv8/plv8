@@ -20,6 +20,7 @@ public:
 	void* Allocate(size_t length) final;
 	void* AllocateUninitialized(size_t length) final;
 	void Free(void* data, size_t length) final;
+	void* Reallocate(void *data, size_t old_length, size_t new_length) final;
 };
 
 #endif //PLV8_PLV8_ALLOCATOR_H

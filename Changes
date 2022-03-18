@@ -1,7 +1,8 @@
 Revision history for plv8
 
-3.0.1       2021-06-30
+3.0.1       2022-03-17
             - fix aws arm64 compilation issues with new v8
+            - fix issues cancelling
 
 3.0.0       2021-05-31
             - update to v8 8.6.405

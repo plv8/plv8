@@ -53,13 +53,16 @@ private:
 	char	   *m_detail;
 	char	   *m_hint;
 	char	   *m_context;
+	void init(v8::Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<v8::Message> message) noexcept;
 
 public:
-	js_error() throw();
-	js_error(const char *msg) throw();
-	js_error(v8::TryCatch &try_catch) throw();
+	js_error() noexcept;
+	explicit js_error(const char *msg) noexcept;
+	explicit js_error(v8::Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<v8::Message> message) noexcept;
+	explicit js_error(v8::TryCatch &try_catch) noexcept;
 	v8::Local<v8::Value> error_object();
-	__attribute__((noreturn)) void rethrow() throw();
+	__attribute__((noreturn)) void rethrow(const char *msg_format = nullptr) noexcept;
+	void log(int elevel, const char *msg_format = nullptr) noexcept;
 };
 
 /*
@@ -120,7 +123,11 @@ typedef struct plv8_context
 	v8::Persistent<v8::ObjectTemplate>  cursor_template;
 	v8::Persistent<v8::ObjectTemplate>  window_template;
 	v8::Local<v8::Context> localContext() { return v8::Local<v8::Context>::New(isolate, context) ; }
+	bool 						is_dead;
+	bool						interrupted;
 	Oid							user_id;
+	std::vector<std::tuple<v8::Global<v8::Promise>, v8::Global<v8::Message>, v8::Global<v8::Value>>> unhandled_promises;
+	bool 						ignore_unhandled_promises;
 } plv8_context;
 
 /*
@@ -209,9 +216,10 @@ public:
 		if (WindowObjectIsValid(m_winobj))
 		{
 			m_plv8obj = v8::Handle<v8::Object>::Cast(
-					context->Global()->Get(context, v8::String::NewFromUtf8(
+					context->Global()->Get(context, v8::String::NewFromUtf8Literal(
 						context->GetIsolate(),
-						"plv8").ToLocalChecked()).ToLocalChecked());
+						"plv8",
+						v8::NewStringType::kInternalized)).ToLocalChecked());
 			if (m_plv8obj.IsEmpty())
 				throw js_error("plv8 object not found");
 			/* Stash the current item, just in case of nested call */
@@ -247,12 +255,13 @@ public:
 	SRFSupport(v8::Handle<v8::Context> context,
 			   Converter *conv, Tuplestorestate *tupstore)
 	{
-		m_plv8obj = v8::Handle<v8::Object>::Cast(
-				context->Global()->Get(context, v8::String::NewFromUtf8(
-					context->GetIsolate(),
-					"plv8").ToLocalChecked()).ToLocalChecked());
-		if (m_plv8obj.IsEmpty())
-			throw js_error("plv8 object not found");
+	    v8::Local<v8::Value> m_val;
+	    if (!context->Global()->Get(context, v8::String::NewFromUtf8Literal(
+                context->GetIsolate(),
+                "plv8",
+                v8::NewStringType::kInternalized)).ToLocal(&m_val))
+            throw js_error("plv8 object not found");
+	    m_plv8obj = v8::Handle<v8::Object>::Cast(m_val);
 		m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV);
 		m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE);
 		m_plv8obj->SetInternalField(PLV8_INTNL_CONV,
@@ -292,6 +301,8 @@ extern void SetupPlv8Functions(v8::Handle<v8::ObjectTemplate> plv8);
 extern void SetupPrepFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupCursorFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupWindowFunctions(v8::Handle<v8::ObjectTemplate> templ);
+
+extern void HandleUnhandledPromiseRejections();
 
 extern void GetMemoryInfo(v8::Local<v8::Object> obj);
 

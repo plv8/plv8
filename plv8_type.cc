@@ -209,10 +209,10 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
     case WJB_BEGIN_OBJECT:
 			obj = v8::Object::New(isolate);
 			if (container->IsArray()) {
-				container->Set(context, count, JsonbIterate(it, obj));
+				container->Set(context, count, JsonbIterate(it, obj)).Check();
 				count++;
 			} else {
-				container->Set(context, key, JsonbIterate(it, obj));
+				container->Set(context, key, JsonbIterate(it, obj)).Check();
 			}
       break;
 
@@ -224,10 +224,10 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
     case WJB_BEGIN_ARRAY:
 			obj = v8::Array::New(isolate);
 			if (container->IsArray()) {
-				container->Set(context, count, JsonbIterate(it, obj));
+				container->Set(context, count, JsonbIterate(it, obj)).Check();
 				count++;
 			} else {
-				container->Set(context, key, JsonbIterate(it, obj));
+				container->Set(context, key, JsonbIterate(it, obj)).Check();
 			}
       break;
 
@@ -243,12 +243,12 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
 
     case WJB_VALUE:
       // object value
-			container->Set(context, key, GetJsonbValue(&val));
+			container->Set(context, key, GetJsonbValue(&val)).Check();
       break;
 
     case WJB_ELEM:
       // array element
-			container->Set(context, count, GetJsonbValue(&val));
+			container->Set(context, count, GetJsonbValue(&val)).Check();
 			count++;
       break;
 
@@ -1075,7 +1075,7 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 	get_typlenbyvalalign(base.typid, &(base.len), &(base.byval), &(base.align));
 
 	for (int i = 0; i < nelems; i++)
-		result->Set(context, i, ToValue(values[i], nulls[i], &base));
+		result->Set(context, i, ToValue(values[i], nulls[i], &base)).Check();
 
 	pfree(values);
 	pfree(nulls);

@@ -102,7 +102,6 @@ SetCallback(Handle<ObjectTemplate> obj, const char *name,
 			FunctionCallback func, PropertyAttribute attr = None)
 {
 	Isolate* isolate = Isolate::GetCurrent();
-	Local<Context>		context = isolate->GetCurrentContext();
 	obj->Set(isolate, name,
 				FunctionTemplate::New(isolate, plv8_FunctionInvoker,
 					WrapCallback(func)));
@@ -165,7 +164,7 @@ SPIResultToValue(int status)
 		Local<Array>	rows = Array::New(isolate, nrows);
 
 		for (int r = 0; r < nrows; r++)
-			rows->Set(context, r, conv.ToValue(SPI_tuptable->vals[r]));
+			rows->Set(context, r, conv.ToValue(SPI_tuptable->vals[r])).Check();
 
 		result = rows;
 		break;
@@ -383,18 +382,18 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 		FreeErrorData(edata);
 
 		Handle<v8::Object> err = Exception::Error(message)->ToObject(isolate->GetCurrentContext()).ToLocalChecked();
-		err->Set(context, String::NewFromUtf8(isolate, "sqlerrcode").ToLocalChecked(), sqlerrcode);
+		err->Set(context, String::NewFromUtf8(isolate, "sqlerrcode").ToLocalChecked(), sqlerrcode).Check();
 #if PG_VERSION_NUM >= 90300
-		err->Set(context, String::NewFromUtf8(isolate, "schema_name").ToLocalChecked(), schema_name);
-		err->Set(context, String::NewFromUtf8(isolate, "table_name").ToLocalChecked(), table_name);
-		err->Set(context, String::NewFromUtf8(isolate, "column_name").ToLocalChecked(), column_name);
-		err->Set(context, String::NewFromUtf8(isolate, "datatype_name").ToLocalChecked(), datatype_name);
-		err->Set(context, String::NewFromUtf8(isolate, "constraint_name").ToLocalChecked(), constraint_name);
-		err->Set(context, String::NewFromUtf8(isolate, "detail").ToLocalChecked(), detail);
-		err->Set(context, String::NewFromUtf8(isolate, "hint").ToLocalChecked(), hint);
-		err->Set(context, String::NewFromUtf8(isolate, "context").ToLocalChecked(), sql_context);
-		err->Set(context, String::NewFromUtf8(isolate, "internalquery").ToLocalChecked(), internalquery);
-		err->Set(context, String::NewFromUtf8(isolate, "code").ToLocalChecked(), code);
+		err->Set(context, String::NewFromUtf8(isolate, "schema_name").ToLocalChecked(), schema_name).Check();
+		err->Set(context, String::NewFromUtf8(isolate, "table_name").ToLocalChecked(), table_name).Check();
+		err->Set(context, String::NewFromUtf8(isolate, "column_name").ToLocalChecked(), column_name).Check();
+		err->Set(context, String::NewFromUtf8(isolate, "datatype_name").ToLocalChecked(), datatype_name).Check();
+		err->Set(context, String::NewFromUtf8(isolate, "constraint_name").ToLocalChecked(), constraint_name).Check();
+		err->Set(context, String::NewFromUtf8(isolate, "detail").ToLocalChecked(), detail).Check();
+		err->Set(context, String::NewFromUtf8(isolate, "hint").ToLocalChecked(), hint).Check();
+		err->Set(context, String::NewFromUtf8(isolate, "context").ToLocalChecked(), sql_context).Check();
+		err->Set(context, String::NewFromUtf8(isolate, "internalquery").ToLocalChecked(), internalquery).Check();
+		err->Set(context, String::NewFromUtf8(isolate, "code").ToLocalChecked(), code).Check();
 #endif
 
 		args.GetReturnValue().Set(isolate->ThrowException(err));
@@ -575,7 +574,7 @@ convertArgsToArray(const FunctionCallbackInfo<v8::Value> &args, int start, int d
 	Local<Array> result = Array::New(args.GetIsolate(), args.Length() - start);
 	for (int i = start; i < args.Length(); i++)
 	{
-		result->Set(context, i - downshift, args[i]);
+		result->Set(context, i - downshift, args[i]).Check();
 	}
 	return result;
 }
@@ -990,7 +989,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 		{
 			Handle<Array> array = Array::New(isolate);
 			for (unsigned int i = 0; i < SPI_processed; i++)
-				array->Set(context, i, conv.ToValue(SPI_tuptable->vals[i]));
+				array->Set(context, i, conv.ToValue(SPI_tuptable->vals[i])).Check();
 			args.GetReturnValue().Set(array);
 			SPI_freetuptable(SPI_tuptable);
 			return;
@@ -1674,7 +1673,6 @@ plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args)
 	// V8 memory usage
   	HeapStatistics v8_heap_stats;
 	Isolate *		isolate = args.GetIsolate();
-	Handle<Context> context = isolate->GetCurrentContext();
 	isolate->GetHeapStatistics(&v8_heap_stats);
 
 	Local<v8::Value>	result;
@@ -1696,9 +1694,9 @@ void GetMemoryInfo(v8::Local<v8::Object> obj) {
 	Local<v8::Value> used = Local<v8::Value>::New(isolate, Number::New(isolate, v8_heap_stats.used_heap_size()));
 	Local<v8::Value> external = Local<v8::Value>::New(isolate, Number::New(isolate, v8_heap_stats.external_memory()));
 
-	obj->Set(context, String::NewFromUtf8(isolate, "total_heap_size").ToLocalChecked(), total);
-	obj->Set(context, String::NewFromUtf8(isolate, "used_heap_size").ToLocalChecked(), used);
-	obj->Set(context, String::NewFromUtf8(isolate, "external_memory").ToLocalChecked(), external);
+	obj->Set(context, String::NewFromUtf8(isolate, "total_heap_size").ToLocalChecked(), total).Check();
+	obj->Set(context, String::NewFromUtf8(isolate, "used_heap_size").ToLocalChecked(), used).Check();
+	obj->Set(context, String::NewFromUtf8(isolate, "external_memory").ToLocalChecked(), external).Check();
 }
 
 #if PG_VERSION_NUM >= 110000

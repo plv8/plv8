@@ -14,11 +14,7 @@ ifeq ($(OS),Windows_NT)
 else
 	UNAME_S := $(shell uname -s)
 	ifeq ($(UNAME_S),Darwin)
-		ifeq ($(shell uname -m),aarch64)
-			PLATFORM = arm64.release
-		else
-			PLATFORM = x64.release
-		endif
+		PLATFORM = x64.release
 	endif
 	ifeq ($(UNAME_S),Linux)
 		ifeq ($(shell uname -m | grep -o arm),arm)
@@ -60,11 +56,27 @@ $(AUTOV8_DEPOT_TOOLS):
 
 ifeq ($(PLATFORM),arm64.release)
 $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
-	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync ; cd build/config ; cd ../.. ; tools/dev/v8gen.py $(PLATFORM) -- $(V8_OPTIONS)
-	# patch v8 with our clang and gn
-#	cd build/v8; rm -r third_party/llvm-build/Release+Asserts/; mv ../clang+llvm-12.0.0-aarch64-linux-gnu third_party/llvm-build/Release+Asserts; cp --force ../gn/out/gn buildtools/linux64/gn;
+	# patch with system-installed ninja
+	cp /usr/bin/ninja build/depot_tools/
 
-#	cd build/v8; sed -i -e "s/target_cpu=\"x64\" v8_target_cpu=\"arm64/target_cpu=\"arm64\" v8_target_cpu=\"arm64/" infra/mb/mb_config.pyl; tools/dev/v8gen.py $(PLATFORM) -- $(V8_OPTIONS)
+	# get ARM64 clang binaries
+	cd build; wget -nc http://releases.llvm.org/7.0.1/clang+llvm-7.0.1-aarch64-linux-gnu.tar.xz; tar xf clang+llvm-7.0.1-aarch64-linux-gnu.tar.xz
+
+	# Get and build the plugin
+	cd build; export PATH=$$PATH:`pwd`/clang+llvm-7.0.1-aarch64-linux-gnu/bin; wget -nc https://chromium.googlesource.com/chromium/src/+archive/lkgr/tools/clang/plugins.tar.gz; mkdir -p plugin; cd plugin; tar xf ../plugins.tar.gz; clang++ *.cpp -c -I ../clang+llvm-7.0.1-aarch64-linux-gnu/include/ -fPIC -Wall -std=c++14 -fno-rtti -fno-omit-frame-pointer; clang -shared *.o -o libFindBadConstructs.so
+
+	cp build/plugin/libFindBadConstructs.so build/clang+llvm-7.0.1-aarch64-linux-gnu/lib/
+
+	# Build an ARM64 binary of gn
+	cd build; export PATH=$$PATH:`pwd`/clang+llvm-7.0.1-aarch64-linux-gnu/bin; rm -rf gn; git clone https://gn.googlesource.com/gn; cd gn; git checkout 6ae63300be3e9865a72772e4cb6e1f8f667624c4; sed -i -e "s/-Wl,--icf=all//" build/gen.py; python build/gen.py; ninja -C out
+
+	# clone v8
+	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync
+
+	# patch v8 with our clang and gn
+	cd build/v8; rm -r third_party/llvm-build/Release+Asserts/; mv ../clang+llvm-7.0.1-aarch64-linux-gnu third_party/llvm-build/Release+Asserts; cp ../gn/out/gn buildtools/linux64/gn;
+
+	cd build/v8; sed -i -e "s/target_cpu=\"x64\" v8_target_cpu=\"arm64/target_cpu=\"arm64\" v8_target_cpu=\"arm64/" infra/mb/mb_config.pyl; tools/dev/v8gen.py $(PLATFORM) -- $(V8_OPTIONS)
 else
 $(AUTOV8_DIR): $(AUTOV8_DEPOT_TOOLS)
 	cd build; fetch v8; cd v8; git checkout $(AUTOV8_VERSION); gclient sync ; cd build/config ; cd ../.. ; tools/dev/v8gen.py $(PLATFORM) -- $(V8_OPTIONS)

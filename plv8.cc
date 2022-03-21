@@ -225,7 +225,7 @@ void OOMErrorHandler(const char* location, bool is_heap_oom) {
 	isolate->TerminateExecution();
 	// set it to kill the user context and isolate
 	current_context->is_dead = true;
-	elog(ERROR, "out of memory");
+	elog(ERROR, "Out of memory error");
 }
 
 void GCEpilogueCallback(Isolate* isolate, GCType type, GCCallbackFlags /* flags */) {

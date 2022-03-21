@@ -125,17 +125,13 @@ typedef struct plv8_runtime
 	v8::Persistent<v8::ObjectTemplate>  plan_template;
 	v8::Persistent<v8::ObjectTemplate>  cursor_template;
 	v8::Persistent<v8::ObjectTemplate>  window_template;
-	v8::Local<v8::Context> localContext() const;
+	v8::Local<v8::Context> localContext() { return v8::Local<v8::Context>::New(isolate, context) ; }
 	bool 						is_dead;
 	bool						interrupted;
 	Oid							user_id;
-	std::list<std::tuple<std::string, v8::Global<v8::Context>>> ctx_queue;
-	std::unordered_map<std::string, std::list<std::tuple<std::string, v8::Global<v8::Context>>>::iterator> ctx_map;
-	void touchContext(const char *context_id);
-	void removeContext(const char *context_id);
-	void disposeContext (std::tuple<std::string, v8::Global<v8::Context>> &tuple) const;
-	bool wasKilled() const { return is_dead || (isolate != nullptr && isolate->IsDead()); }
-} plv8_runtime;
+	std::vector<std::tuple<v8::Global<v8::Promise>, v8::Global<v8::Message>, v8::Global<v8::Value>>> unhandled_promises;
+	bool 						ignore_unhandled_promises;
+} plv8_context;
 
 /*
  * A multibyte string in the database encoding. It works more effective
@@ -308,6 +304,8 @@ extern void SetupPlv8Functions(v8::Handle<v8::ObjectTemplate> plv8);
 extern void SetupPrepFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupCursorFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupWindowFunctions(v8::Handle<v8::ObjectTemplate> templ);
+
+extern void HandleUnhandledPromiseRejections();
 
 extern void GetMemoryInfo(v8::Local<v8::Object> obj);
 

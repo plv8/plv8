@@ -8,6 +8,6 @@
   },
   "author": "",
   "dependencies": {
-    "marked": "^0.3.19"
+    "marked": "^4.0.12"
   }
 }

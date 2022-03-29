@@ -7,10 +7,9 @@ const files = [
   'BUILDING.md',
   'CONFIGURATION.md',
   'FUNCTIONS.md',
-  'BUILTINS.md'
+  'BUILTINS.md',
+  'EXTERNAL.md'
 ];
-
-const renderer = new marked.Renderer();
 
 // template
 var template = fs.readFileSync('./index.tpl', 'utf8');
@@ -19,23 +18,28 @@ var template = fs.readFileSync('./index.tpl', 'utf8');
 var links = [ ];
 
 // Override function
-renderer.heading = function (text, level) {
-  const escapedText = text.toLowerCase().replace(/[^\w]+/g, '-');
+const renderer = {
+  heading (text, level) {
+    const escapedText = text.toLowerCase().replace(/[^\w]+/g, '-');
 
-  links.push({
-    level: level,
-    link: '#' + escapedText,
-    text: text
-  });
+    links.push({
+      level: level,
+      link: '#' + escapedText,
+      text: text
+    });
 
-  return `
-    <h${level}>
-      <a name="${escapedText}" class="anchor" href="#${escapedText}">
-        <span class="header-link"></span>
-      </a>
-      ${text}
-    </h${level}>`;
+    return `
+      <h${level}>
+        <a name="${escapedText}" class="anchor" href="#${escapedText}">
+          <span class="header-link"></span>
+        </a>
+        ${text}
+      </h${level}>
+    `;
+  }
 };
+
+marked.use({ renderer });
 
 // create the content
 var content = '';
@@ -43,7 +47,7 @@ var content = '';
 files.forEach((elem) => {
   const input = fs.readFileSync('../../docs/' + elem, 'utf8');
 
-  content += marked(input, { renderer: renderer });
+  content += marked.parse(input);
 });
 
 // replace the content of the template

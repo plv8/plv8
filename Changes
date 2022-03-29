@@ -1,6 +1,11 @@
 Revision history for plv8
 
-3.0.1       2022-03-17
+3.1.1       2022-03-29
+            - fix makefile defines for execution timeout
+
+3.1.0       2022-03-17
+            - new build system
+            - update to v8 9.7
             - fix aws arm64 compilation issues with new v8
             - fix issues cancelling
 

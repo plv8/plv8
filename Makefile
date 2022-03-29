@@ -8,7 +8,7 @@
 # can specify the v8 version by AUTOV8_VERSION, too.
 #-----------------------------------------------------------------------------#
 
-PLV8_VERSION = 3.1.0
+PLV8_VERSION = 3.1.1
 
 # set your custom C++ compler
 CUSTOM_CC = g++
@@ -52,7 +52,6 @@ all: v8
 # For some reason, this solves parallel make dependency.
 plv8_config.h plv8.so: v8
 
-
 ifeq ($(PLATFORM),linux)
 v8:
 	make -f Makefiles/Makefile.linux v8
@@ -63,6 +62,14 @@ v8:
 	make -f Makefiles/Makefile.macos v8
 endif
 
+
+# enable direct jsonb conversion by default
+CCFLAGS += -DJSONB_DIRECT_CONVERSION
+
+CCFLAGS += -DV8_COMPRESS_POINTERS=1 -DV8_31BIT_SMIS_ON_64BIT_ARCH=1
+
+CCFLAGS += -I$(AUTOV8_DIR)/include -I$(AUTOV8_DIR)
+
 ifdef EXECUTION_TIMEOUT
 	CCFLAGS += -DEXECUTION_TIMEOUT
 endif
@@ -71,12 +78,7 @@ ifdef BIGINT_GRACEFUL
 	CCFLAGS += -DBIGINT_GRACEFUL
 endif
 
-# enable direct jsonb conversion by default
-CCFLAGS += -DJSONB_DIRECT_CONVERSION
 
-CCFLAGS += -DV8_COMPRESS_POINTERS=1 -DV8_31BIT_SMIS_ON_64BIT_ARCH=1
-
-CCFLAGS += -I$(AUTOV8_DIR)/include -I$(AUTOV8_DIR)
 # We're gonna build static link.  Rip it out after include Makefile
 SHLIB_LINK := $(filter-out -lv8, $(SHLIB_LINK))
 
@@ -127,7 +129,7 @@ endif
 
 OPTFLAGS = -std=c++14 -fno-rtti -O2
 
-CCFLAGS += -Wall $(OPTFLAGS) -g
+CCFLAGS += -Wall $(OPTFLAGS)
 
 ifdef V8_SRCDIR
 override CPPFLAGS += -I$(V8_SRCDIR) -I$(V8_SRCDIR)/include

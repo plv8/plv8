@@ -38,7 +38,7 @@ build/v8: build/gn/out/gn
 	@git clone -q https://chromium.googlesource.com/chromium/deps/icu.git build/v8/third_party/icu
 	@cd build/v8/third_party/icu && git checkout -q 75e34bcccea0be165c31fdb278b3712c516c5876
 	@git clone -q https://chromium.googlesource.com/chromium/src/third_party/jinja2.git build/v8/third_party/jinja2
-	@cd build/v8/third_party/jinja2 && git checkout -q 7c54c1f227727e0c4c1d3dc19dd71cd601a2db95
+	@cd build/v8/third_party/jinja2 && git checkout -q ee69aa00ee8536f61db6a451f3858745cf587de6
 	@git clone -q https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git build/v8/third_party/markupsafe
 	@cd build/v8/third_party/markupsafe && git checkout -q 1b882ef6372b58bfd55a3285f37ed801be9137cd
 	@git clone -q https://chromium.googlesource.com/chromium/src/third_party/zlib.git build/v8/third_party/zlib

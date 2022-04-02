@@ -1,5 +1,8 @@
 Revision history for plv8
 
+3.1.2       2022-04-02
+            - update jinja2 for python 3.10
+
 3.1.1       2022-03-29
             - fix makefile defines for execution timeout
 

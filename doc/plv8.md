@@ -34,18 +34,25 @@ PL/v8 is tested with:
 - g++: version 4.8.2
 - clang++
 
+Here is an example of dependencies that will likely be used when building on Ubuntu 20.04 LTS (change postgresql-server-dev-12 to your version of postgres)
+```bash
+   sudo apt install g++ python build-essential autoconf automake gdb git libffi-dev zlib1g-dev libssl-dev apt-file libtinfo5 postgresql-server-dev-12 ninja-build
+```
+
+To install the V8 pre-requisites, see https://github.com/v8/v8 . Be aware that it can take a long time to build V8 from source.
+
 Also all tools that PostgreSQL and V8 require to be built are required if you
 are building those from source.
 
 ## Installing PL/v8
 
 ### Build from source:
-Determine the [PL/v8 release](https://github.com/plv8/plv8/releases) you want to download and use it's version and path below.
+Determine the [PL/v8 release](https://github.com/plv8/plv8/releases or https://github.com/plv8/plv8/tags) you want to download and use it's version and path below.
 
-    $ wget https://github.com/plv8/plv8/archive/v2.3.0.tar.gz
-    $ tar -xvzf v2.3.0.tar.gz
-    $ cd plv8-2.3.0
-    $ make
+    $ wget https://github.com/plv8/plv8/archive/v3.X.X.tar.gz
+    $ tar -xvzf v3.X.X.tar.gz
+    $ cd plv8-3.X.X
+    $ sudo make
 
 This will build PL/v8 for you linking to Google's v8 as a static library by
 downloading the v8 source at a specific version and building it along with

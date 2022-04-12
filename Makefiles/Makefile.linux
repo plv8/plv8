@@ -25,7 +25,7 @@ build/gn/out/gn:
 	@git clone -q https://gn.googlesource.com/gn.git build/gn
 	@cd build/gn && git checkout -q eea3906f0e2a8d3622080127d2005ff214d51383
 	@echo "Building gn"
-	cd build/gn && export PATH=$$PATH:$(LLVM_BINPATH)/bin && python3 build/gen.py && ninja -C out/ gn
+	cd build/gn && export PATH="${PATH}":$(LLVM_BINPATH)/bin && python3 build/gen.py && ninja -C out/ gn
 
 build/v8: build/gn/out/gn
 	@echo "Downloading v8 source"
@@ -54,7 +54,7 @@ build/v8: build/gn/out/gn
 	@echo "Generating v8 configuration"
 	@cd build/v8 && ../gn/out/gn gen out.gn --args="$(GN_ARGS)"
 	@echo "Building v8"
-	@cd build/v8 && export PATH=$$PATH:$(LLVM_BINPATH)/bin && ninja -C ./out.gn v8_monolith
+	@cd build/v8 && export PATH="${PATH}":$(LLVM_BINPATH)/bin && ninja -C ./out.gn v8_monolith
 
 libv8_monolith.a: build/v8
 

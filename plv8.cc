@@ -737,6 +737,25 @@ signal_handler (int sig) {
 	auto running_context = GetPlv8Context();
 	running_context->interrupted = true;
 	running_context->isolate->TerminateExecution();
+
+	// call the old handler if it exists
+	switch(sig) {
+		case SIGINT:
+			if (int_handler != NULL) {
+				((void (*)(int)) int_handler)(sig);
+			}
+			break;
+		case SIGTERM:
+			if (term_handler != NULL) {
+				((void (*)(int)) term_handler)(sig);
+			}
+			break;
+		case SIGABRT:
+			if (abt_handler != NULL) {
+				((void (*)(int)) abt_handler)(sig);
+			}
+			break;
+	}
 }
 
 /*

@@ -8,7 +8,7 @@
 # can specify the v8 version by AUTOV8_VERSION, too.
 #-----------------------------------------------------------------------------#
 
-PLV8_VERSION = 3.1.1
+PLV8_VERSION = 3.1.3
 
 # set your custom C++ compler
 CUSTOM_CC = g++

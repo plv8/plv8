@@ -770,8 +770,11 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 	Isolate 	   *isolate = ctx->GetIsolate();
 	TryCatch		try_catch(isolate);
 
-	if (isolate->IsExecutionTerminating()) {
+	if (isolate->IsExecutionTerminating() || current_context->interrupted) {
 		isolate->CancelTerminateExecution();
+		if (current_context->interrupted) {
+			current_context->interrupted = false;
+		}
 	}
 
 #if PG_VERSION_NUM >= 110000
@@ -827,7 +830,7 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 	HandleUnhandledPromiseRejections();
 
 	if (result.IsEmpty()) {
-		if (isolate->IsExecutionTerminating()) {
+		if (isolate->IsExecutionTerminating() || current_context->interrupted) {
 			isolate->CancelTerminateExecution();
 			if (current_context->interrupted) {
 				current_context->interrupted = false;
@@ -1485,8 +1488,11 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 	char		   *cresult;
 	const char	   *dialect_binary_data;
 
-	if (isolate->IsExecutionTerminating()) {
+	if (isolate->IsExecutionTerminating() || current_context->interrupted) {
 		isolate->CancelTerminateExecution();
+		if (current_context->interrupted) {
+			current_context->interrupted = false;
+		}
 	}
 
 	switch (dialect)
@@ -1697,6 +1703,10 @@ CompileFunction(
 
 	v8::Local<v8::Script> script;
 	v8::Local<v8::Value> result;
+	if (current_context->interrupted) {
+		isolate->CancelTerminateExecution();
+		current_context->interrupted = false;
+	}
 	if (Script::Compile(isolate->GetCurrentContext(), source, &origin).ToLocal(&script)) {
 		if (!script.IsEmpty()) {
 			if (!script->Run(isolate->GetCurrentContext()).ToLocal(&result))
@@ -1724,7 +1734,7 @@ CompileFunction(
 	HandleUnhandledPromiseRejections();
 
 	if (result.IsEmpty()) {
-		if (isolate->IsExecutionTerminating()) {
+		if (isolate->IsExecutionTerminating()  || current_context->interrupted) {
 			isolate->CancelTerminateExecution();
 			if (current_context->interrupted) {
 				current_context->interrupted = false;

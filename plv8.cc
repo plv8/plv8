@@ -596,9 +596,12 @@ plv8_info(PG_FUNCTION_ARGS)
 {
 	unsigned long		i;
 	unsigned long 		size = ContextVector.size();
-	char 				*infos[size];
-	size_t 				lengths[size];
+	char 				**infos = nullptr;
+	size_t 				*lengths = nullptr;
 	size_t 				total_length = 3; // length of "[]\0"
+
+	*infos = (char *) palloc(sizeof(char) * size);
+	lengths = (size_t *) palloc(sizeof(size_t) * size);
 
 	for (i = 0; i < size; i++)
 	{
@@ -639,6 +642,10 @@ plv8_info(PG_FUNCTION_ARGS)
 		out[current] = ',';
 	}
 	out[current] = ']';
+
+	pfree(*infos);
+	pfree(lengths);
+
 	return CStringGetTextDatum(out);
 }
 

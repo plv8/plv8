@@ -1,4 +1,4 @@
-.phony: v8
+.PHONY: v8 all
 
 ARCH := $(shell uname -m)
 ifeq ($(ARCH),aarch64)

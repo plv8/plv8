@@ -1,4 +1,4 @@
-.phony: v8
+.PHONY: v8 all
 
 BREW = $(shell which brew)
 ifeq ($(BREW),/opt/homebrew/bin/brew)

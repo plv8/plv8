@@ -8,7 +8,7 @@
 # can specify the v8 version by AUTOV8_VERSION, too.
 #-----------------------------------------------------------------------------#
 
-PLV8_VERSION = 3.1.3
+PLV8_VERSION = 3.1.4
 
 # set your custom C++ compler
 CUSTOM_CC = g++
@@ -228,5 +228,6 @@ endif
 
 installcheck: integritycheck
 
-.PHONY: subclean integritycheck
+.PHONY: subclean integritycheck all clean installcheck static
+
 include $(PGXS)

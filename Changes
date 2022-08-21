@@ -1,5 +1,9 @@
 Revision history for plv8
 
+3.1.4       2022-08-21
+            - more signal management fixes
+            - support postgres 15 beta
+
 3.1.3       2022-08-07
             - fix makefile for some linux systems
             - better signal management

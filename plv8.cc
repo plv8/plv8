@@ -236,7 +236,7 @@ void GCEpilogueCallback(Isolate* isolate, GCType type, GCCallbackFlags /* flags 
 		&& heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB) {
 		//elog(NOTICE, "Terminating");
 		const char *error_message = "Out of memory";
-		Local<String>	result = ToString(error_message, 13);
+		Local<v8::String>	result = ToString(error_message, 13);
 		isolate->ThrowException(result);
 		//isolate->setData(MEM_SOFTLIMIT_REACHED);
 		isolate->TerminateExecution();
@@ -289,7 +289,7 @@ void PromiseRejectCB(PromiseRejectMessage rejection) {
 		TryCatch try_catch(isolate);
 		try_catch.SetVerbose(true);
 		isolate->ThrowException(Exception::Error(
-				String::NewFromUtf8Literal(isolate, "Unhandled Promise.")));
+				v8::String::NewFromUtf8Literal(isolate, "Unhandled Promise.")));
 		message = try_catch.Message();
 		exception = try_catch.Exception();
 	}
@@ -619,8 +619,8 @@ plv8_info(PG_FUNCTION_ARGS)
 #else
 		char 			   *username = GetUserNameFromId(ContextVector[i]->user_id);
 #endif
-		obj->Set(context, String::NewFromUtf8Literal(isolate, "user"),
-           String::NewFromUtf8(isolate, username).ToLocalChecked()).Check();
+		obj->Set(context, v8::String::NewFromUtf8Literal(isolate, "user"),
+           v8::String::NewFromUtf8(isolate, username).ToLocalChecked()).Check();
 		GetMemoryInfo(obj);
 
 		result = JSON.Stringify(obj);
@@ -1117,29 +1117,29 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 
 	// 3: TG_WHEN
 	if (TRIGGER_FIRED_BEFORE(event))
-		args[3] = String::NewFromUtf8Literal(xenv->isolate, "BEFORE");
+		args[3] = v8::String::NewFromUtf8Literal(xenv->isolate, "BEFORE");
 	else
-		args[3] = String::NewFromUtf8Literal(xenv->isolate, "AFTER");
+		args[3] = v8::String::NewFromUtf8Literal(xenv->isolate, "AFTER");
 
 	// 4: TG_LEVEL
 	if (TRIGGER_FIRED_FOR_ROW(event))
-		args[4] = String::NewFromUtf8Literal(xenv->isolate, "ROW");
+		args[4] = v8::String::NewFromUtf8Literal(xenv->isolate, "ROW");
 	else
-		args[4] = String::NewFromUtf8Literal(xenv->isolate, "STATEMENT");
+		args[4] = v8::String::NewFromUtf8Literal(xenv->isolate, "STATEMENT");
 
 	// 5: TG_OP
 	if (TRIGGER_FIRED_BY_INSERT(event))
-		args[5] = String::NewFromUtf8Literal(xenv->isolate, "INSERT");
+		args[5] = v8::String::NewFromUtf8Literal(xenv->isolate, "INSERT");
 	else if (TRIGGER_FIRED_BY_DELETE(event))
-		args[5] = String::NewFromUtf8Literal(xenv->isolate, "DELETE");
+		args[5] = v8::String::NewFromUtf8Literal(xenv->isolate, "DELETE");
 	else if (TRIGGER_FIRED_BY_UPDATE(event))
-		args[5] = String::NewFromUtf8Literal(xenv->isolate, "UPDATE");
+		args[5] = v8::String::NewFromUtf8Literal(xenv->isolate, "UPDATE");
 #ifdef TRIGGER_FIRED_BY_TRUNCATE
 	else if (TRIGGER_FIRED_BY_TRUNCATE(event))
-		args[5] = String::NewFromUtf8Literal(xenv->isolate, "TRUNCATE");
+		args[5] = v8::String::NewFromUtf8Literal(xenv->isolate, "TRUNCATE");
 #endif
 	else
-		args[5] = String::NewFromUtf8Literal(xenv->isolate, "?");
+		args[5] = v8::String::NewFromUtf8Literal(xenv->isolate, "?");
 
 	// 6: TG_RELID
 	args[6] = Uint32::New(xenv->isolate, RelationGetRelid(rel));
@@ -1491,7 +1491,7 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 	Local<Context> ctx = Local<Context>::New(isolate, global_context->compile_context);
 	Context::Scope	context_scope(ctx);
 	TryCatch		try_catch(isolate);
-	Local<String>	key;
+	Local<v8::String>	key;
 	char		   *cresult;
 	const char	   *dialect_binary_data;
 
@@ -1507,13 +1507,13 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 		case PLV8_DIALECT_COFFEE:
 			if (coffee_script_binary_data[0] == '\0')
 				throw js_error("CoffeeScript is not enabled");
-			key = String::NewFromUtf8Literal(isolate, "CoffeeScript", NewStringType::kInternalized);
+			key = v8::String::NewFromUtf8Literal(isolate, "CoffeeScript", NewStringType::kInternalized);
 			dialect_binary_data = (const char *) coffee_script_binary_data;
 			break;
 		case PLV8_DIALECT_LIVESCRIPT:
 			if (livescript_binary_data[0] == '\0')
 				throw js_error("LiveScript is not enabled");
-			key = String::NewFromUtf8Literal(isolate, "LiveScript", NewStringType::kInternalized);
+			key = v8::String::NewFromUtf8Literal(isolate, "LiveScript", NewStringType::kInternalized);
 			dialect_binary_data = (const char *) livescript_binary_data;
 			break;
 		default:
@@ -1542,7 +1542,7 @@ CompileDialect(const char *src, Dialect dialect, plv8_context *global_context)
 
 	Local<Object> compiler = Local<Object>::Cast(ctx->Global()->Get(ctx, key).ToLocalChecked());
     Local<Function>	func = Local<Function>::Cast(
-            compiler->Get(ctx, String::NewFromUtf8Literal(isolate, "compile",
+            compiler->Get(ctx, v8::String::NewFromUtf8Literal(isolate, "compile",
 												   NewStringType::kInternalized)).ToLocalChecked());
 	const int		nargs = 1;
 	Handle<v8::Value>	args[nargs];
@@ -1683,7 +1683,7 @@ CompileFunction(
 		name = ToString(proname);
 	else
 		name = Undefined(isolate);
-	Local<String> source = ToString(src.data, src.len);
+	Local<v8::String> source = ToString(src.data, src.len);
 	pfree(src.data);
 
 	Local<Context> context = Local<Context>::New(isolate, global_context->context);
@@ -1933,7 +1933,7 @@ GetPlv8Context() {
 
 		new(&my_context->plan_template) Persistent<ObjectTemplate>();
 		Local<FunctionTemplate> base = FunctionTemplate::New(isolate);
-		Local<String> planClassName = String::NewFromUtf8Literal(isolate, "PreparedPlan",
+		Local<v8::String> planClassName = v8::String::NewFromUtf8Literal(isolate, "PreparedPlan",
 														   NewStringType::kInternalized);
 		base->SetClassName(planClassName);
 		base->PrototypeTemplate()->Set(toStringSymbol, planClassName, toStringAttr);
@@ -1943,7 +1943,7 @@ GetPlv8Context() {
 
 		new(&my_context->cursor_template) Persistent<ObjectTemplate>();
 		base = FunctionTemplate::New(isolate);
-		Local<String> cursorClassName = String::NewFromUtf8Literal(isolate, "Cursor",
+		Local<v8::String> cursorClassName = v8::String::NewFromUtf8Literal(isolate, "Cursor",
 															 NewStringType::kInternalized);
 		base->SetClassName(cursorClassName);
 		base->PrototypeTemplate()->Set(toStringSymbol, cursorClassName, toStringAttr);
@@ -1953,7 +1953,7 @@ GetPlv8Context() {
 
 		new(&my_context->window_template) Persistent<ObjectTemplate>();
 		base = FunctionTemplate::New(isolate);
-		Local<String> windowClassName = String::NewFromUtf8Literal(isolate, "WindowObject",
+		Local<v8::String> windowClassName = v8::String::NewFromUtf8Literal(isolate, "WindowObject",
 															 NewStringType::kInternalized);
         base->SetClassName(windowClassName);
 		base->PrototypeTemplate()->Set(toStringSymbol, windowClassName, toStringAttr);
@@ -2073,39 +2073,39 @@ GetGlobalObjectTemplate(Isolate *isolate)
 
 		Local<ObjectTemplate> templ = ObjectTemplate::New(isolate);
 		// ERROR levels for elog
-		templ->Set(String::NewFromUtf8Literal(isolate, "DEBUG5", NewStringType::kInternalized),
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG5", NewStringType::kInternalized),
 				   Int32::New(isolate, DEBUG5));
-		templ->Set(String::NewFromUtf8Literal(isolate, "DEBUG4", NewStringType::kInternalized),
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG4", NewStringType::kInternalized),
 				   Int32::New(isolate, DEBUG4));
-		templ->Set(String::NewFromUtf8Literal(isolate, "DEBUG3", NewStringType::kInternalized),
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG3", NewStringType::kInternalized),
 				   Int32::New(isolate, DEBUG3));
-		templ->Set(String::NewFromUtf8Literal(isolate, "DEBUG2", NewStringType::kInternalized),
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG2", NewStringType::kInternalized),
 				   Int32::New(isolate, DEBUG2));
-		templ->Set(String::NewFromUtf8Literal(isolate, "DEBUG1", NewStringType::kInternalized),
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG1", NewStringType::kInternalized),
 				   Int32::New(isolate, DEBUG1));
-		templ->Set(String::NewFromUtf8Literal(isolate, "DEBUG", NewStringType::kInternalized),
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG", NewStringType::kInternalized),
 				   Int32::New(isolate, DEBUG5));
-		templ->Set(String::NewFromUtf8Literal(isolate, "LOG", NewStringType::kInternalized),
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "LOG", NewStringType::kInternalized),
 				   Int32::New(isolate, LOG));
-		templ->Set(String::NewFromUtf8Literal(isolate, "INFO", NewStringType::kInternalized),
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "INFO", NewStringType::kInternalized),
 				   Int32::New(isolate, INFO));
-		templ->Set(String::NewFromUtf8Literal(isolate, "NOTICE", NewStringType::kInternalized),
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "NOTICE", NewStringType::kInternalized),
 				   Int32::New(isolate, NOTICE));
-		templ->Set(String::NewFromUtf8Literal(isolate, "WARNING", NewStringType::kInternalized),
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "WARNING", NewStringType::kInternalized),
 				   Int32::New(isolate, WARNING));
-		templ->Set(String::NewFromUtf8Literal(isolate, "ERROR", NewStringType::kInternalized),
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "ERROR", NewStringType::kInternalized),
 				   Int32::New(isolate, ERROR));
 		global.Reset(isolate, templ);
 
 		Local<ObjectTemplate> plv8 = ObjectTemplate::New(isolate);
 
 		SetupPlv8Functions(plv8);
-		plv8->Set(String::NewFromUtf8Literal(isolate, "version", NewStringType::kInternalized),
-				  String::NewFromUtf8Literal(isolate, PLV8_VERSION));
-		plv8->Set(String::NewFromUtf8Literal(isolate, "v8_version", NewStringType::kInternalized),
-				  String::NewFromUtf8Literal(isolate, V8_VERSION_STRING));
+		plv8->Set(v8::String::NewFromUtf8Literal(isolate, "version", NewStringType::kInternalized),
+				  v8::String::NewFromUtf8Literal(isolate, PLV8_VERSION));
+		plv8->Set(v8::String::NewFromUtf8Literal(isolate, "v8_version", NewStringType::kInternalized),
+				  v8::String::NewFromUtf8Literal(isolate, V8_VERSION_STRING));
 
-		templ->Set(String::NewFromUtf8Literal(isolate, "plv8", NewStringType::kInternalized), plv8);
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "plv8", NewStringType::kInternalized), plv8);
 	}
 	return Local<ObjectTemplate>::New(isolate, global);
 }
@@ -2351,7 +2351,7 @@ void
 js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Message> message) noexcept
 {
 	HandleScope			handle_scope(isolate);
-	String::Utf8Value	err_message(isolate, exception);
+	v8::String::Utf8Value	err_message(isolate, exception);
 	Local<Context>      context = isolate->GetCurrentContext();
 
 	try
@@ -2370,7 +2370,7 @@ js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Messa
             {
                 v8::Local<v8::Value> errCode;
                 if (err->Get(context,
-                             String::NewFromUtf8Literal(isolate, "code")).ToLocal(&errCode))
+                             v8::String::NewFromUtf8Literal(isolate, "code")).ToLocal(&errCode))
                 {
                     if (!errCode->IsUndefined() && !errCode->IsNull())
                     {
@@ -2381,7 +2381,7 @@ js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Messa
 
                 v8::Local<v8::Value> errDetail;
                 if (err->Get(context,
-                             String::NewFromUtf8Literal(isolate, "detail")).ToLocal(&errDetail))
+                             v8::String::NewFromUtf8Literal(isolate, "detail")).ToLocal(&errDetail))
                 {
                     if (!errDetail->IsUndefined() && !errDetail->IsNull())
                     {
@@ -2393,7 +2393,7 @@ js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Messa
 
                 v8::Local<v8::Value> errHint;
                 if (err->Get(context,
-                             String::NewFromUtf8Literal(isolate, "hint")).ToLocal(&errHint))
+                             v8::String::NewFromUtf8Literal(isolate, "hint")).ToLocal(&errHint))
                 {
                     if (!errHint->IsUndefined() && !errHint->IsNull())
                     {
@@ -2404,7 +2404,7 @@ js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Messa
                 }
 
                 v8::Local<v8::Value> errContext;
-                if (err->Get(context, String::NewFromUtf8Literal(isolate, "context")).ToLocal(&errContext))
+                if (err->Get(context, v8::String::NewFromUtf8Literal(isolate, "context")).ToLocal(&errContext))
                     if (!errContext->IsUndefined() && !errContext->IsNull())
                     {
                         CString str_context(errContext);
@@ -2450,7 +2450,7 @@ js_error::error_object()
 	 */
 	if (strstr(msg, "Error: ") == msg)
 		msg += 7;
-	Local<String> message = ToString(msg);
+	Local<v8::String> message = ToString(msg);
 	return Exception::Error(message);
 }
 

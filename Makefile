@@ -52,6 +52,10 @@ all: v8
 # For some reason, this solves parallel make dependency.
 plv8_config.h plv8.so: v8
 
+ifdef DOCKER
+v8:
+	make -f Makefiles/Makefile.docker v8
+else
 ifeq ($(PLATFORM),linux)
 v8:
 	make -f Makefiles/Makefile.linux v8
@@ -61,7 +65,7 @@ ifeq ($(PLATFORM),macos)
 v8:
 	make -f Makefiles/Makefile.macos v8
 endif
-
+endif
 
 # enable direct jsonb conversion by default
 CCFLAGS += -DJSONB_DIRECT_CONVERSION

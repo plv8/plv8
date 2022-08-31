@@ -2,7 +2,7 @@ FROM postgres:14.5-bullseye as builder
 
 RUN set -ex \
   && apt-get update \
-  && apt-get install -y build-essential curl python3 ninja-build git wget postgresql-server-dev-14 libtinfo5 pkg-config clang \
+  && apt-get install -y build-essential curl python3 ninja-build git wget postgresql-server-dev-14 libtinfo5 pkg-config clang binutils \
   && git clone https://github.com/plv8/plv8 \
   && cd plv8 \
   && git checkout r3.1 \

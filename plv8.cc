@@ -1903,7 +1903,7 @@ GetPlv8Context() {
 	}
 	if (!my_context)
 	{
-		my_context = (plv8_context *) MemoryContextAlloc(TopMemoryContext,
+		my_context = (plv8_context *) MemoryContextAllocZero(TopMemoryContext,
 														 sizeof(plv8_context));
 		my_context->is_dead = false;
 		my_context->interrupted = false;

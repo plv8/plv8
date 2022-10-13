@@ -20,6 +20,7 @@ OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8-$(PLV8_VERSION)
 EXTENSION = plv8
 PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql $(wildcard upgrade/*.sql)
+USE_SYSTEM_V8 = 0
 
 
 # Platform detection
@@ -41,6 +42,7 @@ PGXS := $(shell $(PG_CONFIG) --pgxs)
 PG_VERSION_NUM := $(shell cat `$(PG_CONFIG) --includedir-server`/pg_config*.h \
 		   | perl -ne 'print $$1 and exit if /PG_VERSION_NUM\s+(\d+)/')
 
+ifeq ($(USE_SYSTEM_V8),0)
 AUTOV8_DIR = build/v8
 AUTOV8_OUT = build/v8/out.gn/obj
 AUTOV8_STATIC_LIBS = -lv8_libplatform -lv8_libbase
@@ -67,22 +69,6 @@ v8:
 endif
 endif
 
-# enable direct jsonb conversion by default
-CCFLAGS += -DJSONB_DIRECT_CONVERSION
-
-CCFLAGS += -DV8_COMPRESS_POINTERS=1 -DV8_31BIT_SMIS_ON_64BIT_ARCH=1
-
-CCFLAGS += -I$(AUTOV8_DIR)/include -I$(AUTOV8_DIR)
-
-ifdef EXECUTION_TIMEOUT
-	CCFLAGS += -DEXECUTION_TIMEOUT
-endif
-
-ifdef BIGINT_GRACEFUL
-	CCFLAGS += -DBIGINT_GRACEFUL
-endif
-
-
 # We're gonna build static link.  Rip it out after include Makefile
 SHLIB_LINK := $(filter-out -lv8, $(SHLIB_LINK))
 
@@ -101,6 +87,24 @@ else
 		SHLIB_LINK += -lrt -std=c++14 
 	endif
 endif
+endif
+
+
+# enable direct jsonb conversion by default
+CCFLAGS += -DJSONB_DIRECT_CONVERSION
+
+CCFLAGS += -DV8_COMPRESS_POINTERS=1 -DV8_31BIT_SMIS_ON_64BIT_ARCH=1
+
+CCFLAGS += -I$(AUTOV8_DIR)/include -I$(AUTOV8_DIR)
+
+ifdef EXECUTION_TIMEOUT
+	CCFLAGS += -DEXECUTION_TIMEOUT
+endif
+
+ifdef BIGINT_GRACEFUL
+	CCFLAGS += -DBIGINT_GRACEFUL
+endif
+
 
 DATA = $(PLV8_DATA)
 ifndef DISABLE_DIALECT

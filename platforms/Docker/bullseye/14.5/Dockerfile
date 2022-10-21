@@ -6,6 +6,7 @@ RUN set -ex \
   && git clone https://github.com/plv8/plv8 \
   && cd plv8 \
   && git checkout r3.1 \
+  && make DOCKER=1 generate_upgrades \
   && make DOCKER=1 install \
   && strip /usr/lib/postgresql/14/lib/plv8-3.1.4.so
 

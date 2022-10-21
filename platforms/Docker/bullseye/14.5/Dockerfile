@@ -13,10 +13,11 @@ RUN set -ex \
 FROM postgres:14.5-bullseye
 
 COPY --from=builder /usr/lib/postgresql/14/lib/plv8* /usr/lib/postgresql/14/lib/
+COPY --from=builder /usr/lib/postgresql/14/lib/bitcode/plv8-3.1.4.index.bc /usr/lib/postgresql/14/lib/bitcode/
+COPY --from=builder /usr/lib/postgresql/14/lib/bitcode/plv8-3.1.4/* /usr/lib/postgresql/14/lib/bitcode/plv8-3.1.4/
 COPY --from=builder /usr/share/postgresql/14/extension/plv8* /usr/share/postgresql/14/extension/
 COPY --from=builder /usr/share/postgresql/14/extension/plls* /usr/share/postgresql/14/extension/
 COPY --from=builder /usr/share/postgresql/14/extension/plcoffee* /usr/share/postgresql/14/extension/
-COPY --from=builder /usr/lib/postgresql/14/lib/bitcode/plv8* /usr/lib/postgresql/14/bitcode/
 
 
 RUN mkdir -p /var/log/postgres \

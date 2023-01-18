@@ -1,9 +1,9 @@
 CREATE SCHEMA plv8;
-CREATE FUNCTION valid_json(json text) RETURNS boolean
+CREATE FUNCTION valid_json(js text) RETURNS boolean
 LANGUAGE plv8 IMMUTABLE STRICT
 AS $$
   try {
-    JSON.parse(json);
+    JSON.parse(js);
     return true;
   } catch(e) {
     return false;

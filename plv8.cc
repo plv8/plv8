@@ -445,10 +445,10 @@ _PG_init(void)
 		v8_platform = platform::NewDefaultPlatform();
 	}
 	V8::InitializePlatform(v8_platform.get());
-	V8::Initialize();
 	if (plv8_v8_flags != NULL) {
 		V8::SetFlagsFromString(plv8_v8_flags, strlen(plv8_v8_flags));
 	}
+	V8::Initialize();
 }
 
 static void

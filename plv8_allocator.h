@@ -12,11 +12,13 @@ private:
 	size_t heap_size;
 	size_t next_size;
 	size_t allocated;
+	v8::ArrayBuffer::Allocator* allocator;
 
 	bool check(size_t length);
 
 public:
 	explicit ArrayAllocator(size_t limit);
+	~ArrayAllocator();
 	void* Allocate(size_t length) final;
 	void* AllocateUninitialized(size_t length) final;
 	void Free(void* data, size_t length) final;

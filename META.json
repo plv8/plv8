@@ -2,7 +2,7 @@
     "name": "plv8",
     "abstract": "A procedural language in JavaScript powered by V8",
     "description": "plv8 is a trusted procedural language that is safe to use, fast to run and easy to develop.",
-    "version": "3.1.4",
+    "version": "3.1.5",
     "maintainer": [
         "Jerry Sievert <code@legitimatesounding.com>"
     ],
@@ -22,23 +22,23 @@
     },
     "provides": {
         "plv8": {
-            "file": "plv8--3.1.4.sql",
+            "file": "plv8--3.1.5.sql",
             "docfile": "docs/PGXN.md",
-            "version": "3.1.4",
+            "version": "3.1.5",
             "abstract": "A procedural language in JavaScript"
-         },
+        },
         "plcoffee": {
-            "file": "plcoffee--3.1.4.sql",
+            "file": "plcoffee--3.1.5.sql",
             "docfile": "docs/PGXN.md",
-            "version": "3.1.4",
+            "version": "3.1.5",
             "abstract": "A procedural language in CoffeeScript"
-         },
+        },
         "plls": {
-            "file": "plls--3.1.4.sql",
+            "file": "plls--3.1.5.sql",
             "docfile": "docs/PGXN.md",
-            "version": "3.1.4",
+            "version": "3.1.5",
             "abstract": "A procedural language in LiveScript"
-         }
+        }
     },
     "resources": {
         "homepage": "https://plv8.github.io/",
@@ -46,19 +46,19 @@
             "web": "https://github.com/plv8/plv8/issues"
         },
         "repository": {
-            "url":  "https://github.com/plv8/plv8",
-            "web":  "https://github.com/plv8/plv8.git",
+            "url": "https://github.com/plv8/plv8",
+            "web": "https://github.com/plv8/plv8.git",
             "type": "git"
         }
     },
     "meta-spec": {
-       "version": "1.0.0",
-       "url": "http://pgxn.org/meta/spec.txt"
+        "version": "1.0.0",
+        "url": "http://pgxn.org/meta/spec.txt"
     },
     "tags": [
-       "PL",
-       "JavaScript",
-       "v8",
-       "plv8"
+        "PL",
+        "JavaScript",
+        "v8",
+        "plv8"
     ]
 }

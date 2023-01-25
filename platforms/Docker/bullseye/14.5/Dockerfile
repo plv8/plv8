@@ -1,6 +1,6 @@
 FROM postgres:14.5-bullseye as builder
 
-ENV PLV8_VERSION=3.1.4
+ENV PLV8_VERSION=3.1.5
 ENV PLV8_BRANCH=r3.1
 RUN set -ex \
   && apt-get update \
@@ -15,7 +15,7 @@ RUN set -ex \
 
 FROM postgres:14.5-bullseye
 
-ENV PLV8_VERSION=3.1.4
+ENV PLV8_VERSION=3.1.5
 COPY --from=builder /usr/lib/postgresql/${PG_MAJOR}/lib/plv8* /usr/lib/postgresql/${PG_MAJOR}/lib/
 COPY --from=builder /usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/plv8-${PLV8_VERSION}.index.bc /usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/
 COPY --from=builder /usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/plv8-${PLV8_VERSION}/* /usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/plv8-${PLV8_VERSION}/

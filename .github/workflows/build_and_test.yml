@@ -1,6 +1,5 @@
 name: plv8 Build and Test
 on:
-  push:
   pull_request:
 jobs:
   build-and-test:
@@ -35,7 +34,7 @@ jobs:
           popd
 
       - name: Checkout plv8 extension code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v3
         with:
           path: plv8
 

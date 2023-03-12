@@ -1,0 +1,54 @@
+name: plv8 Build and Test
+on:
+  push:
+  pull_request:
+jobs:
+  build-and-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        version: [REL_13_STABLE, REL_14_STABLE, REL_15_STABLE]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Test details
+        run: echo Build and test plv8 on ${{ matrix.os }} with PostgreSQL ${{ matrix.version }} branch
+
+      - name: Checkout and build PostgreSQL code
+        run: |
+          sudo apt-get update -qq
+          sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys E298A3A825C0D65DFD57CBB651716619E084DAB9
+          sudo apt-get install -y build-essential libreadline-dev zlib1g-dev flex bison libxml2-dev libxslt-dev libssl-dev libxml2-utils xsltproc ccache pkg-config libc++-dev libc++abi-dev libglib2.0-dev libtinfo5 ninja-build
+          rm -rf postgres
+          git clone --branch ${{ matrix.version }} https://github.com/postgres/postgres.git
+          pushd postgres
+          git branch
+          ./configure --prefix=$PWD/inst/  --enable-cassert --enable-debug --with-openssl
+          make -j4 install
+
+      - name: Start Postgres
+        run: |
+          pushd postgres
+          cd inst/bin
+          ./initdb -D data
+          ./pg_ctl -D data -l logfile start
+          popd
+
+      - name: Checkout plv8 extension code
+        uses: actions/checkout@v2
+        with:
+          path: plv8
+
+      - name: Build and test plv8 extension
+        id: regression-tests
+        run: |
+          export PATH="${PWD}/postgres/inst/bin:$PATH"
+          pushd plv8
+          make install
+          make installcheck
+          popd
+
+      - name: Print regression.diffs if regression tests failed
+        if: failure() && steps.regression-tests.outcome != 'success'
+        run: |
+          cat regression.diffs

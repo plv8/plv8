@@ -24,8 +24,8 @@ build/v8: build/gn/out/gn
 	@echo "Downloading v8 source"
 	@git clone -q https://github.com/v8/v8 --branch 9.7.37 --single-branch build/v8
 	@cd build/v8 && git checkout -q 9.7.37
-	@echo "Patching v8"
-	@cd build/v8 && (git apply ../../patches/*.patch || true)
+	@echo "Patching v8 code"
+	@cd build/v8 && (git apply ../../patches/code/*.patch || true)
 	@echo "Downloading up third party sources"
 	@git clone -q https://chromium.googlesource.com/chromium/src/base/trace_event/common.git build/v8/base/trace_event/common
 	@cd build/v8/base/trace_event/common && git checkout -q 3da1e2fcf66acd5c7194497b4285ac163f32e239
@@ -46,6 +46,8 @@ build/v8: build/gn/out/gn
 	@cd build/v8 && python3 build/linux/sysroot_scripts/install-sysroot.py --arch=$(ARCH)
 	@echo "Generating v8 configuration"
 	@cd build/v8 && ../gn/out/gn gen out.gn --args="$(GN_ARGS)"
+	@echo "Patching v8 build configuration"
+	@cd build/v8 && (git apply ../../patches/build/*.patch || true)
 	@echo "Building v8"
 	@cd build/v8 && ninja -C ./out.gn v8_monolith
 

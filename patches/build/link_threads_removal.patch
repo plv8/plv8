@@ -1,0 +1,24 @@
+Description: removing linking threads options from ldflags variable.
+Using threads may cause a race condition and linking failure.
+
+diff --git a/build/config/compiler/BUILD.gn b/build/config/compiler/BUILD.gn
+index 0bb155a83..3a05bfac3 100644
+--- a/build/config/compiler/BUILD.gn
++++ b/build/config/compiler/BUILD.gn
+@@ -466,16 +466,6 @@ config("compiler") {
+       if (gold_path != "") {
+         ldflags += [ "-B$gold_path" ]
+       }
+-
+-      ldflags += [
+-        # Experimentation found that using four linking threads
+-        # saved ~20% of link time.
+-        # https://groups.google.com/a/chromium.org/group/chromium-dev/browse_thread/thread/281527606915bb36
+-        # Only apply this to the target linker, since the host
+-        # linker might not be gold, but isn't used much anyway.
+-        "-Wl,--threads",
+-        "-Wl,--thread-count=4",
+-      ]
+     }
+ 
+     # TODO(thestig): Make this flag work with GN.

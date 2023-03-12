@@ -8,6 +8,11 @@ ifeq ($(ARCH),x86_64)
 	ARCH := x64
 endif
 
+# Use to get one commit by hash, as opposed to a branch or tag name
+clone_hash = mkdir -p $(1) && cd $(1) && git init -q . && git remote add origin $(2) && git fetch -q --depth 1 origin $(3) && git reset -q --hard $(3)
+# Use to go to a specific commit by hash while still getting the entire repo, in case a build process operates on the git history
+clone_all_to_hash = mkdir -p $(1) && cd $(1) && git clone -q $(2) . && git checkout -q $(3)
+
 GN_ARGS = is_component_build=false v8_use_external_startup_data=false v8_enable_i18n_support=false is_clang=false use_gold=false use_custom_libcxx=false treat_warnings_as_errors=false v8_monolithic=true
 
 
@@ -15,34 +20,26 @@ build/gn/out/gn:
 	@echo "Setting up build directory"
 	@mkdir -p build
 	@echo "Downloading gn source"
-	@git clone -q https://gn.googlesource.com/gn.git build/gn
-	@cd build/gn && git checkout -q eea3906f0e2a8d3622080127d2005ff214d51383
+	@$(call clone_all_to_hash,build/gn,https://gn.googlesource.com/gn.git,eea3906f0e2a8d3622080127d2005ff214d51383)
 	@echo "Building gn"
 	@cd build/gn && python3 build/gen.py --no-static-libstdc++ && ninja -C out/ gn
 
 build/v8: build/gn/out/gn
 	@echo "Downloading v8 source"
-	@git clone -q https://github.com/v8/v8 --branch 9.7.37 --single-branch build/v8
-	@cd build/v8 && git checkout -q 9.7.37
+	@git clone -q https://github.com/v8/v8 --branch 9.7.37 --single-branch --depth 1 build/v8
 	@echo "Patching v8 code"
 	@cd build/v8 && (git apply ../../patches/code/*.patch || true)
 	@echo "Downloading up third party sources"
-	@git clone -q https://chromium.googlesource.com/chromium/src/base/trace_event/common.git build/v8/base/trace_event/common
-	@cd build/v8/base/trace_event/common && git checkout -q 3da1e2fcf66acd5c7194497b4285ac163f32e239
-	@git clone -q https://chromium.googlesource.com/chromium/src/build.git build/v8/build
-	@cd build/v8/build && git checkout -q bbf7f0ed65548c4df862d2a2748e3a9b908a3217
-	@git clone -q https://chromium.googlesource.com/external/github.com/google/googletest.git build/v8/third_party/googletest/src
-	@cd build/v8/third_party/googletest/src && git checkout -q 47f819c3ca54fb602f432904443e00a0a1fe2f42
-	@git clone -q https://chromium.googlesource.com/chromium/deps/icu.git build/v8/third_party/icu
-	@cd build/v8/third_party/icu && git checkout -q 75e34bcccea0be165c31fdb278b3712c516c5876
-	@git clone -q https://chromium.googlesource.com/chromium/src/third_party/jinja2.git build/v8/third_party/jinja2
-	@cd build/v8/third_party/jinja2 && git checkout -q ee69aa00ee8536f61db6a451f3858745cf587de6
-	@git clone -q https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git build/v8/third_party/markupsafe
-	@cd build/v8/third_party/markupsafe && git checkout -q 1b882ef6372b58bfd55a3285f37ed801be9137cd
-	@git clone -q https://chromium.googlesource.com/chromium/src/third_party/zlib.git build/v8/third_party/zlib
-	@cd build/v8/third_party/zlib && git checkout -q 563140dd9c24f84bf40919196e9e7666d351cc0d
+	@$(call clone_hash,build/v8/base/trace_event/common,https://chromium.googlesource.com/chromium/src/base/trace_event/common.git,3da1e2fcf66acd5c7194497b4285ac163f32e239)
+	@$(call clone_hash,build/v8/build,https://chromium.googlesource.com/chromium/src/build.git,bbf7f0ed65548c4df862d2a2748e3a9b908a3217)
+	@$(call clone_hash,build/v8/third_party/googletest/src,https://chromium.googlesource.com/external/github.com/google/googletest.git,47f819c3ca54fb602f432904443e00a0a1fe2f42)
+	@$(call clone_hash,build/v8/third_party/icu,https://chromium.googlesource.com/chromium/deps/icu.git,75e34bcccea0be165c31fdb278b3712c516c5876)
+	@$(call clone_hash,build/v8/third_party/jinja2,https://chromium.googlesource.com/chromium/src/third_party/jinja2.git,ee69aa00ee8536f61db6a451f3858745cf587de6)
+	@$(call clone_hash,build/v8/third_party/markupsafe,https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git,1b882ef6372b58bfd55a3285f37ed801be9137cd)
+	@$(call clone_hash,build/v8/third_party/zlib,https://chromium.googlesource.com/chromium/src/third_party/zlib.git,563140dd9c24f84bf40919196e9e7666d351cc0d)
 	@cp Makefiles/gclient_args.gni build/v8/build/config/gclient_args.gni
 	@echo "Setting up sysroot"
+	@cd build/v8/build && (git apply ../../../patches/sysroot/*.patch || true)
 	@cd build/v8 && python3 build/linux/sysroot_scripts/install-sysroot.py --arch=$(ARCH)
 	@echo "Generating v8 configuration"
 	@cd build/v8 && ../gn/out/gn gen out.gn --args="$(GN_ARGS)"

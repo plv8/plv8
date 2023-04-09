@@ -4,17 +4,17 @@
 
 Building PLV8 for MacOS or Linux has some specific requirements:
 
-* Git
-* g++ or clang++
-* Python 2 (for v8)
-* pkg-config (linux only for v8)
-* libc++-dev (linux only)
-* libc++abi-dev (linux only)
-* libglib2.0-dev (ubuntu 20.04)
-* libtinfo5 (ubuntu 20.04)
-* ninja-build (ubuntu arm64)
+- Git
+- g++ or clang++
+- Python 2 (for v8)
+- pkg-config (linux only for v8)
+- libc++-dev (linux only)
+- libc++abi-dev (linux only)
+- libglib2.0-dev (ubuntu 20.04)
+- libtinfo5 (ubuntu 20.04)
+- ninja-build (ubuntu arm64)
 
-Note that some distributions of Linux may have additional requirements.  This
+Note that some distributions of Linux may have additional requirements. This
 is not meant to be an exhaustive list.
 
 ### Downloading Source
@@ -69,8 +69,8 @@ $ make USE_ICU=1
 If you build with ICU, you will need to install the correct ICU file, located in
 `contrib/icu`.
 
-* icudtl.dat - Little Endian architectures (Intel)
-* icudtb.dat - Big Endian architectures (Sparc)
+- icudtl.dat - Little Endian architectures (Intel)
+- icudtb.dat - Big Endian architectures (Sparc)
 
 For ARM, you will need to figure out which Endianess your hardware and OS is
 configured for.
@@ -93,7 +93,6 @@ This might require `root` access, depending on how PostgreSQL is installed:
 $ sudo make install
 ```
 
-
 ### Testing
 
 Once PLV8 is installed, you can verify the install by running:
@@ -104,27 +103,29 @@ $ make installcheck
 
 ## Building for Windows
 
+It is currently unknown whether Plv8 will build correctly with Windows. If you are willing to try, these were the last-known build instructions:
+
 Building PLV8 for Windows has some specific requirements:
 
-* Git
-* MSVC 2013, 2015, or 2017
-* CMake - available as part of MSVC
-* Postgres 9.5+ (it will work in 9.3 and 9.4, but will involve extra work)
+- Git
+- MSVC 2013, 2015, or 2017
+- CMake - available as part of MSVC
+- Postgres 9.5+ (it will work in 9.3 and 9.4, but will involve extra work)
 
 Additional requirements to build V8:
 
-* Python 2
-* unzip.exe
-* patch.exe - part of the Git install
+- Python 2
+- unzip.exe
+- patch.exe - part of the Git install
 
 ### Patching Postgres
 
 Currently, Postgres requires a patch of one or more `include` files in order to
 compile PLV8.
 
-First, find the directory that contains the `include` files.  This will typically
+First, find the directory that contains the `include` files. This will typically
 be inside something like `C:\Program Files\PostgreSQL\10\include`, where the `10`
-is your version number.  Inside of the `include` directory:
+is your version number. Inside of the `include` directory:
 
 ```
 PS> cd server\port\atomics
@@ -134,7 +135,7 @@ PS> patch < generic-msvc.h.patch
 
 ### Bootstrapping
 
-Bootstrapping will the build environment, download, and compile `v8`.  Watch for
+Bootstrapping will the build environment, download, and compile `v8`. Watch for
 any errors:
 
 ```
@@ -143,17 +144,17 @@ PS> bootstrap.bat
 
 ### Configuring
 
-Once `v8` has been built, you can configure your build environment.  This involves
+Once `v8` has been built, you can configure your build environment. This involves
 specifying the path to your Postgres install, the version of Postgres you are
-running, as well as the build target.  Build targets will typically be one of the
+running, as well as the build target. Build targets will typically be one of the
 following:
 
-* `Visual Studio 15 2017` - 32 bit, MSVC 2017
-* `Visual Studio 15 2017 Win64` - 64 bit, MSVC 2017
-* `Visual Studio 14 2015` - 32 bit, MSVC 2015
-* `Visual Studio 14 2015 Win64` - 64 bit, MSVC 2015
-* `Visual Studio 12 2013` - 32 bit, MSVC 2013
-* `Visual Studio 12 2013 Win64` - 64 bit, MSVC 2013
+- `Visual Studio 15 2017` - 32 bit, MSVC 2017
+- `Visual Studio 15 2017 Win64` - 64 bit, MSVC 2017
+- `Visual Studio 14 2015` - 32 bit, MSVC 2015
+- `Visual Studio 14 2015 Win64` - 64 bit, MSVC 2015
+- `Visual Studio 12 2013` - 32 bit, MSVC 2013
+- `Visual Studio 12 2013 Win64` - 64 bit, MSVC 2013
 
 ```
 PS> cmake . -G "Visual Studio 15 2017 Win64" -DCMAKE_INSTALL_PREFIX="C:\Program Files\PostgreSQL\10" -DPOSTGRESQL_VERSION=10
@@ -171,8 +172,8 @@ This will build and package the extension for installation.
 
 ### Installing
 
-To install, you simply need to `unzip` the file created.  The name will depend
-on the version of PLV8 and the version of Postgres.  An example is
+To install, you simply need to `unzip` the file created. The name will depend
+on the version of PLV8 and the version of Postgres. An example is
 `plv8-3.0.0-postgresql-10-x64.zip`.
 
 # Build FAQ
@@ -180,6 +181,7 @@ on the version of PLV8 and the version of Postgres.  An example is
 ## pg_config build error / mb.py returns non-zero exit status
 
 If you get this error, you need to install pkg-config (e.g. on Ubuntu, apt-get install pkg-config)
+
 ```
 Traceback (most recent call last):
   File "tools/dev/v8gen.py", line 304, in <module>

@@ -1,21 +1,27 @@
-FROM postgres:14.5-bullseye as builder
+ARG PG_CONTAINER_VERSION=14.5
+FROM docker.io/library/postgres:${PG_CONTAINER_VERSION}-bullseye as builder
 
-ENV PLV8_VERSION=3.1.6
-ENV PLV8_BRANCH=r3.1
+ARG DEBIAN_FRONTEND=noninteractive
 RUN set -ex \
   && apt-get update \
   && apt-get install -y build-essential curl python3 ninja-build git wget postgresql-server-dev-${PG_MAJOR} libtinfo5 pkg-config clang binutils \
-  && git clone https://github.com/plv8/plv8 \
+  && apt-get clean
+ARG PLV8_BRANCH=r3.1
+ENV PLV8_BRANCH=${PLV8_BRANCH}
+ARG PLV8_VERSION=3.1.6
+ENV PLV8_VERSION=${PLV8_VERSION}
+RUN set -ex \
+  && git clone --branch ${PLV8_BRANCH} --single-branch --depth 1 https://github.com/plv8/plv8 \
   && cd plv8 \
-  && git checkout ${PLV8_BRANCH} \
   && make DOCKER=1 generate_upgrades \
   && make DOCKER=1 install \
   && strip /usr/lib/postgresql/${PG_MAJOR}/lib/plv8-${PLV8_VERSION}.so
 
 
-FROM postgres:14.5-bullseye
+FROM docker.io/library/postgres:${PG_CONTAINER_VERSION}-bullseye
 
-ENV PLV8_VERSION=3.1.6
+ARG PLV8_VERSION=3.1.6
+ENV PLV8_VERSION=${PLV8_VERSION}
 COPY --from=builder /usr/lib/postgresql/${PG_MAJOR}/lib/plv8* /usr/lib/postgresql/${PG_MAJOR}/lib/
 COPY --from=builder /usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/plv8-${PLV8_VERSION}.index.bc /usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/
 COPY --from=builder /usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/plv8-${PLV8_VERSION}/* /usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/plv8-${PLV8_VERSION}/

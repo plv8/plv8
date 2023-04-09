@@ -15,33 +15,54 @@ build/gn/out/gn:
 	@echo "Setting up build directory"
 	@mkdir -p build
 	@echo "Downloading gn source"
-	@git clone -q https://gn.googlesource.com/gn.git build/gn
-	@cd build/gn && git checkout -q eea3906f0e2a8d3622080127d2005ff214d51383
+	@mkdir -p build/gn && cd build/gn && git clone -q https://gn.googlesource.com/gn.git . && git checkout -q eea3906f0e2a8d3622080127d2005ff214d51383
 	@echo "Building gn"
 	@cd build/gn && python3 build/gen.py --no-static-libstdc++ && ninja -C out/ gn
 
 build/v8: build/gn/out/gn
 	@echo "Downloading v8 source"
-	@git clone -q https://github.com/v8/v8 --branch 9.7.37 --single-branch build/v8
-	@cd build/v8 && git checkout -q 9.7.37
+	@git clone -q https://github.com/v8/v8 --branch 9.7.37 --single-branch --depth 1 build/v8
 	@echo "Patching v8 code"
 	@cd build/v8 && (git apply ../../patches/code/*.patch || true)
 	@echo "Downloading up third party sources"
-	@git clone -q https://chromium.googlesource.com/chromium/src/base/trace_event/common.git build/v8/base/trace_event/common
-	@cd build/v8/base/trace_event/common && git checkout -q 3da1e2fcf66acd5c7194497b4285ac163f32e239
-	@git clone -q https://chromium.googlesource.com/chromium/src/build.git build/v8/build
-	@cd build/v8/build && git checkout -q bbf7f0ed65548c4df862d2a2748e3a9b908a3217
-	@git clone -q https://chromium.googlesource.com/external/github.com/google/googletest.git build/v8/third_party/googletest/src
-	@cd build/v8/third_party/googletest/src && git checkout -q 47f819c3ca54fb602f432904443e00a0a1fe2f42
-	@git clone -q https://chromium.googlesource.com/chromium/deps/icu.git build/v8/third_party/icu
-	@cd build/v8/third_party/icu && git checkout -q 75e34bcccea0be165c31fdb278b3712c516c5876
-	@git clone -q https://chromium.googlesource.com/chromium/src/third_party/jinja2.git build/v8/third_party/jinja2
-	@cd build/v8/third_party/jinja2 && git checkout -q ee69aa00ee8536f61db6a451f3858745cf587de6
-	@git clone -q https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git build/v8/third_party/markupsafe
-	@cd build/v8/third_party/markupsafe && git checkout -q 1b882ef6372b58bfd55a3285f37ed801be9137cd
-	@git clone -q https://chromium.googlesource.com/chromium/src/third_party/zlib.git build/v8/third_party/zlib
-	@cd build/v8/third_party/zlib && git checkout -q 563140dd9c24f84bf40919196e9e7666d351cc0d
+	@mkdir -p build/v8/base/trace_event/common
+	@cd build/v8/base/trace_event/common && git init -q .
+	@cd build/v8/base/trace_event/common && git remote add origin https://chromium.googlesource.com/chromium/src/base/trace_event/common.git
+	@cd build/v8/base/trace_event/common && git fetch -q --depth 1 origin 3da1e2fcf66acd5c7194497b4285ac163f32e239
+	@cd build/v8/base/trace_event/common && git reset -q --hard 3da1e2fcf66acd5c7194497b4285ac163f32e239
+	@mkdir -p build/v8/build
+	@cd build/v8/build && git init -q .
+	@cd build/v8/build && git remote add origin https://chromium.googlesource.com/chromium/src/build.git
+	@cd build/v8/build && git fetch -q --depth 1 origin bbf7f0ed65548c4df862d2a2748e3a9b908a3217
+	@cd build/v8/build && git reset -q --hard bbf7f0ed65548c4df862d2a2748e3a9b908a3217
+	@mkdir -p build/v8/third_party/googletest/src
+	@cd build/v8/third_party/googletest/src && git init -q .
+	@cd build/v8/third_party/googletest/src && git remote add origin https://chromium.googlesource.com/external/github.com/google/googletest.git
+	@cd build/v8/third_party/googletest/src && git fetch -q --depth 1 origin 47f819c3ca54fb602f432904443e00a0a1fe2f42
+	@cd build/v8/third_party/googletest/src && git reset -q --hard 47f819c3ca54fb602f432904443e00a0a1fe2f42
+	@mkdir -p build/v8/third_party/icu
+	@cd build/v8/third_party/icu && git init -q .
+	@cd build/v8/third_party/icu && git remote add origin https://chromium.googlesource.com/chromium/deps/icu.git
+	@cd build/v8/third_party/icu && git fetch -q --depth 1 origin 75e34bcccea0be165c31fdb278b3712c516c5876
+	@cd build/v8/third_party/icu && git reset -q --hard 75e34bcccea0be165c31fdb278b3712c516c5876
+	@mkdir -p build/v8/third_party/jinja2
+	@cd build/v8/third_party/jinja2 && git init -q .
+	@cd build/v8/third_party/jinja2 && git remote add origin https://chromium.googlesource.com/chromium/src/third_party/jinja2.git
+	@cd build/v8/third_party/jinja2 && git fetch -q --depth 1 origin ee69aa00ee8536f61db6a451f3858745cf587de6
+	@cd build/v8/third_party/jinja2 && git reset -q --hard ee69aa00ee8536f61db6a451f3858745cf587de6
+	@mkdir -p build/v8/third_party/markupsafe
+	@cd build/v8/third_party/markupsafe && git init -q .
+	@cd build/v8/third_party/markupsafe && git remote add origin https://chromium.googlesource.com/chromium/src/third_party/markupsafe.git
+	@cd build/v8/third_party/markupsafe && git fetch -q --depth 1 origin 1b882ef6372b58bfd55a3285f37ed801be9137cd
+	@cd build/v8/third_party/markupsafe && git reset -q --hard 1b882ef6372b58bfd55a3285f37ed801be9137cd
+	@mkdir -p build/v8/third_party/zlib
+	@cd build/v8/third_party/zlib && git init -q .
+	@cd build/v8/third_party/zlib && git remote add origin https://chromium.googlesource.com/chromium/src/third_party/zlib.git
+	@cd build/v8/third_party/zlib && git fetch -q --depth 1 origin 563140dd9c24f84bf40919196e9e7666d351cc0d
+	@cd build/v8/third_party/zlib && git reset -q --hard 563140dd9c24f84bf40919196e9e7666d351cc0d
 	@cp Makefiles/gclient_args.gni build/v8/build/config/gclient_args.gni
+	@echo "Patching sysroot scripts"
+	@cd build/v8/build && (git apply ../../../patches/sysroot/*.patch || true)
 	@echo "Setting up sysroot"
 	@cd build/v8 && python3 build/linux/sysroot_scripts/install-sysroot.py --arch=$(ARCH)
 	@echo "Generating v8 configuration"

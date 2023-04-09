@@ -624,7 +624,6 @@ plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 	PG_END_TRY();
 
 	subtran.exit(true);
-
 	args.GetReturnValue().Set(SPIResultToValue(status));
 }
 
@@ -944,6 +943,11 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 	Isolate*			isolate = args.GetIsolate();
 	Handle<Context> context = isolate->GetCurrentContext();
 	Handle<v8::Object>	self = args.This();
+
+	if (self->InternalFieldCount() == 0) {
+		throw js_error("cannot find cursor");
+	}
+
 	CString				cname(self->GetInternalField(0));
 	Portal				cursor = SPI_cursor_find(cname);
 	int					nfetch = 1;

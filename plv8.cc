@@ -793,9 +793,17 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 #endif
 
 	// set up the signal handlers
-	int_handler = (void *) signal(SIGINT, signal_handler);
-	term_handler = (void *) signal(SIGTERM, signal_handler);
-	abt_handler = (void *) signal(SIGABRT, signal_handler);
+	if (int_handler == NULL) {
+		int_handler = (void *) signal(SIGINT, signal_handler);
+	}
+
+	if (term_handler == NULL) {
+		term_handler = (void *) signal(SIGTERM, signal_handler);
+	}
+
+	if (abt_handler == NULL) {
+		abt_handler = (void *) signal(SIGABRT, signal_handler);
+	}
 
 #ifdef EXECUTION_TIMEOUT
 	bool timeout = false;
@@ -1692,8 +1700,13 @@ CompileFunction(
 	v8::ScriptOrigin origin(name);
 
 	// set up the signal handlers
-	int_handler = (void *) signal(SIGINT, signal_handler);
-	term_handler = (void *) signal(SIGTERM, signal_handler);
+	if (int_handler == NULL) {
+		int_handler = (void *) signal(SIGINT, signal_handler);
+	}
+
+	if (term_handler == NULL) {
+		term_handler = (void *) signal(SIGTERM, signal_handler);
+	}
 
 #ifdef EXECUTION_TIMEOUT
 	bool timeout = false;

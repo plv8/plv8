@@ -8,7 +8,7 @@
 # can specify the v8 version by AUTOV8_VERSION, too.
 #-----------------------------------------------------------------------------#
 
-PLV8_VERSION = 3.1.5
+PLV8_VERSION = 3.1.6
 
 # set your custom C++ compler
 CUSTOM_CC = g++
@@ -110,7 +110,7 @@ endif
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 plv8-errors inline json startup_pre startup varparam json_conv \
 		  jsonb_conv window guc es6 arraybuffer composites currentresource startup_perms bytea find_function_perms \
-		  memory_limits reset show array_spread 
+		  memory_limits reset show array_spread regression
 ifndef DISABLE_DIALECT
 REGRESS += dialect
 endif

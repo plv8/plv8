@@ -1,5 +1,9 @@
 Revision history for plv8
 
+3.1.6       2023-04-08
+            - fix crash issue on fetch apply
+            - fix interrupt issue
+
 3.1.5       2023-01-24
             - better older version migration support
             - fix postgres 15 naming conflict

@@ -44,4 +44,4 @@ For full documentation, see [https://plv8.github.io/](https://plv8.github.io/).
 
 ## Docker
 
-For preliminary Docker support, see [./platforms/Docker/README.md](README.md)
+For preliminary Docker support, see [./platforms/Docker/README.md](./platforms/Docker/README.md)

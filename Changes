@@ -1,5 +1,9 @@
 Revision history for plv8
 
+3.1.7       2023-06-26
+            - fix byteoffset issue with arraybuffers
+            - support postgres 16 beta
+
 3.1.6       2023-04-08
             - fix crash issue on fetch apply
             - fix interrupt issue

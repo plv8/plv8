@@ -2020,13 +2020,13 @@ GetPlv8Context() {
 						Datum ret = has_function_privilege_id(&fake_fcinfo);
 #else
 						MemSet(&flinfo, 0, sizeof(flinfo));
-				fake_fcinfo->flinfo = &flinfo;
-				flinfo.fn_oid = InvalidOid;
-				flinfo.fn_mcxt = CurrentMemoryContext;
-				fake_fcinfo->nargs = 2;
-				fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
-				fake_fcinfo->args[1].value = CStringGetDatum(arg);
-				Datum ret = has_function_privilege_id(fake_fcinfo);
+						fake_fcinfo->flinfo = &flinfo;
+						flinfo.fn_oid = InvalidOid;
+						flinfo.fn_mcxt = CurrentMemoryContext;
+						fake_fcinfo->nargs = 2;
+						fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
+						fake_fcinfo->args[1].value = PointerGetDatum(arg);
+						Datum ret = has_function_privilege_id(fake_fcinfo);
 #endif
 
 						if (ret == 0) {

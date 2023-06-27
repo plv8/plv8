@@ -658,7 +658,11 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 		int32			typemod;
 
 #if PG_VERSION_NUM >= 90400
+#if PG_VERSION_NUM >= 160000
+		parseTypeString(typestr, &types[i], &typemod, NULL);
+#else
 		parseTypeString(typestr, &types[i], &typemod, false);
+#endif
 #else
 		parseTypeString(typestr, &types[i], &typemod);
 #endif
@@ -1165,24 +1169,24 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 					DirectFunctionCall1(regprocedurein, CStringGetDatum(signature.str())));
 
 #if PG_VERSION_NUM < 120000
-				MemSet(&fake_fcinfo, 0, sizeof(fake_fcinfo));
-				MemSet(&flinfo, 0, sizeof(flinfo));
-				fake_fcinfo.flinfo = &flinfo;
-				flinfo.fn_oid = InvalidOid;
-				flinfo.fn_mcxt = CurrentMemoryContext;
-				fake_fcinfo.nargs = 2;
-				fake_fcinfo.arg[0] = ObjectIdGetDatum(funcoid);
-				fake_fcinfo.arg[1] = CStringGetDatum(arg);
-				Datum ret = has_function_privilege_id(&fake_fcinfo);
+		MemSet(&fake_fcinfo, 0, sizeof(fake_fcinfo));
+		MemSet(&flinfo, 0, sizeof(flinfo));
+		fake_fcinfo.flinfo = &flinfo;
+		flinfo.fn_oid = InvalidOid;
+		flinfo.fn_mcxt = CurrentMemoryContext;
+		fake_fcinfo.nargs = 2;
+		fake_fcinfo.arg[0] = ObjectIdGetDatum(funcoid);
+		fake_fcinfo.arg[1] = CStringGetDatum(arg);
+		Datum ret = has_function_privilege_id(&fake_fcinfo);
 #else
-				MemSet(&flinfo, 0, sizeof(flinfo));
-				fake_fcinfo->flinfo = &flinfo;
-				flinfo.fn_oid = InvalidOid;
-				flinfo.fn_mcxt = CurrentMemoryContext;
-				fake_fcinfo->nargs = 2;
-				fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
-				fake_fcinfo->args[1].value = CStringGetDatum(arg);
-				Datum ret = has_function_privilege_id(fake_fcinfo);
+		MemSet(&flinfo, 0, sizeof(flinfo));
+		fake_fcinfo->flinfo = &flinfo;
+		flinfo.fn_oid = InvalidOid;
+		flinfo.fn_mcxt = CurrentMemoryContext;
+		fake_fcinfo->nargs = 2;
+		fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
+		fake_fcinfo->args[1].value = PointerGetDatum(arg);
+		Datum ret = has_function_privilege_id(fake_fcinfo);
 #endif
 
 		if (ret == 0) {

@@ -711,36 +711,43 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			if (value->IsUint8Array() || value->IsInt8Array()) {
 				v8::Handle<v8::Uint8Array> array = v8::Handle<v8::Uint8Array>::Cast(value);
 				void *data = array->Buffer()->GetBackingStore()->Data();
-				int		len = array->Length();
+				size_t    offset = array->ByteOffset();
+				size_t		len = array->Length();
 				size_t		size = len + VARHDRSZ;
 				void	   *result = (void *) palloc(size);
 
 				SET_VARSIZE(result, size);
-				memcpy(VARDATA(result), data, len);
+				char *local = (char *) data;
+				memcpy(VARDATA(result), &local[offset], len);
 				return PointerGetDatum(result);
 			}
 
 			if (value->IsUint16Array() || value->IsInt16Array()) {
 				v8::Handle<v8::Uint16Array> array = v8::Handle<v8::Uint16Array>::Cast(value);
-				void *data = array->Buffer()->GetBackingStore()->Data();
-				int		len = array->Length();
-				size_t		size = (len * 2) + VARHDRSZ;
+				int *data = (int *) array->Buffer()->GetBackingStore()->Data();
+
+				size_t    offset = array->ByteOffset();
+				size_t    len = array->ByteLength();
+				size_t    size = len + VARHDRSZ;
 				void	   *result = (void *) palloc(size);
 
 				SET_VARSIZE(result, size);
-				memcpy(VARDATA(result), data, len * 2);
+				char *local = (char *) data;
+				memcpy(VARDATA(result), &local[offset], len);
 				return PointerGetDatum(result);
 			}
 
 			if (value->IsUint32Array() || value->IsInt32Array()) {
 				v8::Handle<v8::Uint32Array> array = v8::Handle<v8::Uint32Array>::Cast(value);
 				void *data = array->Buffer()->GetBackingStore()->Data();
-				int		len = array->Length();
-				size_t		size = (len * 4) + VARHDRSZ;
+				size_t    offset = array->ByteOffset();
+				size_t    len = array->ByteLength();
+				size_t    size = len + VARHDRSZ;
 				void	   *result = (void *) palloc(size);
 
 				SET_VARSIZE(result, size);
-				memcpy(VARDATA(result), data, len * 4);
+				char *local = (char *) data;
+				memcpy(VARDATA(result), &local[offset], len);
 				return PointerGetDatum(result);
 			}
 
@@ -772,7 +779,7 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 #if PG_VERSION_NUM < 110000
 			PG_RETURN_JSONB(DatumGetJsonb(obj));
 #else
-			PG_RETURN_JSONB_P(DatumGetJsonbP(obj));
+			PG_RETURN_JSONB_P(DatumGetJsonbP((unsigned long)obj));
 #endif // PG_VERSION_NUM < 110000
 		}
 #else // JSONB_DIRECT_CONVERSION

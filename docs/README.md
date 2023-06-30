@@ -90,11 +90,11 @@ a new JS runtime context is initialized and used separately. This prevents the
 risk of unexpected information leaking.
 
 Each `plv8` function is invoked as if the function is the property of other
-object. This means this in each function is a Javascript `object` that is created
+object. This means `this` in each function is a Javascript `object` that is created
 every time the function is executed in a query. In other words, the life time and
-the visibility of this object in a function is only a series of function calls in
+the visibility of the `this` object in a function is only a series of function calls in
 a query. If you need to share some value among different functions, keep it in the
-global `plv8` object because each function invocation has a different this object.
+global `plv8` object because each function invocation has a different `this` object.
 
 ## Start-up Procedure
 

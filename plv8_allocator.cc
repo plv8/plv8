@@ -7,7 +7,12 @@ size_t operator""_MB( unsigned long long const x ) { return 1024L * 1024L * x; }
 ArrayAllocator::ArrayAllocator(size_t limit) : heap_limit(limit),
 											   heap_size(RECHECK_INCREMENT),
 											   next_size(RECHECK_INCREMENT),
-											   allocated(0) {}
+											   allocated(0),
+												 allocator(v8::ArrayBuffer::Allocator::NewDefaultAllocator()) {}
+
+ArrayAllocator::~ArrayAllocator() {
+	delete this->allocator;
+}
 
 bool ArrayAllocator::check(const size_t length) {
 	if (heap_size + allocated + length > next_size) {
@@ -34,7 +39,7 @@ bool ArrayAllocator::check(const size_t length) {
 void* ArrayAllocator::Allocate(size_t length) {
 	if (check(length)) {
 		allocated += length;
-		return std::calloc(length, 1);
+		return this->allocator->Allocate(length);
 	} else {
 		return nullptr;
 	}
@@ -52,7 +57,7 @@ void* ArrayAllocator::AllocateUninitialized(size_t length) {
 void ArrayAllocator::Free(void* data, size_t length) {
 	allocated -= length;
 	next_size -= length;
-	std::free(data);
+	this->allocator->Free(data, length);
 }
 
 void* ArrayAllocator::Reallocate(void *data, size_t old_length, size_t new_length) {
@@ -62,5 +67,5 @@ void* ArrayAllocator::Reallocate(void *data, size_t old_length, size_t new_lengt
 			return nullptr;
 		}
 	}
-	return v8::ArrayBuffer::Allocator::Reallocate(data, old_length, new_length);
+	return this->allocator->Reallocate(data, old_length, new_length);
 }

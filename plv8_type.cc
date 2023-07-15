@@ -197,7 +197,6 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
   Isolate *isolate = Isolate::GetCurrent();
 	Local<Context>		context = isolate->GetCurrentContext();
   JsonbValue val;
-	Local<v8::Value> out;
 	int32 count = 0;
   JsonbIteratorToken token;
 	Local<v8::Value> key;

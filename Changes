@@ -1,5 +1,11 @@
 Revision history for plv8
 
+3.2alpha    2023-07-14
+            - remove coffeejs and livescript
+            - switch to v8-cmake build syste,
+            - update v8 to v8 11.5
+            - remove ancient pg version support (9.x)
+
 3.1.7       2023-06-26
             - fix byteoffset issue with arraybuffers
             - support postgres 16 beta
@@ -37,7 +43,6 @@ Revision history for plv8
 3.0.0       2021-05-31
             - update to v8 8.6.405
             - support postgres 14
-
 
 3.0alpha
             - update to v8 7.4

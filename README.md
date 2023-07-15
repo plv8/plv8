@@ -4,6 +4,11 @@ PLV8 is a shared library that provides a PostgreSQL procedural language powered
 by V8 Javascript Engine. With this program you can write in Javascript your
 function that is callable from SQL.
 
+## Support
+
+There is a [Discord](https://discord.gg/5fJN52Se) available for general questions and support. Please
+ask there before opening an issue.
+
 ## Building
 
 Note that as PLV8 3.1, there are new build requirements.
@@ -14,19 +19,16 @@ The following packages must be installed to build on Ubuntu:
 
 - `libtinfo5`
 - `build-essential`
-- `ninja-build`
-- `python3`
 - `pkg-config`
+- `libstdc++-12-dev`
+- `cmake`
 
 ### MacOS
 
 The following packages must be install to build on MacOS:
 
 - `XCode` - and the command line tools
-- `brew`
-- `llvm` - version 12 or higher
-- `ninja`
-- `python3`
+- `cmake`
 
 ## Installing
 

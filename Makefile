@@ -41,6 +41,7 @@ all: v8 $(OBJS)
 plv8_config.h plv8.so: v8
 
 deps/v8-cmake/build/libv8_libbase.a:
+	@git submodule update --init --recursive
 	@cd deps/v8-cmake && mkdir -p build && cd build && cmake -Denable-fPIC=ON ../ && make -j $(NUMPROC)
 
 v8: deps/v8-cmake/build/libv8_libbase.a

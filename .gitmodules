@@ -1,0 +1,3 @@
+[submodule "deps/v8-cmake"]
+	path = deps/v8-cmake
+	url = https://github.com/bnoordhuis/v8-cmake.git

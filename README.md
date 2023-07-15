@@ -22,6 +22,7 @@ The following packages must be installed to build on Ubuntu:
 - `pkg-config`
 - `libstdc++-12-dev`
 - `cmake`
+- `git`
 
 ### MacOS
 

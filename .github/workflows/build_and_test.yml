@@ -51,4 +51,4 @@ jobs:
       - name: Print regression.diffs if regression tests failed
         if: failure() && steps.regression-tests.outcome != 'success'
         run: |
-          cat regression.diffs
+          cat regression.out

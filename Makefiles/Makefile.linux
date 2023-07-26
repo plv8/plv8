@@ -12,7 +12,7 @@ ifeq ($(ARCH),x86_64)
 	ARCH := x64
 endif
 
-GN_ARGS = is_component_build=false v8_use_external_startup_data=false v8_enable_i18n_support=false clang_base_path=\"$(LLVM_BINPATH)\" clang_use_chrome_plugins=false use_custom_libcxx=false treat_warnings_as_errors=false use_lld=false v8_monolithic=true
+GN_ARGS = is_component_build=false v8_use_external_startup_data=false v8_enable_i18n_support=false clang_base_path=\"$(LLVM_BINPATH)\" clang_use_chrome_plugins=false use_custom_libcxx=false treat_warnings_as_errors=false use_lld=false v8_monolithic=true v8_optimized_debug=true is_debug=false
 
 
 build/gn/out/gn:

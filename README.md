@@ -11,7 +11,7 @@ ask there before opening an issue.
 
 ## Building
 
-Note that as PLV8 3.1, there are new build requirements.
+Note that as PLV8 3.2, we now support building on Enterprise Linux 9 (EL9)
 
 ### Linux
 
@@ -21,6 +21,12 @@ The following packages must be installed to build on Ubuntu:
 - `build-essential`
 - `pkg-config`
 - `libstdc++-12-dev`
+- `cmake`
+- `git`
+
+The following packages must be installed to build on EL9:
+
+- 'development tools' - via groupinstall
 - `cmake`
 - `git`
 

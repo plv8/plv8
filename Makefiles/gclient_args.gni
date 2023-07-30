@@ -1,3 +1,0 @@
-declare_args() {
-  checkout_google_benchmark = false
-}

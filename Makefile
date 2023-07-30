@@ -4,8 +4,9 @@ PLV8_VERSION = 3.2.0alpha
 CP := cp
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
-SHLIB_LINK += -std=c++17
+SHLIB_LINK += -std=c++17 -xc++
 PG_CPPFLAGS := -fPIC -Wall -Wno-register
+PG_LDFLAGS := -std=c++17 -xc++
 
 SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc
 OBJS = $(SRCS:.cc=.o)
@@ -42,7 +43,7 @@ plv8_config.h plv8.so: v8
 
 deps/v8-cmake/build/libv8_libbase.a:
 	@git submodule update --init --recursive
-	@cd deps/v8-cmake && mkdir -p build && cd build && cmake -Denable-fPIC=ON ../ && make -j $(NUMPROC)
+	@cd deps/v8-cmake && mkdir -p build && cd build && cmake -Denable-fPIC=ON -DCMAKE_BUILD_TYPE=Release ../ && make -j $(NUMPROC)
 
 v8: deps/v8-cmake/build/libv8_libbase.a
 
@@ -95,11 +96,15 @@ COMPILE.cxx.bc = $(CLANG) -xc++ -Wno-ignored-attributes $(BITCODE_CXXFLAGS) $(CC
 	$(LLVM_BINPATH)/opt -module-summary -f $@ -o $@
 
 DATA_built =
+
 all: $(DATA)
+
 %--$(PLV8_VERSION).sql: plv8.sql.common
 	sed -e 's/@LANG_NAME@/$*/g' $< | sed -e 's/@PLV8_VERSION@/$(PLV8_VERSION)/g' | $(CC) -E -P $(CPPFLAGS) -DLANG_$* - > $@
+
 %.control: plv8.control.common
 	sed -e 's/@PLV8_VERSION@/$(PLV8_VERSION)/g' $< | $(CXX) -E -P -DLANG_$* - > $@
+
 subclean:
 	rm -f plv8_config.h $(DATA)
 
@@ -111,3 +116,4 @@ distclean: clean
 .PHONY: subclean all clean installcheck
 
 include $(PGXS)
+CC=$(CXX)

@@ -1,10 +1,10 @@
-ARG PG_CONTAINER_VERSION=14.5
-FROM docker.io/library/postgres:${PG_CONTAINER_VERSION}-bullseye as builder
+ARG PG_CONTAINER_VERSION=15
+FROM docker.io/library/postgres:${PG_CONTAINER_VERSION}-bookworm as builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN set -ex \
   && apt-get update \
-  && apt-get install -y build-essential git postgresql-server-dev-${PG_MAJOR} libtinfo5 pkg-config clang binutils libstdc++-10-dev cmake \
+  && apt-get install -y build-essential git postgresql-server-dev-${PG_MAJOR} libtinfo5 pkg-config clang binutils libstdc++-12-dev cmake \
   && apt-get clean
 ARG PLV8_BRANCH=r3.2alpha
 ENV PLV8_BRANCH=${PLV8_BRANCH}
@@ -17,7 +17,7 @@ RUN set -ex \
   && strip /usr/lib/postgresql/${PG_MAJOR}/lib/plv8-${PLV8_VERSION}.so
 
 
-FROM docker.io/library/postgres:${PG_CONTAINER_VERSION}-bullseye
+FROM docker.io/library/postgres:${PG_CONTAINER_VERSION}-bookworm
 
 ARG PLV8_VERSION=3.2.0alpha
 ENV PLV8_VERSION=${PLV8_VERSION}

@@ -8,7 +8,7 @@ SHLIB_LINK += -std=c++17 -xc++
 PG_CPPFLAGS := -fPIC -Wall -Wno-register
 PG_LDFLAGS := -std=c++17 -xc++
 
-SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc
+SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc plv8_guc.cc
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8-$(PLV8_VERSION)
 EXTENSION = plv8

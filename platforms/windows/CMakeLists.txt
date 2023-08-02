@@ -29,6 +29,7 @@ set(SOURCES
   "livescript.cc"
   "../plv8.cc"
   "../plv8_func.cc"
+  "../plv8_guc.cc"
   "../plv8_param.cc"
   "../plv8_type.cc")
 

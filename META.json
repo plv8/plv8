@@ -2,7 +2,7 @@
     "name": "plv8",
     "abstract": "A procedural language in JavaScript powered by V8",
     "description": "plv8 is a trusted procedural language that is safe to use, fast to run and easy to develop.",
-    "version": "3.2.0alpha",
+    "version": "3.2.0",
     "maintainer": [
         "Jerry Sievert <code@legitimatesounding.com>"
     ],
@@ -13,18 +13,18 @@
     "prereqs": {
         "runtime": {
             "requires": {
-                "PostgreSQL": "9.6.0"
+                "PostgreSQL": "13.11"
             },
             "recommends": {
-                "PostgreSQL": "14.4.1"
+                "PostgreSQL": "15.3"
             }
         }
     },
     "provides": {
         "plv8": {
-            "file": "plv8--3.2.0alpha.sql",
+            "file": "plv8--3.2.0.sql",
             "docfile": "docs/PGXN.md",
-            "version": "3.2.0alpha",
+            "version": "3.2.0",
             "abstract": "A procedural language in JavaScript"
         }
     },

@@ -9,7 +9,7 @@ function that is callable from SQL.
 There is a [Discord](https://discord.gg/5fJN52Se) available for general questions and support. Please
 ask there before opening an issue.
 
-## Building
+## Build Requirements
 
 Note that as PLV8 3.2, build requirements have again changed.
 
@@ -37,11 +37,38 @@ The following packages must be install to build on MacOS:
 - `XCode` - and the command line tools
 - `cmake`
 
-## Installing
+## Building
+
+Building plv8 needs to have all build requirements fulfilled before building.
+You must make sure that `pg_config` is in your path. It should share the same
+installation directory as `psql` and `postgres`.
+
+```sh
+make
+```
+
+### Installing
+
+This should install plv8 as an available extension into Postgres.
+
+```sh
+make install
+```
+
+### Run Tests
+
+Postgres features a test runner, and plv8 includes a number of tests that can be
+run.
+
+```sh
+make installcheck
+```
+
+## Running
 
     =# CREATE EXTENSION plv8;
 
-This will install PLV8 into your database if it exists as an extension.
+This will install PLV8 into your database if it exists as an available extension.
 
 ## Testing
 
@@ -53,4 +80,4 @@ For full documentation, see [https://plv8.github.io/](https://plv8.github.io/).
 
 ## Docker
 
-For preliminary Docker support, see [./platforms/Docker/README.md](./platforms/Docker/README.md)
+For Docker support, see [./platforms/Docker/README.md](./platforms/Docker/README.md)

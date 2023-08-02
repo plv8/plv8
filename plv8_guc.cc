@@ -57,16 +57,24 @@ struct config_generic *
 plv8_find_option(const char *name)
 {
 	const char **key = &name;
-	struct config_generic **res;
+	struct config_generic **res, **guc_vars;
 	int			i;
+	int numOpts;
+
+#if PG_VERSION_NUM < 160000
+	guc_vars = get_guc_variables();
+	numOpts = GetNumConfigOptions();
+#else
+	guc_vars = get_guc_variables(&numOpts);
+#endif
 
 	/*
 	 * By equating const char ** with struct config_generic *, we are assuming
 	 * the name field is first in config_generic.
 	 */
 	res = (struct config_generic **) bsearch((void *) &key,
-											 (void *) get_guc_variables(),
-											 GetNumConfigOptions(),
+											 (void *) guc_vars,
+											 numOpts,
 											 sizeof(struct config_generic *),
 											 plv8_guc_var_compare);
 	/*

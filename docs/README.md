@@ -1,10 +1,10 @@
 # PLV8
 
-PLV8 is a _trusted_ Javascript language extension for PostgreSQL.  It can be
+PLV8 is a _trusted_ Javascript language extension for PostgreSQL. It can be
 used for _stored procedures_, _triggers_, etc.
 
-PLV8 works with most versions of Postgres, but works best with `9.1` and above,
-including `10.0`, `11`, `12`, and `13`.
+PLV8 works with most versions of Postgres, but works best with `13` and above,
+including `14`, `16`, and `16`.
 
 ## Installing PLV8
 
@@ -17,7 +17,7 @@ be installed into your PostgreSQL database by running:
 
 ### Verifying Your Installation
 
-You can verify the installation in two ways.  As of PLV8 `2.0.0`, you can
+You can verify the installation in two ways. As of PLV8 `2.0.0`, you can
 execute a stored procedure:
 
 ```
@@ -36,7 +36,7 @@ As of PLV8 version `2.3.3`, you can use upgrade scripts to upgrade your
 installation from any version higher than `1.5.0`:
 
 ```
-=# ALTER EXTENSION plv8 UPDATE TO `3.0.0`;
+=# ALTER EXTENSION plv8 UPDATE TO `3.2.0`;
 ```
 
 Note that until the database has been restarted, the old version of PLV8 will
@@ -46,8 +46,9 @@ This is an artifact of how Postgres manages extensions.
 ### Updating Older PLV8 Installs
 
 Updating PL/v8 is usually straightforward as it is a small and stable extension
+
 - it only contains a handful of objects that need to be added to PostgreSQL
-when installing the extension.
+  when installing the extension.
 
 The procedure that is responsible for invoking this installation script
 (generated during compile time based on plv8.sql.common), is controlled by
@@ -99,7 +100,7 @@ global `plv8` object because each function invocation has a different `this` obj
 ## Start-up Procedure
 
 PLV8 provides a start up facility, which allows you to call a `plv8` runtime
-environment initialization function specified in the GUC variable.  This can
+environment initialization function specified in the GUC variable. This can
 only be set by someone with administrator access to the database you are
 accessing.
 
@@ -127,7 +128,7 @@ These are useful for long-running connections from various backend services.
 
 ### plv8_info
 
-Get information about all the current running environments 
+Get information about all the current running environments
 on a specific connection from all users.
 
 Can be run by superuser only.
@@ -141,24 +142,24 @@ Outputs JSON
 ```json
 [
   {
-    "user":"user1",
-    "total_heap_size":1327104,
-    "total_physical_size":474336,
-    "used_heap_size":386680,
-    "heap_size_limit":270008320,
-    "external_memory":0,
-    "number_of_native_contexts":2,
-    "contexts":[]
+    "user": "user1",
+    "total_heap_size": 1327104,
+    "total_physical_size": 474336,
+    "used_heap_size": 386680,
+    "heap_size_limit": 270008320,
+    "external_memory": 0,
+    "number_of_native_contexts": 2,
+    "contexts": []
   },
   {
-    "user":"user2",
-    "total_heap_size":1327104,
-    "total_physical_size":474336,
-    "used_heap_size":386680,
-    "heap_size_limit":270008320,
-    "external_memory":0,
-    "number_of_native_contexts":3,
-    "contexts":["my context"]
+    "user": "user2",
+    "total_heap_size": 1327104,
+    "total_physical_size": 474336,
+    "used_heap_size": 386680,
+    "heap_size_limit": 270008320,
+    "external_memory": 0,
+    "number_of_native_contexts": 3,
+    "contexts": ["my context"]
   }
 ]
 ```
@@ -170,6 +171,7 @@ _Note: "number_of_native_contexts" = "contexts".length + 2_
 Reset user isolate or context
 
 To reset a specific context run:
+
 ```sql
 SELECT plv8_reset('my context');
 ```
@@ -177,6 +179,7 @@ SELECT plv8_reset('my context');
 Will reset the context and re-create `globalThis` on a next invocation of that context.
 
 To reset all contexts and reboot the whole environment of a specfifc user:
+
 ```sql
 SELECT plv8_reset();
 ```

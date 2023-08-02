@@ -1,5 +1,10 @@
 Revision history for plv8
 
+3.2.0       2023-08-01
+            - fix for GUC upgrade issue
+            - better postgres 16 support
+            - windows support removed (for now at least)
+
 3.2alpha    2023-07-14
             - remove coffeejs and livescript
             - switch to v8-cmake build syste,

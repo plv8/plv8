@@ -1017,7 +1017,14 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 	{
 #if JSONB_DIRECT_CONVERSION
 		Jsonb *jsonb = (Jsonb *) PG_DETOAST_DATUM(datum);
-		Local<v8::Value> result = ConvertJsonb(&jsonb->root);
+		Local<v8::Value> result;
+		if (JB_ROOT_IS_SCALAR(jsonb)) {
+			JsonbValue  jb;
+			JsonbExtractScalar(&jsonb->root, &jb);
+			result = GetJsonbValue(&jb);
+		} else {
+			result = ConvertJsonb(&jsonb->root);
+		}
 #else
 		Local<v8::Value>	jsonString = ToString(datum, type);
 		JSONObject JSON;

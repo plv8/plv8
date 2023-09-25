@@ -538,9 +538,10 @@ ConvertObject(Local<v8::Object> object) {
 	} else if (object->IsObject()) {
 		val = JsonbObjectFromObject(&pstate, object);
 	} else {
-		val = pushJsonbValue(&pstate, WJB_BEGIN_ARRAY, NULL);
-		val = JsonbFromValue(&pstate, object, WJB_ELEM);
+		pushJsonbValue(&pstate, WJB_BEGIN_ARRAY, NULL);
+		JsonbFromValue(&pstate, object, WJB_ELEM);
 		val = pushJsonbValue(&pstate, WJB_END_ARRAY, NULL);
+                val->val.array.rawScalar = true;
 	}
 
 	MemoryContextSwitchTo(oldcontext);

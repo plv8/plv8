@@ -615,7 +615,29 @@ plv8_info(PG_FUNCTION_ARGS)
 	size_t 				*lengths = nullptr;
 	size_t 				total_length = 3; // length of "[]\0"
 
-	*infos = (char *) palloc(sizeof(char) * size);
+	MemoryContext execution_context, old_context;
+
+	if (size == 0)
+	{
+		PG_RETURN_NULL();
+	}
+
+#if PG_VERSION_NUM < 110000
+        execution_context = AllocSetContextCreate(
+                                                CurrentMemoryContext,
+                                                "plv8_info Context",
+                                                ALLOCSET_SMALL_MINSIZE,
+                                                ALLOCSET_SMALL_INITSIZE,
+                                                ALLOCSET_SMALL_MAXSIZE);
+#else
+        execution_context = AllocSetContextCreate(CurrentMemoryContext,
+                                                "plv8_info Context",
+                                                ALLOCSET_SMALL_SIZES);
+#endif
+
+	old_context = MemoryContextSwitchTo(execution_context);
+
+	infos = (char **) palloc(sizeof(char *) * size);
 	lengths = (size_t *) palloc(sizeof(size_t) * size);
 
 	for (i = 0; i < size; i++)
@@ -645,6 +667,7 @@ plv8_info(PG_FUNCTION_ARGS)
 		lengths[i] = strlen(infos[i]);
 		total_length += lengths[i] + 1; // add 1 byte for ','
 	}
+
 	char *out = (char *) palloc0(total_length);
 	out[0] = '[';
 	size_t current = 0;
@@ -652,14 +675,17 @@ plv8_info(PG_FUNCTION_ARGS)
 	{
 		++current;
 		strcpy(out + current, infos[i]);
-		pfree(infos[i]);
 		current += lengths[i];
-		out[current] = ',';
+		if (i != size - 1)
+		{
+			out[current] = ',';
+		}
 	}
-	out[current] = ']';
 
-	pfree(*infos);
-	pfree(lengths);
+	out[current] = ']';
+	out[current + 1] = '\0';
+
+	MemoryContextSwitchTo(old_context);
 
 	return CStringGetTextDatum(out);
 }

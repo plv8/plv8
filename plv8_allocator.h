@@ -10,8 +10,8 @@ class ArrayAllocator : public v8::ArrayBuffer::Allocator {
 private:
 	size_t heap_limit;
 	size_t heap_size;
-	size_t next_size;
-	size_t allocated;
+	std::atomic<size_t> next_size;
+	std::atomic<size_t> allocated;
 	v8::ArrayBuffer::Allocator* allocator;
 
 	bool check(size_t length);

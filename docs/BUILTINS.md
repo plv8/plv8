@@ -47,9 +47,9 @@ CREATE FUNCTION caller(a int, t int) RETURNS int AS $$
 $$ LANGUAGE plv8;
 ```
 
-With `plv8.find_function()``, you can look up other PLV8 functions. If they
+With `plv8.find_function()`, you can look up other PLV8 functions. If they
 are not a PLV8 function, and error is thrown. The function signature parameter
-to `plv8.find_function()`` is either of `regproc` (function name only) or
+to `plv8.find_function()` is either of `regproc` (function name only) or
 `regprocedure` (function name with argument types). You can make use of the
 internal type for arguments and void type for return type for the pure Javascript
 function to make sure any invocation from SQL statements should not occur.

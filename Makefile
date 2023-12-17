@@ -108,7 +108,7 @@ DATA += plcoffee.control plcoffee--$(PLV8_VERSION).sql \
 		plls.control plls--$(PLV8_VERSION).sql
 endif
 DATA_built = plv8.sql
-REGRESS = init-extension plv8 plv8-errors inline json startup_pre startup varparam json_conv \
+REGRESS = init-extension plv8 plv8-errors scalar_args inline json startup_pre startup varparam json_conv \
 		  jsonb_conv window guc es6 arraybuffer composites currentresource startup_perms bytea find_function_perms \
 		  memory_limits reset show array_spread regression
 ifndef DISABLE_DIALECT

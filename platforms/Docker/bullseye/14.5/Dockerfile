@@ -6,9 +6,9 @@ RUN set -ex \
   && apt-get update \
   && apt-get install -y build-essential git postgresql-server-dev-${PG_MAJOR} libtinfo5 pkg-config clang binutils libstdc++-10-dev cmake \
   && apt-get clean
-ARG PLV8_BRANCH=r3.2alpha
+ARG PLV8_BRANCH=r3.2
 ENV PLV8_BRANCH=${PLV8_BRANCH}
-ARG PLV8_VERSION=3.2.0alpha
+ARG PLV8_VERSION=3.2.1
 ENV PLV8_VERSION=${PLV8_VERSION}
 RUN set -ex \
   && git clone --branch ${PLV8_BRANCH} --single-branch --depth 1 https://github.com/plv8/plv8 \
@@ -19,7 +19,7 @@ RUN set -ex \
 
 FROM docker.io/library/postgres:${PG_CONTAINER_VERSION}-bullseye
 
-ARG PLV8_VERSION=3.2.0alpha
+ARG PLV8_VERSION=3.2.1
 ENV PLV8_VERSION=${PLV8_VERSION}
 COPY --from=builder /usr/lib/postgresql/${PG_MAJOR}/lib/plv8* /usr/lib/postgresql/${PG_MAJOR}/lib/
 COPY --from=builder /usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/plv8-${PLV8_VERSION}/* /usr/lib/postgresql/${PG_MAJOR}/lib/bitcode/plv8-${PLV8_VERSION}/

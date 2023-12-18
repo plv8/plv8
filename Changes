@@ -1,5 +1,12 @@
 Revision history for plv8
 
+3.2.1       2023-12-17
+            - fix upgrade script installation
+            - fix build issue on fresh checkout
+            - fix crash with plv8_info()
+            - fix memory allocator statistics
+            - fix scalar jsonb issue
+
 3.2.0       2023-08-01
             - fix for GUC upgrade issue
             - better postgres 16 support

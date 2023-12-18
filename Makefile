@@ -8,7 +8,7 @@
 # can specify the v8 version by AUTOV8_VERSION, too.
 #-----------------------------------------------------------------------------#
 
-PLV8_VERSION = 3.1.8
+PLV8_VERSION = 3.1.9
 
 # set your custom C++ compler
 CUSTOM_CC = g++
@@ -19,7 +19,7 @@ SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc $(JSCS)
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8-$(PLV8_VERSION)
 EXTENSION = plv8
-PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql $(wildcard upgrade/*.sql)
+PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql
 
 
 # Platform detection
@@ -149,8 +149,9 @@ else
 endif
 
 generate_upgrades:
-	mkdir -p upgrade
-	./generate_upgrade.sh $(PLV8_VERSION)
+	@mkdir -p upgrade
+	@./generate_upgrade.sh $(PLV8_VERSION)
+	$(eval PLV8_DATA +=  $(wildcard upgrade/*.sql))
 
 all: generate_upgrades
 

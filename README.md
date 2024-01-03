@@ -6,7 +6,7 @@ function that is callable from SQL.
 
 ## Support
 
-There is a [Discord]((https://discord.gg/XYGSCfVNBC) available for general questions and support. Please
+There is a [Discord](https://discord.gg/XYGSCfVNBC) available for general questions and support. Please
 ask there before opening an issue.
 
 ## Build Requirements

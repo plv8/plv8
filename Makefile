@@ -1,4 +1,3 @@
-
 PLV8_VERSION = 3.2.1
 
 CP := cp
@@ -13,6 +12,8 @@ OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8-$(PLV8_VERSION)
 EXTENSION = plv8
 PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql
+
+CCFLAGS += -Wall -Wextra -v
 
 ifeq ($(OS),Windows_NT)
 	# noop for now
@@ -118,3 +119,6 @@ distclean: clean
 
 include $(PGXS)
 CC=$(CXX)
+
+print-pgxs:
+    @echo $(PGXS)

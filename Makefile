@@ -1,5 +1,5 @@
 
-PLV8_VERSION = 3.2.1
+PLV8_VERSION = 3.2.2
 
 CP := cp
 PG_CONFIG = pg_config

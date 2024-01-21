@@ -1,5 +1,8 @@
 Revision history for plv8
 
+3.2.2       2024-01-21
+            - proper termination in cursors
+
 3.2.1       2023-12-17
             - fix upgrade script installation
             - fix build issue on fresh checkout

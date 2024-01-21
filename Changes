@@ -21,6 +21,18 @@ Revision history for plv8
             - update v8 to v8 11.5
             - remove ancient pg version support (9.x)
 
+3.1.10      2024-01-21
+            - proper termination in cursors
+            
+3.1.9       2023-12-17
+            - fix plv8_info()
+            - fix upgrade script installation
+            - fix jsonb arguments
+            - fix allocator tracking
+
+3.1.8       2023-08-01
+            - force v8 to compile in release mode
+
 3.1.7       2023-06-26
             - fix byteoffset issue with arraybuffers
             - support postgres 16 beta

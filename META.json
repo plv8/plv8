@@ -28,6 +28,9 @@
             "abstract": "A procedural language in JavaScript"
         }
     },
+    "no_index": {
+        "directory": [ "deps" ]
+    },
     "resources": {
         "homepage": "https://plv8.github.io/",
         "bugtracker": {

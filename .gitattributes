@@ -1,0 +1,4 @@
+.gitattributes export-ignore
+.github export-ignore
+.gitignore export-ignore
+.gitmodules export-ignore

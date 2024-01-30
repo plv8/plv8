@@ -1,0 +1,28 @@
+name: plv8 Build Docker
+on:
+  pull_request:
+jobs:
+  build-and-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Test details
+        run: echo Build Docker Image on ${{ matrix.os }}
+
+      - name: Checkout plv8 extension code
+        uses: actions/checkout@v3
+        with:
+          path: plv8
+
+      - name: Build and test plv8 extension
+        id: regression-tests
+        run: |
+          pushd plv8
+          echo name ${{ github.event.repository.name }}
+          export BRANCH=`git branch --show-current`
+          export REF=`git rev-parse --abbrev-ref HEAD`
+          echo `env`
+          env

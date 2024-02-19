@@ -1073,9 +1073,6 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		conv.ToDatum(result, tupstore);
 	}
 
-	/* clean up and return the tuplestore */
-	tuplestore_donestoring(tupstore);
-
 	return (Datum) 0;
 }
 

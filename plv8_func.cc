@@ -618,7 +618,6 @@ plv8_Execute(const FunctionCallbackInfo<v8::Value> &args)
 	PG_CATCH();
 	{
 		subtran.exit(false);
-		SPI_pop_conditional(true);
 		throw pg_error();
 	}
 	PG_END_TRY();

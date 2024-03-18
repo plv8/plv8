@@ -41,8 +41,10 @@ all: v8 $(OBJS)
 # For some reason, this solves parallel make dependency.
 plv8_config.h plv8.so: v8
 
-deps/v8-cmake/build/libv8_libbase.a:
+deps/v8-cmake/README.md:
 	@git submodule update --init --recursive
+
+deps/v8-cmake/build/libv8_libbase.a: deps/v8-cmake/README.md
 	@cd deps/v8-cmake && mkdir -p build && cd build && cmake -Denable-fPIC=ON -DCMAKE_BUILD_TYPE=Release ../ && make -j $(NUMPROC)
 
 v8: deps/v8-cmake/build/libv8_libbase.a

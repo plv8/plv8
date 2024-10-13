@@ -359,7 +359,7 @@ _PG_init(void)
 #define ICU_DATA_VAR "plv8.icu_data"
     guc_value = plv8_find_option(ICU_DATA_VAR);
     if (guc_value != NULL) {
-        plv8_start_proc = plv8_string_option(guc_value);
+        plv8_icu_data = plv8_string_option(guc_value);
     } else {
         DefineCustomStringVariable(ICU_DATA_VAR,
                                    gettext_noop("ICU data file directory."),
@@ -378,7 +378,7 @@ _PG_init(void)
 #define V8_FLAGS_VAR "plv8.v8_flags"
     guc_value = plv8_find_option(V8_FLAGS_VAR);
     if (guc_value != NULL) {
-        plv8_start_proc = plv8_string_option(guc_value);
+        plv8_v8_flags = plv8_string_option(guc_value);
     } else {
         DefineCustomStringVariable(V8_FLAGS_VAR,
                                    gettext_noop("V8 engine initialization flags (e.g. --harmony for all current harmony features)."),

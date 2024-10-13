@@ -12,3 +12,25 @@ SELECT let_test();
 (1 row)
 
 DROP FUNCTION let_test();
+-- set and show variables
+SET plv8.start_proc = 'foo';
+SHOW plv8.start_proc;
+ plv8.start_proc 
+-----------------
+ foo
+(1 row)
+
+SET plv8.icu_data = 'bar';
+SHOW plv8.icu_data;
+ plv8.icu_data 
+---------------
+ bar
+(1 row)
+
+SET plv8.v8_flags = 'baz';
+SHOW plv8.v8_flags;
+ plv8.v8_flags 
+---------------
+ baz
+(1 row)
+

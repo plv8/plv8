@@ -1292,9 +1292,14 @@ plv8_WinGetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args)
 
 	if (args.Length() < 1)
 		size = 1000; /* default 1K */
-	else
-		size = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
-
+	else {
+		const int input_size = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+		if (input_size < 0) {
+			args.GetReturnValue().Set(isolate->ThrowException(v8::String::NewFromUtf8(args.GetIsolate(), "allocation size cannot be negative").ToLocalChecked()));
+			return;
+	    	}
+		size = input_size;
+	}
 	size += sizeof(size_t) * 2;
 
 	PG_TRY();

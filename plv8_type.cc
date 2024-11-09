@@ -11,18 +11,14 @@ extern "C" {
 #if JSONB_DIRECT_CONVERSION
 #include <time.h>
 #endif
-#if PG_VERSION_NUM >= 90300
 #include "access/htup_details.h"
-#endif
 #include "catalog/pg_type.h"
 #include "parser/parse_coerce.h"
 #include "utils/array.h"
 #include "utils/date.h"
 #include "utils/datetime.h"
 #include "utils/builtins.h"
-#if PG_VERSION_NUM >= 90400
 #include "utils/jsonb.h"
-#endif
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
@@ -36,7 +32,6 @@ using namespace v8;
 
 static Datum ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type);
 static Datum ToArrayDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type);
-static Datum ToRecordDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type);
 static Local<v8::Value> ToScalarValue(Datum datum, bool isnull, plv8_type *type);
 static Local<v8::Value> ToArrayValue(Datum datum, bool isnull, plv8_type *type);
 static Local<v8::Value> ToRecordValue(Datum datum, bool isnull, plv8_type *type);
@@ -64,11 +59,8 @@ plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt)
 		HeapTuple	tp;
 		Form_pg_type typtup;
 
-#if PG_VERSION_NUM < 90100
-		tp = SearchSysCache(TYPEOID, ObjectIdGetDatum(typid), 0, 0, 0);
-#else
 		tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
-#endif
+
 		if (HeapTupleIsValid(tp))
 		{
 			/*
@@ -124,6 +116,11 @@ plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt)
 		type->is_composite = (TypeCategory(elemid) == TYPCATEGORY_COMPOSITE);
 		get_typlenbyvalalign(type->typid, &type->len, &type->byval, &type->align);
 	}
+
+	if (type->category == TYPCATEGORY_PSEUDOTYPE)
+	{
+    type->is_composite = true;
+	}
 }
 
 /*
@@ -158,17 +155,7 @@ inferred_datum_type(Handle<v8::Value> value)
 	return InvalidOid;
 }
 
-#if PG_VERSION_NUM >= 90400 && JSONB_DIRECT_CONVERSION
-
-// jsonb types moved in pg10
-#if PG_VERSION_NUM < 100000
-#define jbvString JsonbValue::jbvString
-#define jbvNumeric JsonbValue::jbvNumeric
-#define jbvBool JsonbValue::jbvBool
-#define jbvObject JsonbValue::jbvObject
-#define jbvArray JsonbValue::jbvArray
-#define jbvNull JsonbValue::jbvNull
-#endif
+#if JSONB_DIRECT_CONVERSION
 
 static Local<v8::Value>
 GetJsonbValue(JsonbValue *scalarVal) {
@@ -515,18 +502,9 @@ ConvertObject(Local<v8::Object> object) {
 	MemoryContext oldcontext = CurrentMemoryContext;
 	MemoryContext conversion_context;
 
-#if PG_VERSION_NUM < 110000
-	conversion_context = AllocSetContextCreate(
-						CurrentMemoryContext,
-						"JSONB Conversion Context",
-						ALLOCSET_SMALL_MINSIZE,
-						ALLOCSET_SMALL_INITSIZE,
-						ALLOCSET_SMALL_MAXSIZE);
-#else
 	conversion_context = AllocSetContextCreate(CurrentMemoryContext,
 						"JSONB Conversion Context",
 						ALLOCSET_SMALL_SIZES);
-#endif
 
 	MemoryContextSwitchTo(conversion_context);
 
@@ -771,16 +749,12 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			}
 		}
 		break;
-#if PG_VERSION_NUM >= 90400
-	case JSONBOID:
+
+		case JSONBOID:
 #if JSONB_DIRECT_CONVERSION
 		{
 			Jsonb *obj = ConvertObject(Local<v8::Object>::Cast(value));
-#if PG_VERSION_NUM < 110000
-			PG_RETURN_JSONB(DatumGetJsonb(obj));
-#else
 			PG_RETURN_JSONB_P(DatumGetJsonbP((unsigned long)obj));
-#endif // PG_VERSION_NUM < 110000
 		}
 #else // JSONB_DIRECT_CONVERSION
 		if (value->IsObject() || value->IsArray())
@@ -790,17 +764,11 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			Handle<v8::Value> result = JSON.Stringify(value);
 			CString str(result);
 
-#if PG_VERSION_NUM < 110000
-			// lots of casting, but it ends up working - there is no CStringGetJsonb exposed
-			return (Datum) DatumGetJsonb(DirectFunctionCall1(jsonb_in, (Datum) (char *) str));
-#else
 			return (Datum) DatumGetJsonbP(DirectFunctionCall1(jsonb_in, (Datum) (char *) str));
-#endif
 		}
 #endif // JSONB_DIRECT_CONVERSION
 		break;
-#endif
-#if PG_VERSION_NUM >= 90200
+
 	case JSONOID:
 		if (value->IsObject() || value->IsArray())
 		{
@@ -812,7 +780,6 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			return CStringGetTextDatum(str);
 		}
 		break;
-#endif
 	}
 
 	/* Use lexical cast for non-numeric types. */
@@ -890,21 +857,26 @@ ToArrayDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	return PointerGetDatum(result);
 }
 
-static Datum
-ToRecordDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
+Datum
+ToRecordDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type, TupleDesc tupdesc)
 {
-	Datum		result;
-	TupleDesc	tupdesc;
+	Datum		result = 0;
 
 	if (value->IsUndefined() || value->IsNull())
 	{
 		*isnull = true;
 		return (Datum) 0;
 	}
+	
+	bool cleanup_tupdesc = false;
 
 	PG_TRY();
 	{
-		tupdesc = lookup_rowtype_tupdesc(type->typid, -1);
+    if (tupdesc == NULL)
+    {
+      tupdesc = lookup_rowtype_tupdesc(type->typid, -1);
+      cleanup_tupdesc = true;
+    }
 	}
 	PG_CATCH();
 	{
@@ -916,7 +888,8 @@ ToRecordDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 
 	result = conv.ToDatum(value);
 
-	ReleaseTupleDesc(tupdesc);
+	if (cleanup_tupdesc)
+	  ReleaseTupleDesc(tupdesc);
 
 	*isnull = false;
 	return result;
@@ -997,7 +970,6 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 								   VARSIZE_ANY_EXHDR(p),
 								   PointerGetDatum(p));
 	}
-#if PG_VERSION_NUM >= 90200
 	case JSONOID:
 	{
 		void	   *p = PG_DETOAST_DATUM_PACKED(datum);
@@ -1012,8 +984,7 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 			pfree(p);	// free if detoasted
 		return result;
 	}
-#endif
-#if PG_VERSION_NUM >= 90400
+
 	case JSONBOID:
 	{
 #if JSONB_DIRECT_CONVERSION
@@ -1034,7 +1005,7 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 
 		return result;
 	}
-#endif
+
 	default:
 		return ToString(datum, type);
 	}

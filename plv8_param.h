@@ -9,9 +9,7 @@ extern "C" {
  * as they contain C++ keywords.
  */
 #include "nodes/params.h"
-#if PG_VERSION_NUM >= 90000
 #include "parser/parse_node.h"
-#endif	// PG_VERSION_NUM >= 90000
 
 } // extern "C"
 
@@ -27,11 +25,9 @@ typedef struct plv8_param_state
 	MemoryContext	memcontext;
 } plv8_param_state;
 
-#if PG_VERSION_NUM >= 90000
 // plv8_param.cc
 extern void plv8_variable_param_setup(ParseState *pstate, void *arg);
 extern ParamListInfo plv8_setup_variable_paramlist(plv8_param_state *parstate,
 							  Datum *values, char *nulls);
-#endif	// PG_VERSION_NUM >= 90000
 
 #endif	// _PLV8_PARAM_H_

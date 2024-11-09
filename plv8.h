@@ -287,6 +287,7 @@ extern plv8_type *get_plv8_type(PG_FUNCTION_ARGS, int argno);
 extern void plv8_fill_type(plv8_type *type, Oid typid, MemoryContext mcxt = NULL);
 extern Oid inferred_datum_type(v8::Handle<v8::Value> value);
 extern Datum ToDatum(v8::Handle<v8::Value> value, bool *isnull, plv8_type *type);
+extern Datum ToRecordDatum(v8::Handle<v8::Value> value, bool *isnull, plv8_type *type, TupleDesc tupdesc = NULL);
 extern v8::Local<v8::Value> ToValue(Datum datum, bool isnull, plv8_type *type);
 extern v8::Local<v8::String> ToString(Datum value, plv8_type *type);
 extern v8::Local<v8::String> ToString(const char *str, int len = -1, int encoding = GetDatabaseEncoding());

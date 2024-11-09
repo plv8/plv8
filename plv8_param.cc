@@ -12,8 +12,6 @@
  * Variable SPI parameter is since 9.0.  Avoid include files in prior versions,
  * as they contain C++ keywords.
  */
-#if PG_VERSION_NUM >= 90000
-
 extern "C" {
 
 #include "catalog/pg_type.h"
@@ -90,9 +88,7 @@ plv8_variable_paramref_hook(ParseState *pstate, ParamRef *pref)
 	param->paramid = paramno;
 	param->paramtype = *pptype;
 	param->paramtypmod = -1;
-#if PG_VERSION_NUM >= 90100
 	param->paramcollid = get_typcollation(param->paramtype);
-#endif
 	param->location = pref->location;
 
 	return (Node *) param;
@@ -154,14 +150,12 @@ plv8_variable_coerce_param_hook(ParseState *pstate, Param *param,
 		 */
 		param->paramtypmod = -1;
 
-#if PG_VERSION_NUM >= 90100
 		/*
 		 * This module always sets a Param's collation to be the default for
 		 * its datatype.  If that's not what you want, you should be using the
 		 * more general parser substitution hooks.
 		 */
 		param->paramcollid = get_typcollation(param->paramtype);
-#endif
 
 		/* Use the leftmost of the param's and coercion's locations */
 		if (location >= 0 &&
@@ -196,4 +190,3 @@ plv8_setup_variable_paramlist(plv8_param_state *parstate,
 
 	return paramLI;
 }
-#endif	// PG_VERSION_NUM >= 90000

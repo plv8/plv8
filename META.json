@@ -1,55 +1,48 @@
 {
-    "name": "plv8",
-    "abstract": "A procedural language in JavaScript powered by V8",
-    "description": "plv8 is a trusted procedural language that is safe to use, fast to run and easy to develop.",
-    "version": "3.2.3",
-    "maintainer": [
-        "Jerry Sievert <code@legitimatesounding.com>"
-    ],
-    "license": {
-        "PostgreSQL": "http://www.postgresql.org/about/licence"
+  "name": "plv8",
+  "abstract": "A procedural language in JavaScript powered by V8",
+  "description": "plv8 is a trusted procedural language that is safe to use, fast to run and easy to develop.",
+  "version": "3.2.4",
+  "maintainer": ["Jerry Sievert <code@legitimatesounding.com>"],
+  "license": {
+    "PostgreSQL": "http://www.postgresql.org/about/licence"
+  },
+  "release_status": "stable",
+  "prereqs": {
+    "runtime": {
+      "requires": {
+        "PostgreSQL": "13.11.0"
+      },
+      "recommends": {
+        "PostgreSQL": "15.3.0"
+      }
+    }
+  },
+  "provides": {
+    "plv8": {
+      "file": "plv8--3.2.4.sql",
+      "docfile": "docs/PGXN.md",
+      "version": "3.2.3",
+      "abstract": "A procedural language in JavaScript"
+    }
+  },
+  "no_index": {
+    "directory": ["deps"]
+  },
+  "resources": {
+    "homepage": "https://plv8.github.io/",
+    "bugtracker": {
+      "web": "https://github.com/plv8/plv8/issues"
     },
-    "release_status": "stable",
-    "prereqs": {
-        "runtime": {
-            "requires": {
-                "PostgreSQL": "13.11.0"
-            },
-            "recommends": {
-                "PostgreSQL": "15.3.0"
-            }
-        }
-    },
-    "provides": {
-        "plv8": {
-            "file": "plv8--3.2.3.sql",
-            "docfile": "docs/PGXN.md",
-            "version": "3.2.3",
-            "abstract": "A procedural language in JavaScript"
-        }
-    },
-    "no_index": {
-        "directory": [ "deps" ]
-    },
-    "resources": {
-        "homepage": "https://plv8.github.io/",
-        "bugtracker": {
-            "web": "https://github.com/plv8/plv8/issues"
-        },
-        "repository": {
-            "url": "https://github.com/plv8/plv8",
-            "web": "https://github.com/plv8/plv8.git",
-            "type": "git"
-        }
-    },
-    "meta-spec": {
-        "version": "1.0.0",
-        "url": "http://pgxn.org/meta/spec.txt"
-    },
-    "tags": [
-        "PL",
-        "JavaScript",
-        "v8",
-        "plv8"
-    ]
+    "repository": {
+      "url": "https://github.com/plv8/plv8",
+      "web": "https://github.com/plv8/plv8.git",
+      "type": "git"
+    }
+  },
+  "meta-spec": {
+    "version": "1.0.0",
+    "url": "http://pgxn.org/meta/spec.txt"
+  },
+  "tags": ["PL", "JavaScript", "v8", "plv8"]
 }

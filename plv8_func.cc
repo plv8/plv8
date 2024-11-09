@@ -48,11 +48,8 @@ static void plv8_QuoteLiteral(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_QuoteNullable(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_QuoteIdent(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args);
-
-#if PG_VERSION_NUM >= 110000
 static void plv8_Commit(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_Rollback(const FunctionCallbackInfo<v8::Value>& args);
-#endif
 
 /*
  * Window function API allows to store partition-local memory, but
@@ -67,19 +64,6 @@ typedef struct window_storage
 	size_t		len;			/* the byte size of data */
 	char		data[1];		/* actual string (without null-termination */
 } window_storage;
-
-#if PG_VERSION_NUM < 90100
-/*
- * quote_literal_cstr -
- *	  returns a properly quoted literal
- */
-static char *
-quote_literal_cstr(const char *rawstr)
-{
-	return TextDatumGetCString(
-			DirectFunctionCall1(quote_literal, CStringGetTextDatum(rawstr)));
-}
-#endif
 
 static inline Local<v8::Value>
 WrapCallback(FunctionCallback func)
@@ -276,11 +260,9 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	SetCallback(plv8, "quote_nullable", plv8_QuoteNullable, attrFull);
 	SetCallback(plv8, "quote_ident", plv8_QuoteIdent, attrFull);
 	SetCallback(plv8, "memory_usage", plv8_MemoryUsage, attrFull);
-
-#if PG_VERSION_NUM >= 110000
 	SetCallback(plv8, "rollback", plv8_Rollback, attrFull);
 	SetCallback(plv8, "commit", plv8_Commit, attrFull);
-#endif
+
 	plv8->SetInternalFieldCount(PLV8_INTNL_MAX);
 }
 
@@ -355,7 +337,7 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 
 		Handle<v8::String> message = ToString(edata->message);
 		Handle<v8::String> sqlerrcode = ToString(unpack_sql_state(edata->sqlerrcode));
-#if PG_VERSION_NUM >= 90300
+
 		Handle<v8::Value> schema_name = edata->schema_name ?
 			Handle<Primitive>(ToString(edata->schema_name)) : Null(isolate);
 		Handle<Primitive> table_name = edata->table_name ?
@@ -376,14 +358,11 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 			Handle<Primitive>(ToString(edata->internalquery)) : Null(isolate);
 		Handle<v8::Integer> code = Uint32::New(isolate, edata->sqlerrcode);
 
-#endif
-
 		FlushErrorState();
 		FreeErrorData(edata);
 
 		Handle<v8::Object> err = Exception::Error(message)->ToObject(isolate->GetCurrentContext()).ToLocalChecked();
 		err->Set(context, v8::String::NewFromUtf8(isolate, "sqlerrcode").ToLocalChecked(), sqlerrcode).Check();
-#if PG_VERSION_NUM >= 90300
 		err->Set(context, v8::String::NewFromUtf8(isolate, "schema_name").ToLocalChecked(), schema_name).Check();
 		err->Set(context, v8::String::NewFromUtf8(isolate, "table_name").ToLocalChecked(), table_name).Check();
 		err->Set(context, v8::String::NewFromUtf8(isolate, "column_name").ToLocalChecked(), column_name).Check();
@@ -394,7 +373,6 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 		err->Set(context, v8::String::NewFromUtf8(isolate, "context").ToLocalChecked(), sql_context).Check();
 		err->Set(context, v8::String::NewFromUtf8(isolate, "internalquery").ToLocalChecked(), internalquery).Check();
 		err->Set(context, v8::String::NewFromUtf8(isolate, "code").ToLocalChecked(), code).Check();
-#endif
 
 		args.GetReturnValue().Set(isolate->ThrowException(err));
 	}
@@ -440,8 +418,6 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 		if (i > 1){
 			msg += " ";
 		}
-		//elog(NOTICE, "msg -> %s", msg.c_str());
-		//elog(NOTICE, "buf -> %s", buf.c_str());
 
 		if (!CString::toStdString(args[i],buf)){
 			args.GetReturnValue().Set(Undefined(isolate));
@@ -524,7 +500,6 @@ plv8_execute_params(const char *sql, Handle<Array> params)
  * Since 9.0, SPI may have the parser deduce the parameter types.  In prior
  * versions, we infer the types from the input JS values.
  */
-#if PG_VERSION_NUM >= 90000
 	SPIPlanPtr		plan;
 	plv8_param_state parstate = {0};
 	ParamListInfo	paramLI;
@@ -543,23 +518,6 @@ plv8_execute_params(const char *sql, Handle<Array> params)
 	}
 	paramLI = plv8_setup_variable_paramlist(&parstate, values, nulls);
 	status = SPI_execute_plan_with_paramlist(plan, paramLI, false, 0);
-#else
-	Oid			   *types = (Oid *) palloc(sizeof(Oid) * nparam);
-
-	for (int i = 0; i < nparam; i++)
-	{
-		Handle<v8::Value>	param = params->Get(context, i);
-
-		types[i] = inferred_datum_type(param);
-		if (types[i] == InvalidOid)
-			elog(ERROR, "parameter[%d] cannot translate to a database type", i);
-
-		values[i] = value_get_datum(param, types[i], &nulls[i]);
-	}
-	status = SPI_execute_with_args(sql, nparam, types, values, nulls, false, 0);
-
-	pfree(types);
-#endif
 
 	pfree(values);
 	pfree(nulls);
@@ -669,7 +627,6 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 
 	PG_TRY();
 	{
-#if PG_VERSION_NUM >= 90000
 		if (args.Length() == 1)
 		{
 			parstate =
@@ -679,8 +636,7 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 										 parstate, 0);
 		}
 		else
-#endif
-			initial = SPI_prepare(sql, arraylen, types);
+		initial = SPI_prepare(sql, arraylen, types);
 		saved = SPI_saveplan(initial);
 		SPI_freeplan(initial);
 	}
@@ -780,7 +736,6 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 
 	PG_TRY();
 	{
-#if PG_VERSION_NUM >= 90000
 		if (parstate)
 		{
 			ParamListInfo	paramLI;
@@ -789,7 +744,6 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 			cursor = SPI_cursor_open_with_paramlist(NULL, plan, paramLI, false);
 		}
 		else
-#endif
 			cursor = SPI_cursor_open(NULL, plan, values, nulls, false);
 	}
 	PG_CATCH();
@@ -882,7 +836,6 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 	PG_TRY();
 	{
 		subtran.enter();
-#if PG_VERSION_NUM >= 90000
 		if (parstate)
 		{
 			ParamListInfo	paramLI;
@@ -891,7 +844,6 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 			status = SPI_execute_plan_with_paramlist(plan, paramLI, false, 0);
 		}
 		else
-#endif
 			status = SPI_execute_plan(plan, values, nulls, false, 0);
 	}
 	PG_CATCH();
@@ -1149,13 +1101,10 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 	}
 	CString				signature(args[0]);
 	Local<Function>		func;
-#if PG_VERSION_NUM < 120000
-	FunctionCallInfoData fake_fcinfo;
-#else
 	// Stack-allocate FunctionCallInfoBaseData with
 	// space for 2 arguments:
 	LOCAL_FCINFO(fake_fcinfo, 2);
-#endif
+
 	FmgrInfo	flinfo;
 	text *arg;
 
@@ -1173,17 +1122,6 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 			funcoid = DatumGetObjectId(
 					DirectFunctionCall1(regprocedurein, CStringGetDatum(signature.str())));
 
-#if PG_VERSION_NUM < 120000
-		MemSet(&fake_fcinfo, 0, sizeof(fake_fcinfo));
-		MemSet(&flinfo, 0, sizeof(flinfo));
-		fake_fcinfo.flinfo = &flinfo;
-		flinfo.fn_oid = InvalidOid;
-		flinfo.fn_mcxt = CurrentMemoryContext;
-		fake_fcinfo.nargs = 2;
-		fake_fcinfo.arg[0] = ObjectIdGetDatum(funcoid);
-		fake_fcinfo.arg[1] = CStringGetDatum(arg);
-		Datum ret = has_function_privilege_id(&fake_fcinfo);
-#else
 		MemSet(&flinfo, 0, sizeof(flinfo));
 		fake_fcinfo->flinfo = &flinfo;
 		flinfo.fn_oid = InvalidOid;
@@ -1192,7 +1130,6 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 		fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
 		fake_fcinfo->args[1].value = PointerGetDatum(arg);
 		Datum ret = has_function_privilege_id(fake_fcinfo);
-#endif
 
 		if (ret == 0) {
 			elog(WARNING, "failed to find or no permission for js function %s", signature.str());
@@ -1717,8 +1654,6 @@ void GetMemoryInfo(v8::Local<v8::Object> obj) {
 	obj->Set(context, v8::String::NewFromUtf8(isolate, "external_memory").ToLocalChecked(), external).Check();
 }
 
-#if PG_VERSION_NUM >= 110000
-
 static void
 plv8_Commit(const FunctionCallbackInfo<v8::Value> &args)
 {
@@ -1750,5 +1685,3 @@ plv8_Rollback(const FunctionCallbackInfo<v8::Value> &args)
 	}
 	PG_END_TRY();
 }
-
-#endif

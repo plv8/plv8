@@ -197,9 +197,15 @@ ERROR:  a column definition list is required for functions returning "record"
 LINE 1: SELECT * FROM return_record(1, 'a');
                       ^
 SELECT * FROM return_record(1, 'a') AS t(j integer, s text);
-ERROR:  input of anonymous composite types is not implemented
+ERROR:  field name / property name mismatch
 SELECT * FROM return_record(1, 'a') AS t(x text, y text);
-ERROR:  input of anonymous composite types is not implemented
+ERROR:  field name / property name mismatch
+SELECT * FROM return_record(1, 'a') AS t(i integer, t text);
+ i | t 
+---+---
+ 1 | a
+(1 row)
+
 CREATE FUNCTION set_of_records() RETURNS SETOF rec AS
 $$
 	plv8.return_next( { "i": 1, "t": "a" } );

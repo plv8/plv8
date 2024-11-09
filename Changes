@@ -1,5 +1,12 @@
 Revision history for plv8
 
+3.2.4
+            - fix GUC assignment issue
+            - fix possible out of bounds in windowing
+            - better handling of composite types
+            - add named composite record support
+            - more removal of unsupported postgres version
+
 3.2.3       2024-09-08
             - automatic pgxn builds and pushes
             - postgres 17 support
@@ -27,7 +34,7 @@ Revision history for plv8
 
 3.1.10      2024-01-21
             - proper termination in cursors
-            
+
 3.1.9       2023-12-17
             - fix plv8_info()
             - fix upgrade script installation

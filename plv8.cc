@@ -216,14 +216,12 @@ void OOMErrorHandler(const char* location, const v8::OOMDetails &) {
 void GCEpilogueCallback(Isolate* isolate, GCType type, GCCallbackFlags /* flags */) {
 	HeapStatistics heap_statistics;
 	isolate->GetHeapStatistics(&heap_statistics);
-	//elog(NOTICE, "Current memory: %lld => %lld", heap_statistics.used_heap_size(), plv8_memory_limit * 1_MB);
 	if (type != GCType::kGCTypeIncrementalMarking
 		&& heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB) {
-		//elog(NOTICE, "Terminating");
 		const char *error_message = "Out of memory";
 		Local<v8::String>	result = ToString(error_message, 13);
 		isolate->ThrowException(result);
-		//isolate->setData(MEM_SOFTLIMIT_REACHED);
+
 		isolate->TerminateExecution();
 	}
 	if (heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB / 0.9
@@ -622,18 +620,9 @@ plv8_info(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	}
 
-#if PG_VERSION_NUM < 110000
-        execution_context = AllocSetContextCreate(
-                                                CurrentMemoryContext,
-                                                "plv8_info Context",
-                                                ALLOCSET_SMALL_MINSIZE,
-                                                ALLOCSET_SMALL_INITSIZE,
-                                                ALLOCSET_SMALL_MAXSIZE);
-#else
-        execution_context = AllocSetContextCreate(CurrentMemoryContext,
-                                                "plv8_info Context",
-                                                ALLOCSET_SMALL_SIZES);
-#endif
+  execution_context = AllocSetContextCreate(CurrentMemoryContext,
+                                          "plv8_info Context",
+                                          ALLOCSET_SMALL_SIZES);
 
 	old_context = MemoryContextSwitchTo(execution_context);
 
@@ -651,11 +640,8 @@ plv8_info(PG_FUNCTION_ARGS)
 		Local<v8::Value>	result;
 		Local<v8::Object>   obj = v8::Object::New(isolate);
 
-#if PG_VERSION_NUM >= 90500
 		char 			   *username = GetUserNameFromId(ContextVector[i]->user_id, false);
-#else
-		char 			   *username = GetUserNameFromId(ContextVector[i]->user_id);
-#endif
+
 		obj->Set(context, v8::String::NewFromUtf8Literal(isolate, "user"),
            v8::String::NewFromUtf8(isolate, username).ToLocalChecked()).Check();
 		GetMemoryInfo(obj);
@@ -690,7 +676,6 @@ plv8_info(PG_FUNCTION_ARGS)
 	return CStringGetTextDatum(out);
 }
 
-#if PG_VERSION_NUM >= 90000
 Datum
 plv8_inline_handler(PG_FUNCTION_ARGS)
 {
@@ -700,9 +685,6 @@ plv8_inline_handler(PG_FUNCTION_ARGS)
 
 	try
 	{
-#ifdef ENABLE_DEBUGGER_SUPPORT
-		Locker				lock;
-#endif  // ENABLE_DEBUGGER_SUPPORT
 		current_context = GetPlv8Context();
 		Isolate::Scope		scope(current_context->isolate);
 		HandleScope			handle_scope(current_context->isolate);
@@ -721,8 +703,6 @@ plv8_inline_handler(PG_FUNCTION_ARGS)
 
 	return (Datum) 0;	// keep compiler quiet
 }
-
-#endif
 
 #ifdef EXECUTION_TIMEOUT
 /*
@@ -807,14 +787,8 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 			current_context->interrupted = false;
 		}
 	}
-
-#if PG_VERSION_NUM >= 110000
 	if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT)
 		throw js_error("could not connect to SPI manager");
-#else
-	if (SPI_connect() != SPI_OK_CONNECT)
-		throw js_error("could not connect to SPI manager");
-#endif
 
 	// set up the signal handlers
 	if (int_handler == NULL) {
@@ -844,6 +818,7 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 
 	try {
 	MaybeLocal<v8::Value> result = fn->Call(ctx, receiver, nargs, args);
+
 	int	status = SPI_finish();
 
 #ifdef EXECUTION_TIMEOUT
@@ -903,14 +878,24 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Local<Context>		context = xenv->localContext();
 	Context::Scope		context_scope(context);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS];
+	Oid fn_oid = fcinfo->flinfo->fn_oid;
 
-#if PG_VERSION_NUM >= 110000
+ HeapTuple proctuple =
+      SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
+
+  Oid retoid;
+  Form_pg_proc pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
+
+  if (fcinfo && IsPolymorphicType(pg_proc_entry->prorettype)) {
+    retoid = get_fn_expr_rettype(fcinfo->flinfo);
+  } else {
+    retoid = pg_proc_entry->prorettype;
+  }
+  ReleaseSysCache(proctuple);
+
 	bool nonatomic = fcinfo->context &&
 		IsA(fcinfo->context, CallContext) &&
 		!castNode(CallContext, fcinfo->context)->atomic;
-#else
-  bool nonatomic = false;
-#endif
 
 	WindowFunctionSupport support(context, fcinfo);
 
@@ -931,11 +916,7 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	else
 	{
 		for (int i = 0; i < nargs; i++) {
-#if PG_VERSION_NUM < 120000
-			args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
-#else
 			args[i] = ToValue(fcinfo->args[i].value, fcinfo->args[i].isnull, &argtypes[i]);
-#endif
 		}
 	}
 
@@ -946,10 +927,25 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Local<v8::Value> result =
 		DoCall(context, fn, recv, nargs, args, nonatomic);
 
-	if (rettype)
-		return ToDatum(result, &fcinfo->isnull, rettype);
-	else
-		PG_RETURN_VOID();
+	if (retoid == RECORDOID)
+  {
+    Oid calltype;
+    TupleDesc tupdesc;
+    get_call_result_type(fcinfo, &calltype, &tupdesc);
+    if (tupdesc == NULL) {
+      return ToDatum(result, &fcinfo->isnull, rettype);
+    }
+    plv8_type type;
+    plv8_fill_type(&type, calltype);
+    return ToRecordDatum(result, &fcinfo->isnull, &type, tupdesc);
+  }
+  else
+  {
+    if (rettype)
+      return ToDatum(result, &fcinfo->isnull, rettype);
+    else
+      PG_RETURN_VOID( );
+  }
 }
 
 static Tuplestorestate *
@@ -1096,13 +1092,9 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	Handle<v8::Value>	args[10];
 	Datum				result = (Datum) 0;
 
-#if PG_VERSION_NUM >= 110000
 	bool nonatomic = fcinfo->context &&
 		IsA(fcinfo->context, CallContext) &&
 		!castNode(CallContext, fcinfo->context)->atomic;
-#else
-  bool nonatomic = false;
-#endif
 
 	Handle<Context>		context = xenv->localContext();
 	Context::Scope		context_scope(context);
@@ -1246,13 +1238,7 @@ plv8_call_validator(PG_FUNCTION_ARGS)
 	/* except for TRIGGER, RECORD, INTERNAL, VOID or polymorphic types */
 	if (functyptype == TYPTYPE_PSEUDO)
 	{
-#if PG_VERSION_NUM >= 130000
-                if (proc->prorettype == TRIGGEROID)
-#else
-                /* we assume OPAQUE with no arguments means a trigger */
-                if (proc->prorettype == TRIGGEROID ||
-                        (proc->prorettype == OPAQUEOID && proc->pronargs == 0))
-#endif
+    if (proc->prorettype == TRIGGEROID)
 			is_trigger = true;
 		else if (proc->prorettype != RECORDOID &&
 			proc->prorettype != VOIDOID &&
@@ -1268,9 +1254,6 @@ plv8_call_validator(PG_FUNCTION_ARGS)
 
 	try
 	{
-#ifdef ENABLE_DEBUGGER_SUPPORT
-		Locker				lock;
-#endif  // ENABLE_DEBUGGER_SUPPORT
 		/* Don't use validator's fcinfo */
 		plv8_proc	   *proc = Compile(fn_oid, NULL,
 									   true, is_trigger);
@@ -1891,13 +1874,9 @@ GetPlv8Context() {
 			TryCatch			try_catch(isolate);
 			MemoryContext		ctx = CurrentMemoryContext;
 			text *arg;
-#if PG_VERSION_NUM < 120000
-			FunctionCallInfoData fake_fcinfo;
-#else
 			// Stack-allocate FunctionCallInfoBaseData with
 			// space for 2 arguments:
 			LOCAL_FCINFO(fake_fcinfo, 2);
-#endif
 			FmgrInfo	flinfo;
 
 			char perm[16];
@@ -1907,17 +1886,6 @@ GetPlv8Context() {
 			PG_TRY();
 					{
 						Oid funcoid = DatumGetObjectId(DirectFunctionCall1(regprocin, CStringGetDatum(plv8_start_proc)));
-#if PG_VERSION_NUM < 120000
-						MemSet(&fake_fcinfo, 0, sizeof(fake_fcinfo));
-						MemSet(&flinfo, 0, sizeof(flinfo));
-						fake_fcinfo.flinfo = &flinfo;
-						flinfo.fn_oid = InvalidOid;
-						flinfo.fn_mcxt = CurrentMemoryContext;
-						fake_fcinfo.nargs = 2;
-						fake_fcinfo.arg[0] = ObjectIdGetDatum(funcoid);
-						fake_fcinfo.arg[1] = CStringGetDatum(arg);
-						Datum ret = has_function_privilege_id(&fake_fcinfo);
-#else
 						MemSet(&flinfo, 0, sizeof(flinfo));
 						fake_fcinfo->flinfo = &flinfo;
 						flinfo.fn_oid = InvalidOid;
@@ -1926,7 +1894,6 @@ GetPlv8Context() {
 						fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
 						fake_fcinfo->args[1].value = PointerGetDatum(arg);
 						Datum ret = has_function_privilege_id(fake_fcinfo);
-#endif
 
 						if (ret == 0) {
 							elog(WARNING, "failed to find js function %s", plv8_start_proc);
@@ -1960,16 +1927,6 @@ GetPlv8Context() {
 					throw js_error(try_catch);
 			}
 		}
-
-#ifdef ENABLE_DEBUGGER_SUPPORT
-		debug_message_context = v8::Persistent<v8::Context>::New(global_context);
-
-		v8::Locker locker;
-
-		v8::Debug::SetDebugMessageDispatchHandler(DispatchDebugMessages, true);
-
-		v8::Debug::EnableAgent("plv8", plv8_debugger_port, false);
-#endif  // ENABLE_DEBUGGER_SUPPORT
 	}
 	return my_context;
 }
@@ -2091,17 +2048,6 @@ Converter::Init()
 		PG_TRY();
 		{
 			if (m_memcontext == NULL)
-#if PG_VERSION_NUM < 110000
-				m_memcontext = AllocSetContextCreate(
-									CurrentMemoryContext,
-									"ConverterContext",
-									ALLOCSET_SMALL_MINSIZE,
-									ALLOCSET_SMALL_INITSIZE,
-									ALLOCSET_SMALL_MAXSIZE);
-			plv8_fill_type(&m_coltypes[c],
-						   m_tupdesc->attrs[c]->atttypid,
-						   m_memcontext);
-#else
 				m_memcontext = AllocSetContextCreate(
 									CurrentMemoryContext,
 									"ConverterContext",
@@ -2109,7 +2055,6 @@ Converter::Init()
 			plv8_fill_type(&m_coltypes[c],
 						   m_tupdesc->attrs[c].atttypid,
 						   m_memcontext);
-#endif
 		}
 		PG_CATCH();
 		{
@@ -2136,15 +2081,7 @@ Converter::ToValue(HeapTuple tuple)
 		if (TupleDescAttr(m_tupdesc, c)->attisdropped)
 			continue;
 
-#if PG_VERSION_NUM >= 90000
 		datum = heap_getattr(tuple, c + 1, m_tupdesc, &isnull);
-#else
-		/*
-		 * Due to the difference between C and C++ rules,
-		 * we cannot call heap_getattr from < 9.0 unfortunately.
-		 */
-		datum = nocachegetattr(tuple, c + 1, m_tupdesc, &isnull);
-#endif
 
 		obj->Set(context, m_colnames[c], ::ToValue(datum, isnull, &m_coltypes[c])).Check();
 	}

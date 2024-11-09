@@ -94,6 +94,7 @@ LANGUAGE plv8;
 SELECT * FROM return_record(1, 'a');
 SELECT * FROM return_record(1, 'a') AS t(j integer, s text);
 SELECT * FROM return_record(1, 'a') AS t(x text, y text);
+SELECT * FROM return_record(1, 'a') AS t(i integer, t text);
 
 CREATE FUNCTION set_of_records() RETURNS SETOF rec AS
 $$

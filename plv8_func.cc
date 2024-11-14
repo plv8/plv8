@@ -614,14 +614,10 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 		CString			typestr(array->Get(context, i).ToLocalChecked());
 		int32			typemod;
 
-#if PG_VERSION_NUM >= 90400
 #if PG_VERSION_NUM >= 160000
 		parseTypeString(typestr, &types[i], &typemod, NULL);
 #else
 		parseTypeString(typestr, &types[i], &typemod, false);
-#endif
-#else
-		parseTypeString(typestr, &types[i], &typemod);
 #endif
 	}
 

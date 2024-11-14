@@ -16,13 +16,13 @@
 
 
 extern "C" {
-#if PG_VERSION_NUM >= 90300
 #include "access/htup_details.h"
-#endif
 #include "access/xact.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_database.h"
 #include "catalog/pg_type.h"
 #include "commands/trigger.h"
+#include "common/hashfn.h"
 #include "executor/spi.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -33,14 +33,6 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
-
-#if PG_VERSION_NUM >= 120000
-#include "catalog/pg_database.h"
-#endif
-
-#if PG_VERSION_NUM >= 130000
-#include "common/hashfn.h"
-#endif
 
 #include <signal.h>
 
@@ -67,11 +59,9 @@ PG_FUNCTION_INFO_V1(plv8_info);
 
 PGDLLEXPORT void _PG_init(void);
 
-#if PG_VERSION_NUM >= 90000
 PGDLLEXPORT Datum	plv8_inline_handler(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(plv8_inline_handler);
-#endif
 } // extern "C"
 
 using namespace v8;
@@ -346,9 +336,7 @@ _PG_init(void)
                                    &plv8_start_proc,
                                    NULL,
                                    PGC_USERSET, 0,
-#if PG_VERSION_NUM >= 90100
                                    NULL,
-#endif
                                    NULL,
                                    NULL);
     }
@@ -365,9 +353,7 @@ _PG_init(void)
                                    &plv8_icu_data,
                                    NULL,
                                    PGC_USERSET, 0,
-#if PG_VERSION_NUM >= 90100
                                    NULL,
-#endif
                                    NULL,
                                    NULL);
     }
@@ -384,9 +370,7 @@ _PG_init(void)
                                    &plv8_v8_flags,
                                    NULL,
                                    PGC_USERSET, 0,
-#if PG_VERSION_NUM >= 90100
                                    NULL,
-#endif
                                    NULL,
                                    NULL);
     }
@@ -404,9 +388,7 @@ _PG_init(void)
                                 &plv8_debugger_port,
                                 35432, 0, 65536,
                                 PGC_USERSET, 0,
-#if PG_VERSION_NUM >= 90100
                                 NULL,
-#endif
                                 NULL,
                                 NULL);
     }
@@ -425,9 +407,7 @@ _PG_init(void)
                                 &plv8_execution_timeout,
                                 300, 1, 65536,
                                 PGC_USERSET, 0,
-#if PG_VERSION_NUM >= 90100
                                 NULL,
-#endif
                                 NULL,
                                 NULL);
     }
@@ -445,9 +425,7 @@ _PG_init(void)
                                 (int *) &plv8_memory_limit,
                                 256, 256, 3096, // hardcoded v8 limits for isolates
                                 PGC_SUSET, 0,
-#if PG_VERSION_NUM >= 90100
                                 NULL,
-#endif
                                 NULL,
                                 NULL);
     }
@@ -529,9 +507,6 @@ plv8_call_handler(PG_FUNCTION_ARGS)
 
 	try
 	{
-#ifdef ENABLE_DEBUGGER_SUPPORT
-		Locker				lock;
-#endif  // ENABLE_DEBUGGER_SUPPORT
 		Isolate::Scope	scope(current_context->isolate);
 		HandleScope	handle_scope(current_context->isolate);
 
@@ -1016,13 +991,9 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	TupleDesc			tupdesc;
 	Tuplestorestate	   *tupstore;
 
-#if PG_VERSION_NUM >= 110000
 	bool nonatomic = fcinfo->context &&
 		IsA(fcinfo->context, CallContext) &&
 		!castNode(CallContext, fcinfo->context)->atomic;
-#else
-  bool nonatomic = false;
-#endif
 
 	tupstore = CreateTupleStore(fcinfo, &tupdesc);
 
@@ -1038,11 +1009,7 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	SRFSupport support(context, &conv, tupstore);
 
 	for (int i = 0; i < nargs; i++) {
-#if PG_VERSION_NUM < 120000
-		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
-#else
 		args[i] = ToValue(fcinfo->args[i].value, fcinfo->args[i].isnull, &argtypes[i]);
-#endif
 	}
 
 	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
@@ -1685,12 +1652,9 @@ find_js_function(Oid fn_oid)
 		tuple = SearchSysCache(LANGNAME, NameGetDatum(&langnames[langno]), 0, 0, 0);
 		if (HeapTupleIsValid(tuple))
 		{
-#if PG_VERSION_NUM < 120000
-			Oid langtupoid = HeapTupleGetOid(tuple);
-#else
 			Form_pg_database datForm = (Form_pg_database) GETSTRUCT(tuple);
 			Oid langtupoid = datForm->oid;
-#endif
+
 			ReleaseSysCache(tuple);
 			if (langtupoid == prolang)
 				break;
@@ -2142,11 +2106,7 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
 		/* Make sure dropped columns are skipped by backend code. */
-#if PG_VERSION_NUM < 110000
-		if (m_tupdesc->attrs[c]->attisdropped)
-#else
 		if (m_tupdesc->attrs[c].attisdropped)
-#endif
 		{
 			nulls[c] = true;
 			continue;

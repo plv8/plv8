@@ -1032,12 +1032,17 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 		 */
 		if (!ARR_HASNULL(array) && ARR_NDIM(array) <= 1)
 		{
-			int			data_bytes = ARR_SIZE(array) -
+			if (ARR_ELEMTYPE(array)==INT2OID || ARR_ELEMTYPE(array)==INT4OID ||
+          		   ARR_ELEMTYPE(array)==INT8OID || ARR_ELEMTYPE(array)==FLOAT4OID ||
+          		   ARR_ELEMTYPE(array)==FLOAT8OID) 
+			{
+				int			data_bytes = ARR_SIZE(array) -
 										ARR_OVERHEAD_NONULLS(1);
-			return CreateExternalArray(ARR_DATA_PTR(array),
+				return CreateExternalArray(ARR_DATA_PTR(array),
 									   type->ext_array,
 									   data_bytes,
 									   PointerGetDatum(array));
+			}
 		}
 
 		throw js_error("NULL element, or multi-dimension array not allowed"

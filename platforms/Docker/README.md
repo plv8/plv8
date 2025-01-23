@@ -4,7 +4,7 @@ While PLV8 does not currently provide docker images, we do have a `Dockerfile` w
 
 ## PostgreSQL Versions
 
-There are `Dockerfile`s for Debian `bullseys` and `bookworm`, along with `alpine`.
+There are `Dockerfile`s for Debian `bullseye` and `bookworm`, along with `alpine`.
 
 ## Building
 

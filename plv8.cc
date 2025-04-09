@@ -2017,7 +2017,7 @@ Converter::Init()
 									"ConverterContext",
 									ALLOCSET_DEFAULT_SIZES);
 			plv8_fill_type(&m_coltypes[c],
-						   m_tupdesc->attrs[c].atttypid,
+						   TupleDescAttr(m_tupdesc, c)->atttypid,
 						   m_memcontext);
 		}
 		PG_CATCH();
@@ -2106,7 +2106,7 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
 		/* Make sure dropped columns are skipped by backend code. */
-		if (m_tupdesc->attrs[c].attisdropped)
+		if (TupleDescAttr(m_tupdesc, c)->attisdropped)
 		{
 			nulls[c] = true;
 			continue;

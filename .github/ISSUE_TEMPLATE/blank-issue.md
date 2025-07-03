@@ -1,5 +1,5 @@
 ---
-name: Blank Issue Template
+name: Blank Issue
 about: For blank issues
 title: ''
 labels: ''

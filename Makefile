@@ -23,6 +23,7 @@ else
 		CCFLAGS += -stdlib=libc++
 		SHLIB_LINK += -stdlib=libc++ -std=c++17 -lc++
 		NUMPROC := $(shell sysctl hw.ncpu | awk '{print $$2}')
+		PATCH_V8 := patches/v8-cmake/macos-build.patch
 	endif
 	ifeq ($(UNAME_S),Linux)
 		SHLIB_LINK += -lrt -std=c++17
@@ -43,9 +44,10 @@ plv8_config.h plv8.so: v8
 
 deps/v8-cmake/README.md:
 	@git submodule update --init --recursive
+	$(foreach patch,$(PATCH_V8),cd deps/v8-cmake && patch -p1 <../../$(patch);)
 
 deps/v8-cmake/build/libv8_libbase.a: deps/v8-cmake/README.md
-	@cd deps/v8-cmake && mkdir -p build && cd build && cmake -Denable-fPIC=ON -DCMAKE_BUILD_TYPE=Release ../ && make -j $(NUMPROC)
+	@cd deps/v8-cmake && mkdir -p build && cd build && cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Denable-fPIC=ON -DCMAKE_BUILD_TYPE=Release ../ && make -j $(NUMPROC)
 
 v8: deps/v8-cmake/build/libv8_libbase.a
 

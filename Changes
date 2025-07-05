@@ -1,11 +1,15 @@
 Revision history for plv8
 
-3.2.4
+3.2.4       2025-07-05
             - fix GUC assignment issue
             - fix possible out of bounds in windowing
             - better handling of composite types
             - add named composite record support
+            - better management of in/out/inout variables
             - more removal of unsupported postgres version
+            - patch v8 build from breaking macos 15.5 change
+            - fix macro attribute access (enables pg 18 support)
+            - additional checks for plv8 external arrays
 
 3.2.3       2024-09-08
             - automatic pgxn builds and pushes

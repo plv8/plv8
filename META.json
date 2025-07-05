@@ -22,7 +22,7 @@
     "plv8": {
       "file": "plv8--3.2.4.sql",
       "docfile": "docs/PGXN.md",
-      "version": "3.2.3",
+      "version": "3.2.4",
       "abstract": "A procedural language in JavaScript"
     }
   },

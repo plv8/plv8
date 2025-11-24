@@ -12,22 +12,24 @@
 #endif
 
 #include "libplatform/libplatform.h"
+#include "plv8_allocator.h"
 
-#include <new>
 
 extern "C" {
-#if PG_VERSION_NUM >= 90300
 #include "access/htup_details.h"
-#endif
 #include "access/xact.h"
+#include "catalog/pg_language.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_database.h"
 #include "catalog/pg_type.h"
 #include "commands/trigger.h"
+#include "common/hashfn.h"
 #include "executor/spi.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
+#include "utils/guc_tables.h"
 #include "utils/memutils.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -47,30 +49,20 @@ PG_MODULE_MAGIC;
 
 PGDLLEXPORT Datum	plv8_call_handler(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plv8_call_validator(PG_FUNCTION_ARGS);
-PGDLLEXPORT Datum	plcoffee_call_handler(PG_FUNCTION_ARGS);
-PGDLLEXPORT Datum	plcoffee_call_validator(PG_FUNCTION_ARGS);
-PGDLLEXPORT Datum	plls_call_handler(PG_FUNCTION_ARGS);
-PGDLLEXPORT Datum	plls_call_validator(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_reset(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_info(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(plv8_call_handler);
 PG_FUNCTION_INFO_V1(plv8_call_validator);
-PG_FUNCTION_INFO_V1(plcoffee_call_handler);
-PG_FUNCTION_INFO_V1(plcoffee_call_validator);
-PG_FUNCTION_INFO_V1(plls_call_handler);
-PG_FUNCTION_INFO_V1(plls_call_validator);
+PG_FUNCTION_INFO_V1(plv8_reset);
+PG_FUNCTION_INFO_V1(plv8_info);
 
 
 PGDLLEXPORT void _PG_init(void);
 
-#if PG_VERSION_NUM >= 90000
 PGDLLEXPORT Datum	plv8_inline_handler(PG_FUNCTION_ARGS);
-PGDLLEXPORT Datum	plcoffee_inline_handler(PG_FUNCTION_ARGS);
-PGDLLEXPORT Datum	plls_inline_handler(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(plv8_inline_handler);
-PG_FUNCTION_INFO_V1(plcoffee_inline_handler);
-PG_FUNCTION_INFO_V1(plls_inline_handler);
-#endif
 } // extern "C"
 
 using namespace v8;
@@ -93,7 +85,9 @@ typedef struct plv8_proc_cache
 	Oid						argtypes[FUNC_MAX_ARGS];
 } plv8_proc_cache;
 
-Isolate* plv8_isolate = NULL;
+plv8_context *current_context = nullptr;
+size_t plv8_memory_limit = 0;
+size_t plv8_last_heap_size = 0;
 
 /*
  * The function and context are created at the first invocation.  Their
@@ -102,9 +96,10 @@ Isolate* plv8_isolate = NULL;
  */
 typedef struct plv8_exec_env
 {
+	Isolate 			   *isolate;
 	Persistent<Object>		recv;
 	Persistent<Context>		context;
-	Local<Context> localContext() { return Local<Context>::New(plv8_isolate, context) ; }
+	Local<Context> localContext() { return Local<Context>::New(isolate, context) ; }
 	struct plv8_exec_env   *next;
 } plv8_exec_env;
 
@@ -121,23 +116,11 @@ typedef struct plv8_proc
 	plv8_type				argtypes[FUNC_MAX_ARGS];
 } plv8_proc;
 
-/*
- * For the security reasons, the global context is separated
- * between users and it's associated with user id.
- */
-typedef struct plv8_context
-{
-	Persistent<Context>		context;
-	Local<Context> localContext() { return Local<Context>::New(plv8_isolate, context) ; }
-	Oid						user_id;
-} plv8_context;
-
 static HTAB *plv8_proc_cache_hash = NULL;
 
 static plv8_exec_env		   *exec_env_head = NULL;
 
-extern const unsigned char coffee_script_binary_data[];
-extern const unsigned char livescript_binary_data[];
+static void killPlv8Context(plv8_context *ctx);
 
 /*
  * lower_case_functions are postgres-like C functions.
@@ -151,21 +134,22 @@ static void plv8_xact_cb(XactEvent event, void *arg);
  * CamelCaseFunctions are C++ functions.
  * They could raise errors with C++ throw statements, or never throw exceptions.
  */
-static plv8_exec_env *CreateExecEnv(Handle<Function> script);
-static plv8_exec_env *CreateExecEnv(Persistent<Function>& script);
+static plv8_exec_env *CreateExecEnv(Handle<Function> function, plv8_context *context);
+static plv8_exec_env *CreateExecEnv(Persistent<Function>& function, plv8_context *context);
 static plv8_proc *Compile(Oid fn_oid, FunctionCallInfo fcinfo,
-					bool validate, bool is_trigger, Dialect dialect);
-static Local<Function> CompileFunction(Persistent<Context>& global_context,
+					bool validate, bool is_trigger);
+static Local<Function> CompileFunction(plv8_context *global_context,
 					const char *proname, int proarglen,
 					const char *proargs[], const char *prosrc,
-					bool is_trigger, bool retset, Dialect dialect);
+					bool is_trigger, bool retset);
 static Datum CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		int nargs, plv8_type argtypes[], plv8_type *rettype);
 static Datum CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		int nargs, plv8_type argtypes[], plv8_type *rettype);
 static Datum CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv);
-static void GetGlobalContext(Persistent<Context>& global_context);
-static Local<ObjectTemplate> GetGlobalObjectTemplate();
+static plv8_context *GetPlv8Context();
+static Local<ObjectTemplate> GetGlobalObjectTemplate(Isolate *isolate);
+static void CreateIsolate(plv8_context *context);
 
 /* A GUC to specify a custom start up function to call */
 static char *plv8_start_proc = NULL;
@@ -182,6 +166,8 @@ static int plv8_debugger_port;
 #ifdef EXECUTION_TIMEOUT
 static int plv8_execution_timeout = 300;
 #endif
+
+static std::unique_ptr<v8::Platform> v8_platform = NULL;
 
 /*
  * We use vector instead of hash since the size of this array
@@ -210,6 +196,123 @@ void DispatchDebugMessages() {
 }
 #endif  // ENABLE_DEBUGGER_SUPPORT
 
+void OOMErrorHandler(const char* location, const v8::OOMDetails &) {
+	Isolate *isolate = Isolate::GetCurrent();
+	isolate->TerminateExecution();
+	// set it to kill the user context and isolate
+	current_context->is_dead = true;
+	elog(ERROR, "Out of memory error");
+}
+
+void GCEpilogueCallback(Isolate* isolate, GCType type, GCCallbackFlags /* flags */) {
+	HeapStatistics heap_statistics;
+	isolate->GetHeapStatistics(&heap_statistics);
+	if (type != GCType::kGCTypeIncrementalMarking
+		&& heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB) {
+		const char *error_message = "Out of memory";
+		Local<v8::String>	result = ToString(error_message, 13);
+		isolate->ThrowException(result);
+
+		isolate->TerminateExecution();
+	}
+	if (heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB / 0.9
+		&& plv8_last_heap_size < plv8_memory_limit * 1_MB / 0.9) {
+		isolate->LowMemoryNotification();
+	}
+	plv8_last_heap_size = heap_statistics.used_heap_size();
+}
+
+size_t NearHeapLimitHandler(void* data, size_t current_heap_limit,
+								size_t initial_heap_limit) {
+	Isolate *isolate = Isolate::GetCurrent();
+	isolate->TerminateExecution();
+	// need to give back more space
+	// to make sure it can unwind the stack and process exceptions
+	return current_heap_limit + 1_MB;
+}
+
+void PromiseRejectCB(PromiseRejectMessage rejection) {
+	auto event = rejection.GetEvent();
+	if (event == kPromiseRejectAfterResolved || event == kPromiseResolveAfterResolved)
+		return;
+	auto	promise = rejection.GetPromise();
+	auto	isolate = promise->GetIsolate();
+
+	if (rejection.GetEvent() == v8::kPromiseHandlerAddedAfterReject) {
+		if (current_context->ignore_unhandled_promises) return;
+		// Remove handled promises from the list
+		auto& unhandled_promises = current_context->unhandled_promises;
+		for (auto it = unhandled_promises.begin(); it != unhandled_promises.end(); ++it) {
+			auto unhandled_promise = std::get<0>(*it).Get(isolate);
+			if (unhandled_promise == promise) {
+				unhandled_promises.erase(it--);
+			}
+		}
+		return;
+	}
+
+	auto exception = rejection.GetValue();
+	Local<Message> message;
+	// Assume that all objects are stack-traces.
+	if (exception->IsObject()) {
+		message = Exception::CreateMessage(isolate, exception);
+	}
+	if (!exception->IsNativeError() &&
+		(message.IsEmpty() || message->GetStackTrace().IsEmpty())) {
+		// If there is no real Error object, manually throw and catch a stack trace.
+		TryCatch try_catch(isolate);
+		try_catch.SetVerbose(true);
+		isolate->ThrowException(Exception::Error(
+				v8::String::NewFromUtf8Literal(isolate, "Unhandled Promise.")));
+		message = try_catch.Message();
+		exception = try_catch.Exception();
+	}
+	if (current_context->ignore_unhandled_promises) return;
+	current_context->unhandled_promises.emplace_back(
+			v8::Global<v8::Promise>(isolate, promise),
+			v8::Global<v8::Message>(isolate, message),
+			v8::Global<v8::Value>(isolate, exception));
+}
+
+void HandleUnhandledPromiseRejections() {
+	// Avoid recursive calls to HandleUnhandledPromiseRejections.
+	auto isolate = current_context->isolate;
+	if (current_context->ignore_unhandled_promises) return;
+	current_context->ignore_unhandled_promises = true;
+	HandleScope scope(isolate);
+	// Ignore promises that get added during error reporting.
+	size_t i = 0;
+	auto& unhandled_promises = current_context->unhandled_promises;
+	for (; i < unhandled_promises.size(); i++) {
+		const auto& tuple = unhandled_promises[i];
+		Local<v8::Message> message = std::get<1>(tuple).Get(isolate);
+		Local<v8::Value> exception = std::get<2>(tuple).Get(isolate);
+		js_error error(isolate, exception, message);
+		error.log(WARNING, "Unhandled Promise rejection: %s");
+	}
+	unhandled_promises.clear();
+	current_context->ignore_unhandled_promises = false;
+}
+
+static void
+CreateIsolate(plv8_context *context) {
+	Isolate *isolate;
+	Isolate::CreateParams params;
+	params.array_buffer_allocator = new ArrayAllocator(plv8_memory_limit * 1_MB);
+	//params.array_buffer_allocator =
+  //    v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+	ResourceConstraints rc;
+	rc.ConfigureDefaults(plv8_memory_limit * 1_MB * 2, plv8_memory_limit * 1_MB * 2);
+	params.constraints = rc;
+	isolate = Isolate::New(params);
+	isolate->SetOOMErrorHandler(OOMErrorHandler);
+	isolate->AddGCEpilogueCallback(GCEpilogueCallback);
+	isolate->AddNearHeapLimitCallback(NearHeapLimitHandler, NULL);
+	isolate->SetPromiseRejectCallback(PromiseRejectCB);
+	context->isolate = isolate;
+	context->array_buffer_allocator = params.array_buffer_allocator;
+}
+
 void
 _PG_init(void)
 {
@@ -221,69 +324,113 @@ _PG_init(void)
 	plv8_proc_cache_hash = hash_create("PLv8 Procedures", 32,
 									   &hash_ctl, HASH_ELEM | HASH_FUNCTION);
 
-	DefineCustomStringVariable("plv8.start_proc",
-							   gettext_noop("PLV8 function to run once when PLV8 is first used."),
-							   NULL,
-							   &plv8_start_proc,
-							   NULL,
-							   PGC_USERSET, 0,
-#if PG_VERSION_NUM >= 90100
-							   NULL,
-#endif
-							   NULL,
-							   NULL);
+    config_generic *guc_value;
 
-	DefineCustomStringVariable("plv8.icu_data",
-								 gettext_noop("ICU data file directory."),
-								 NULL,
-								 &plv8_icu_data,
-								 NULL,
-								 PGC_USERSET, 0,
-#if PG_VERSION_NUM >= 90100
-								 NULL,
-#endif
-								 NULL,
-								 NULL);
+#define START_PROC_VAR "plv8.start_proc"
+    guc_value = plv8_find_option(START_PROC_VAR);
+    if (guc_value != NULL) {
+        plv8_start_proc = plv8_string_option(guc_value);
+    } else {
+        DefineCustomStringVariable(START_PROC_VAR,
+                                   gettext_noop("PLV8 function to run once when PLV8 is first used."),
+                                   NULL,
+                                   &plv8_start_proc,
+                                   NULL,
+                                   PGC_USERSET, 0,
+                                   NULL,
+                                   NULL,
+                                   NULL);
+    }
+#undef START_PROC_VAR
 
-	DefineCustomStringVariable("plv8.v8_flags",
-							   gettext_noop("V8 engine initialization flags (e.g. --harmony for all current harmony features)."),
-							   NULL,
-							   &plv8_v8_flags,
-							   NULL,
-							   PGC_USERSET, 0,
-#if PG_VERSION_NUM >= 90100
-							   NULL,
-#endif
-							   NULL,
-							   NULL);
+#define ICU_DATA_VAR "plv8.icu_data"
+    guc_value = plv8_find_option(ICU_DATA_VAR);
+    if (guc_value != NULL) {
+        plv8_icu_data = plv8_string_option(guc_value);
+    } else {
+        DefineCustomStringVariable(ICU_DATA_VAR,
+                                   gettext_noop("ICU data file directory."),
+                                   NULL,
+                                   &plv8_icu_data,
+                                   NULL,
+                                   PGC_USERSET, 0,
+                                   NULL,
+                                   NULL,
+                                   NULL);
+    }
+#undef ICU_DATA_VAR
 
-	DefineCustomIntVariable("plv8.debugger_port",
-							gettext_noop("V8 remote debug port."),
-							gettext_noop("The default value is 35432.  "
-										 "This is effective only if PLV8 is built with ENABLE_DEBUGGER_SUPPORT."),
-							&plv8_debugger_port,
-							35432, 0, 65536,
-							PGC_USERSET, 0,
-#if PG_VERSION_NUM >= 90100
-							NULL,
-#endif
-							NULL,
-							NULL);
+#define V8_FLAGS_VAR "plv8.v8_flags"
+    guc_value = plv8_find_option(V8_FLAGS_VAR);
+    if (guc_value != NULL) {
+        plv8_v8_flags = plv8_string_option(guc_value);
+    } else {
+        DefineCustomStringVariable(V8_FLAGS_VAR,
+                                   gettext_noop("V8 engine initialization flags (e.g. --harmony for all current harmony features)."),
+                                   NULL,
+                                   &plv8_v8_flags,
+                                   NULL,
+                                   PGC_USERSET, 0,
+                                   NULL,
+                                   NULL,
+                                   NULL);
+    }
+#undef V8_FLAGS_VAR
+
+#define DEBUGGER_PORT_VAR "plv8.debugger_port"
+    guc_value = plv8_find_option(DEBUGGER_PORT_VAR);
+    if (guc_value != NULL) {
+        plv8_debugger_port = plv8_int_option(guc_value);
+    } else {
+        DefineCustomIntVariable(DEBUGGER_PORT_VAR,
+                                gettext_noop("V8 remote debug port."),
+                                gettext_noop("The default value is 35432.  "
+                                             "This is effective only if PLV8 is built with ENABLE_DEBUGGER_SUPPORT."),
+                                &plv8_debugger_port,
+                                35432, 0, 65536,
+                                PGC_USERSET, 0,
+                                NULL,
+                                NULL,
+                                NULL);
+    }
+#undef DEBUGGER_PORT_VAR
 
 #ifdef EXECUTION_TIMEOUT
-	DefineCustomIntVariable("plv8.execution_timeout",
-							gettext_noop("V8 execution timeout."),
-							gettext_noop("The default value is 300 seconds.  "
-										 "This allows you to override the default execution timeout."),
-							&plv8_execution_timeout,
-							300, 1, 65536,
-							PGC_USERSET, 0,
-#if PG_VERSION_NUM >= 90100
-							NULL,
+#define EXECUTION_TIMEOUT_VAR "plv8.execution_timeout"
+	guc_value = plv8_find_option(EXECUTION_TIMEOUT_VAR);
+	if (guc_value != NULL) {
+		plv8_execution_timeout = plv8_int_option(guc_value);
+	} else {
+        DefineCustomIntVariable(EXECUTION_TIMEOUT_VAR,
+                                gettext_noop("V8 execution timeout."),
+                                gettext_noop("The default value is 300 seconds.  "
+                                             "This allows you to override the default execution timeout."),
+                                &plv8_execution_timeout,
+                                300, 1, 65536,
+                                PGC_USERSET, 0,
+                                NULL,
+                                NULL,
+                                NULL);
+    }
+#undef EXECUTION_TIMEOUT_VAR
 #endif
-							NULL,
-							NULL);
-#endif
+
+#define MEMORY_LIMIT_VAR "plv8.memory_limit"
+    guc_value = plv8_find_option(MEMORY_LIMIT_VAR);
+    if (guc_value != NULL) {
+        plv8_memory_limit = plv8_int_option(guc_value);
+    } else {
+        DefineCustomIntVariable(MEMORY_LIMIT_VAR,
+                                gettext_noop("Per-isolate memory limit in MBytes"),
+                                gettext_noop("The default value is 256 MB"),
+                                (int *) &plv8_memory_limit,
+                                256, 256, 3096, // hardcoded v8 limits for isolates
+                                PGC_SUSET, 0,
+                                NULL,
+                                NULL,
+                                NULL);
+    }
+#undef MEMORY_LIMIT_VAR
 
 	RegisterXactCallback(plv8_xact_cb, NULL);
 
@@ -300,17 +447,17 @@ _PG_init(void)
 #if (V8_MAJOR_VERSION == 4 && V8_MINOR_VERSION >= 6) || V8_MAJOR_VERSION >= 5
 	V8::InitializeExternalStartupData("plv8");
 #endif
-	Platform* platform = platform::CreateDefaultPlatform();
-	V8::InitializePlatform(platform);
-	V8::Initialize();
-	if (plv8_v8_flags != NULL) {
-	      V8::SetFlagsFromString(plv8_v8_flags, strlen(plv8_v8_flags));
+	if (!v8_platform) {
+		v8_platform = platform::NewDefaultPlatform();
 	}
-	Isolate::CreateParams params;
-	params.array_buffer_allocator = v8::ArrayBuffer::Allocator::NewDefaultAllocator();;
-	plv8_isolate = Isolate::New(params);
-	plv8_isolate->Enter();
 
+	if (plv8_v8_flags != NULL) {
+		V8::SetFlagsFromString(plv8_v8_flags);
+	}
+
+	V8::InitializePlatform(v8_platform.get());
+
+	V8::Initialize();
 }
 
 static void
@@ -334,13 +481,14 @@ plv8_xact_cb(XactEvent event, void *arg)
 }
 
 static inline plv8_exec_env *
-plv8_new_exec_env()
+plv8_new_exec_env(Isolate *isolate)
 {
 	plv8_exec_env	   *xenv = (plv8_exec_env *)
 		MemoryContextAllocZero(TopTransactionContext, sizeof(plv8_exec_env));
 
 	new(&xenv->context) Persistent<Context>();
 	new(&xenv->recv) Persistent<Object>();
+	xenv->isolate = isolate;
 
 	/*
 	 * Add it to the list, which will be freed in the end of top transaction.
@@ -351,24 +499,23 @@ plv8_new_exec_env()
 	return xenv;
 }
 
-static Datum
-common_pl_call_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
+Datum
+plv8_call_handler(PG_FUNCTION_ARGS)
 {
+	current_context = GetPlv8Context();
 	Oid		fn_oid = fcinfo->flinfo->fn_oid;
 	bool	is_trigger = CALLED_AS_TRIGGER(fcinfo);
 
 	try
 	{
-#ifdef ENABLE_DEBUGGER_SUPPORT
-		Locker				lock;
-#endif  // ENABLE_DEBUGGER_SUPPORT
-		HandleScope	handle_scope(plv8_isolate);
+		Isolate::Scope	scope(current_context->isolate);
+		HandleScope	handle_scope(current_context->isolate);
 
 		if (!fcinfo->flinfo->fn_extra)
 		{
 			plv8_proc	   *proc = Compile(fn_oid, fcinfo,
-										   false, is_trigger, dialect);
-			proc->xenv = CreateExecEnv(proc->cache->function);
+										   false, is_trigger);
+			proc->xenv = CreateExecEnv(proc->cache->function, current_context);
 			fcinfo->flinfo->fn_extra = proc;
 		}
 
@@ -390,27 +537,123 @@ common_pl_call_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 	return (Datum) 0;	// keep compiler quiet
 }
 
-Datum
-plv8_call_handler(PG_FUNCTION_ARGS)
-{
-	return common_pl_call_handler(fcinfo, PLV8_DIALECT_NONE);
+
+static void killPlv8Context(plv8_context *ctx) {
+	HASH_SEQ_STATUS		status;
+	plv8_proc_cache*	cache;
+
+	// need to search and reset all the user functions which were created in the old context
+	hash_seq_init(&status, plv8_proc_cache_hash);
+	cache = (plv8_proc_cache *) hash_seq_search(&status);
+	while (cache != nullptr) {
+		if (cache->user_id == ctx->user_id) {
+			if (cache->prosrc)
+			{
+				pfree(cache->prosrc);
+				cache->prosrc = NULL;
+			}
+			cache->function.Reset();
+		}
+		cache = (plv8_proc_cache *) hash_seq_search(&status);
+	}
+	ctx->isolate->Dispose();
+	delete ctx->array_buffer_allocator;
 }
 
 Datum
-plcoffee_call_handler(PG_FUNCTION_ARGS)
+plv8_reset(PG_FUNCTION_ARGS)
 {
-	return common_pl_call_handler(fcinfo, PLV8_DIALECT_COFFEE);
+	Oid					user_id = GetUserId();
+	unsigned long		i;
+
+	for (i = 0; i < ContextVector.size(); i++)
+	{
+		if (ContextVector[i]->user_id == user_id)
+		{
+			plv8_context * context = ContextVector[i];
+			ContextVector.erase(ContextVector.begin() + i);
+			killPlv8Context(context);
+			pfree(context);
+			break;
+		}
+	}
+	return (Datum) 0;
 }
 
 Datum
-plls_call_handler(PG_FUNCTION_ARGS)
+plv8_info(PG_FUNCTION_ARGS)
 {
-	return common_pl_call_handler(fcinfo, PLV8_DIALECT_LIVESCRIPT);
+	unsigned long		i;
+	unsigned long 		size = ContextVector.size();
+	char 				**infos = nullptr;
+	size_t 				*lengths = nullptr;
+	size_t 				total_length = 3; // length of "[]\0"
+
+	MemoryContext execution_context, old_context;
+
+	if (size == 0)
+	{
+		PG_RETURN_NULL();
+	}
+
+  execution_context = AllocSetContextCreate(CurrentMemoryContext,
+                                          "plv8_info Context",
+                                          ALLOCSET_SMALL_SIZES);
+
+	old_context = MemoryContextSwitchTo(execution_context);
+
+	infos = (char **) palloc(sizeof(char *) * size);
+	lengths = (size_t *) palloc(sizeof(size_t) * size);
+
+	for (i = 0; i < size; i++)
+	{
+		Isolate 	   	   *isolate = ContextVector[i]->isolate;
+		Isolate::Scope		scope(isolate);
+		HandleScope			handle_scope(isolate);
+		Local<Context>		context = ContextVector[i]->localContext();
+		Context::Scope		context_scope(context);
+		JSONObject 			JSON;
+		Local<v8::Value>	result;
+		Local<v8::Object>   obj = v8::Object::New(isolate);
+
+		char 			   *username = GetUserNameFromId(ContextVector[i]->user_id, false);
+
+		obj->Set(context, v8::String::NewFromUtf8Literal(isolate, "user"),
+           v8::String::NewFromUtf8(isolate, username).ToLocalChecked()).Check();
+		GetMemoryInfo(obj);
+
+		result = JSON.Stringify(obj);
+		CString str(result);
+
+		infos[i] = pstrdup(str.str());
+		lengths[i] = strlen(infos[i]);
+		total_length += lengths[i] + 1; // add 1 byte for ','
+	}
+
+	char *out = (char *) palloc0(total_length);
+	out[0] = '[';
+	size_t current = 0;
+	for (i = 0; i < size; i++)
+	{
+		++current;
+		strcpy(out + current, infos[i]);
+		current += lengths[i];
+		if (i != size - 1)
+		{
+			out[current] = ',';
+		}
+	}
+
+	out[current] = ']';
+	out[current + 1] = '\0';
+
+	MemoryContextSwitchTo(old_context);
+
+	return CStringGetTextDatum(out);
 }
 
-#if PG_VERSION_NUM >= 90000
-static Datum
-common_pl_inline_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
+Datum
+plv8_inline_handler(PG_FUNCTION_ARGS)
 {
 	InlineCodeBlock *codeblock = (InlineCodeBlock *) DatumGetPointer(PG_GETARG_DATUM(0));
 
@@ -418,18 +661,17 @@ common_pl_inline_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 
 	try
 	{
-#ifdef ENABLE_DEBUGGER_SUPPORT
-		Locker				lock;
-#endif  // ENABLE_DEBUGGER_SUPPORT
-		HandleScope			handle_scope(plv8_isolate);
+		current_context = GetPlv8Context();
+		Isolate::Scope		scope(current_context->isolate);
+		HandleScope			handle_scope(current_context->isolate);
 		char			   *source_text = codeblock->source_text;
+		Persistent<Context> global_context;
+		global_context.Reset(current_context->isolate, current_context->context);
 
-		Persistent<Context>	global_context;
-		GetGlobalContext(global_context);
-		Local<Function>	function = CompileFunction(global_context,
+		Local<Function>	function = CompileFunction(current_context,
 										NULL, 0, NULL,
-										source_text, false, false, dialect);
-		plv8_exec_env	   *xenv = CreateExecEnv(function);
+										source_text, false, false);
+		plv8_exec_env	   *xenv = CreateExecEnv(function, current_context);
 		return CallFunction(fcinfo, xenv, 0, NULL, NULL);
 	}
 	catch (js_error& e)	{ e.rethrow(); }
@@ -437,25 +679,6 @@ common_pl_inline_handler(PG_FUNCTION_ARGS, Dialect dialect) throw()
 
 	return (Datum) 0;	// keep compiler quiet
 }
-
-Datum
-plv8_inline_handler(PG_FUNCTION_ARGS)
-{
-	return common_pl_inline_handler(fcinfo, PLV8_DIALECT_NONE);
-}
-
-Datum
-plcoffee_inline_handler(PG_FUNCTION_ARGS)
-{
-	return common_pl_inline_handler(fcinfo, PLV8_DIALECT_COFFEE);
-}
-
-Datum
-plls_inline_handler(PG_FUNCTION_ARGS)
-{
-	return common_pl_inline_handler(fcinfo, PLV8_DIALECT_LIVESCRIPT);
-}
-#endif
 
 #ifdef EXECUTION_TIMEOUT
 /*
@@ -467,8 +690,9 @@ plls_inline_handler(PG_FUNCTION_ARGS)
 DWORD WINAPI
 Breakout (LPVOID lpParam)
 {
+	Isolate *isolate = (Isolate *) lpParam;
 	Sleep(plv8_execution_timeout * 1000);
-	v8::V8::TerminateExecution(plv8_isolate);
+	isolate->TerminateExecution();
 
 	return 0;
 }
@@ -476,9 +700,10 @@ Breakout (LPVOID lpParam)
 void *
 Breakout (void *d)
 {
+	auto *isolate = (Isolate *) d;
 	sleep(plv8_execution_timeout);
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	v8::V8::TerminateExecution(plv8_isolate);
+	isolate->TerminateExecution();
 
 	return NULL;
 }
@@ -486,6 +711,7 @@ Breakout (void *d)
 #endif
 void *int_handler = NULL;
 void *term_handler = NULL;
+void *abt_handler = NULL;
 
 /*
  * signal handler
@@ -495,7 +721,28 @@ void *term_handler = NULL;
 void
 signal_handler (int sig) {
 	elog(DEBUG1, "cancelling execution");
-	v8::V8::TerminateExecution(plv8_isolate);
+	auto running_context = GetPlv8Context();
+	running_context->interrupted = true;
+	running_context->isolate->TerminateExecution();
+
+	// call the old handler if it exists
+	switch(sig) {
+		case SIGINT:
+			if (int_handler != NULL) {
+				((void (*)(int)) int_handler)(sig);
+			}
+			break;
+		case SIGTERM:
+			if (term_handler != NULL) {
+				((void (*)(int)) term_handler)(sig);
+			}
+			break;
+		case SIGABRT:
+			if (abt_handler != NULL) {
+				((void (*)(int)) abt_handler)(sig);
+			}
+			break;
+	}
 }
 
 /*
@@ -504,66 +751,100 @@ signal_handler (int sig) {
  * This function could throw C++ exceptions, but must not throw PG exceptions.
  */
 static Local<v8::Value>
-DoCall(Handle<Function> fn, Handle<Object> receiver,
-	int nargs, Handle<v8::Value> args[])
+DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
+	int nargs, Handle<v8::Value> args[], bool nonatomic)
 {
-	TryCatch		try_catch;
-#ifdef EXECUTION_TIMEOUT
-#ifdef _MSC_VER
-	HANDLE  hThread;
-	DWORD dwThreadId;
-#else
-	pthread_t breakout_thread;
-	void *thread_result;
-#endif
-#endif
+	Isolate 	   *isolate = ctx->GetIsolate();
+	TryCatch		try_catch(isolate);
 
-	if (SPI_connect() != SPI_OK_CONNECT)
+	if (isolate->IsExecutionTerminating() || current_context->interrupted) {
+		isolate->CancelTerminateExecution();
+		if (current_context->interrupted) {
+			current_context->interrupted = false;
+		}
+	}
+	if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT)
 		throw js_error("could not connect to SPI manager");
 
 	// set up the signal handlers
-	int_handler = (void *) signal(SIGINT, signal_handler);
-	term_handler = (void *) signal(SIGTERM, signal_handler);
+	if (int_handler == NULL) {
+		int_handler = (void *) signal(SIGINT, signal_handler);
+	}
+
+	if (term_handler == NULL) {
+		term_handler = (void *) signal(SIGTERM, signal_handler);
+	}
+
+	if (abt_handler == NULL) {
+		abt_handler = (void *) signal(SIGABRT, signal_handler);
+	}
 
 #ifdef EXECUTION_TIMEOUT
+	bool timeout = false;
 #ifdef _MSC_VER // windows
-	hThread = CreateThread(NULL, 0, Breakout, NULL, 0, &dwThreadId);
+	HANDLE  hThread;
+	DWORD dwThreadId;
+	hThread = CreateThread(NULL, 0, Breakout, isolate, 0, &dwThreadId);
 #else
+	pthread_t breakout_thread;
 	// set up the thread to break out the execution if needed
-	pthread_create(&breakout_thread, NULL, Breakout, NULL);
+	pthread_create(&breakout_thread, NULL, Breakout, isolate);
 #endif
 #endif
 
-	Local<v8::Value> result = fn->Call(receiver, nargs, args);
+	try {
+	MaybeLocal<v8::Value> result = fn->Call(ctx, receiver, nargs, args);
+
 	int	status = SPI_finish();
 
 #ifdef EXECUTION_TIMEOUT
 #ifdef _MSC_VER
-	BOOL cancel_state = TerminateThread(hThread, NULL);
-
-	if (cancel_state == 0) {
-		throw js_error("execution timeout exceeded");
+	if (TerminateThread(hThread, NULL) == 0) {
+		timeout = true;
 	}
 #else
+	void *thread_result;
 	pthread_cancel(breakout_thread);
 	pthread_join(breakout_thread, &thread_result);
-
 	if (thread_result == NULL) {
-		throw js_error("execution timeout exceeded");
+		timeout = true;
 	}
 #endif
 #endif
 
+	// reset signal handlers
 	signal(SIGINT, (void (*)(int)) int_handler);
 	signal(SIGTERM, (void (*)(int)) term_handler);
+	signal(SIGABRT, (void (*)(int)) abt_handler);
 
-	if (result.IsEmpty())
+	HandleUnhandledPromiseRejections();
+
+	if (result.IsEmpty()) {
+		if (isolate->IsExecutionTerminating() || current_context->interrupted) {
+			isolate->CancelTerminateExecution();
+			if (current_context->interrupted) {
+				current_context->interrupted = false;
+				throw js_error("Signal caught: interrupted");
+			}
+#ifdef EXECUTION_TIMEOUT
+			if (timeout) {
+				throw js_error("execution timeout exceeded");
+			}
+#endif
+			throw js_error("Out of memory error");
+		}
 		throw js_error(try_catch);
+	}
 
 	if (status < 0)
 		throw js_error(FormatSPIStatus(status));
 
-	return result;
+	return result.ToLocalChecked();
+	} catch (int err) {
+		elog(NOTICE, "Error caught");
+	}
+
+	return Local<v8::Value>::New(isolate, Null(isolate));
 }
 
 static Datum
@@ -573,7 +854,24 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Local<Context>		context = xenv->localContext();
 	Context::Scope		context_scope(context);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS];
-	Handle<Object>		plv8obj;
+	Oid fn_oid = fcinfo->flinfo->fn_oid;
+
+ HeapTuple proctuple =
+      SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
+
+  Oid retoid;
+  Form_pg_proc pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
+
+  if (fcinfo && IsPolymorphicType(pg_proc_entry->prorettype)) {
+    retoid = get_fn_expr_rettype(fcinfo->flinfo);
+  } else {
+    retoid = pg_proc_entry->prorettype;
+  }
+  ReleaseSysCache(proctuple);
+
+	bool nonatomic = fcinfo->context &&
+		IsA(fcinfo->context, CallContext) &&
+		!castNode(CallContext, fcinfo->context)->atomic;
 
 	WindowFunctionSupport support(context, fcinfo);
 
@@ -593,20 +891,37 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	}
 	else
 	{
-		for (int i = 0; i < nargs; i++)
-			args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
+		for (int i = 0; i < nargs; i++) {
+			args[i] = ToValue(fcinfo->args[i].value, fcinfo->args[i].isnull, &argtypes[i]);
+		}
 	}
 
-	Local<Object> recv = Local<Object>::New(plv8_isolate, xenv->recv);
+	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
 	Local<Function>		fn =
 		Local<Function>::Cast(recv->GetInternalField(0));
+	
 	Local<v8::Value> result =
-		DoCall(fn, recv, nargs, args);
+		DoCall(context, fn, recv, nargs, args, nonatomic);
 
-	if (rettype)
-		return ToDatum(result, &fcinfo->isnull, rettype);
-	else
-		PG_RETURN_VOID();
+	if (retoid == RECORDOID)
+  {
+    Oid calltype;
+    TupleDesc tupdesc;
+    get_call_result_type(fcinfo, &calltype, &tupdesc);
+    if (tupdesc == NULL) {
+      return ToDatum(result, &fcinfo->isnull, rettype);
+    }
+    plv8_type type;
+    plv8_fill_type(&type, calltype);
+    return ToRecordDatum(result, &fcinfo->isnull, &type, tupdesc);
+  }
+  else
+  {
+    if (rettype)
+      return ToDatum(result, &fcinfo->isnull, rettype);
+    else
+      PG_RETURN_VOID( );
+  }
 }
 
 static Tuplestorestate *
@@ -677,6 +992,10 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	TupleDesc			tupdesc;
 	Tuplestorestate	   *tupstore;
 
+	bool nonatomic = fcinfo->context &&
+		IsA(fcinfo->context, CallContext) &&
+		!castNode(CallContext, fcinfo->context)->atomic;
+
 	tupstore = CreateTupleStore(fcinfo, &tupdesc);
 
 	Handle<Context>		context = xenv->localContext();
@@ -690,14 +1009,15 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	 */
 	SRFSupport support(context, &conv, tupstore);
 
-	for (int i = 0; i < nargs; i++)
-		args[i] = ToValue(fcinfo->arg[i], fcinfo->argnull[i], &argtypes[i]);
+	for (int i = 0; i < nargs; i++) {
+		args[i] = ToValue(fcinfo->args[i].value, fcinfo->args[i].isnull, &argtypes[i]);
+	}
 
-	Local<Object> recv = Local<Object>::New(plv8_isolate, xenv->recv);
+	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
 	Local<Function>		fn =
 		Local<Function>::Cast(recv->GetInternalField(0));
 
-	Handle<v8::Value> result = DoCall(fn, recv, nargs, args);
+	Handle<v8::Value> result = DoCall(context, fn, recv, nargs, args, nonatomic);
 
 	if (result->IsUndefined())
 	{
@@ -709,16 +1029,13 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		// return an array of records.
 		int	length = array->Length();
 		for (int i = 0; i < length; i++)
-			conv.ToDatum(array->Get(i), tupstore);
+			conv.ToDatum(array->Get(context, i).ToLocalChecked(), tupstore);
 	}
 	else
 	{
 		// return a record or a scalar
 		conv.ToDatum(result, tupstore);
 	}
-
-	/* clean up and return the tuplestore */
-	tuplestore_donestoring(tupstore);
 
 	return (Datum) 0;
 }
@@ -743,6 +1060,10 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	Handle<v8::Value>	args[10];
 	Datum				result = (Datum) 0;
 
+	bool nonatomic = fcinfo->context &&
+		IsA(fcinfo->context, CallContext) &&
+		!castNode(CallContext, fcinfo->context)->atomic;
+
 	Handle<Context>		context = xenv->localContext();
 	Context::Scope		context_scope(context);
 
@@ -757,13 +1078,13 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 			// NEW
 			args[0] = conv.ToValue(trig->tg_trigtuple);
 			// OLD
-			args[1] = Undefined(plv8_isolate);
+			args[1] = Undefined(xenv->isolate);
 		}
 		else if (TRIGGER_FIRED_BY_DELETE(event))
 		{
 			result = PointerGetDatum(trig->tg_trigtuple);
 			// NEW
-			args[0] = Undefined(plv8_isolate);
+			args[0] = Undefined(xenv->isolate);
 			// OLD
 			args[1] = conv.ToValue(trig->tg_trigtuple);
 		}
@@ -778,7 +1099,7 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	}
 	else
 	{
-		args[0] = args[1] = Undefined(plv8_isolate);
+		args[0] = args[1] = Undefined(xenv->isolate);
 	}
 
 	// 2: TG_NAME
@@ -786,32 +1107,32 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 
 	// 3: TG_WHEN
 	if (TRIGGER_FIRED_BEFORE(event))
-		args[3] = String::NewFromUtf8(plv8_isolate, "BEFORE");
+		args[3] = v8::String::NewFromUtf8Literal(xenv->isolate, "BEFORE");
 	else
-		args[3] = String::NewFromUtf8(plv8_isolate, "AFTER");
+		args[3] = v8::String::NewFromUtf8Literal(xenv->isolate, "AFTER");
 
 	// 4: TG_LEVEL
 	if (TRIGGER_FIRED_FOR_ROW(event))
-		args[4] = String::NewFromUtf8(plv8_isolate, "ROW");
+		args[4] = v8::String::NewFromUtf8Literal(xenv->isolate, "ROW");
 	else
-		args[4] = String::NewFromUtf8(plv8_isolate, "STATEMENT");
+		args[4] = v8::String::NewFromUtf8Literal(xenv->isolate, "STATEMENT");
 
 	// 5: TG_OP
 	if (TRIGGER_FIRED_BY_INSERT(event))
-		args[5] = String::NewFromUtf8(plv8_isolate, "INSERT");
+		args[5] = v8::String::NewFromUtf8Literal(xenv->isolate, "INSERT");
 	else if (TRIGGER_FIRED_BY_DELETE(event))
-		args[5] = String::NewFromUtf8(plv8_isolate, "DELETE");
+		args[5] = v8::String::NewFromUtf8Literal(xenv->isolate, "DELETE");
 	else if (TRIGGER_FIRED_BY_UPDATE(event))
-		args[5] = String::NewFromUtf8(plv8_isolate, "UPDATE");
+		args[5] = v8::String::NewFromUtf8Literal(xenv->isolate, "UPDATE");
 #ifdef TRIGGER_FIRED_BY_TRUNCATE
 	else if (TRIGGER_FIRED_BY_TRUNCATE(event))
-		args[5] = String::NewFromUtf8(plv8_isolate, "TRUNCATE");
+		args[5] = v8::String::NewFromUtf8Literal(xenv->isolate, "TRUNCATE");
 #endif
 	else
-		args[5] = String::NewFromUtf8(plv8_isolate, "?");
+		args[5] = v8::String::NewFromUtf8Literal(xenv->isolate, "?");
 
 	// 6: TG_RELID
-	args[6] = Uint32::New(plv8_isolate, RelationGetRelid(rel));
+	args[6] = Uint32::New(xenv->isolate, RelationGetRelid(rel));
 
 	// 7: TG_TABLE_NAME
 	args[7] = ToString(RelationGetRelationName(rel));
@@ -820,17 +1141,17 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	args[8] = ToString(get_namespace_name(RelationGetNamespace(rel)));
 
 	// 9: TG_ARGV
-	Handle<Array> tgargs = Array::New(plv8_isolate, trig->tg_trigger->tgnargs);
+	Handle<Array> tgargs = Array::New(xenv->isolate, trig->tg_trigger->tgnargs);
 	for (int i = 0; i < trig->tg_trigger->tgnargs; i++)
-		tgargs->Set(i, ToString(trig->tg_trigger->tgargs[i]));
+		tgargs->Set(context, i, ToString(trig->tg_trigger->tgargs[i])).Check();
 	args[9] = tgargs;
 
-	TryCatch			try_catch;
-	Local<Object> recv = Local<Object>::New(plv8_isolate, xenv->recv);
+	TryCatch			try_catch(xenv->isolate);
+	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
 	Local<Function>		fn =
 		Local<Function>::Cast(recv->GetInternalField(0));
 	Handle<v8::Value> newtup =
-		DoCall(fn, recv, lengthof(args), args);
+		DoCall(context, fn, recv, lengthof(args), args, nonatomic);
 
 	if (newtup.IsEmpty())
 		throw js_error(try_catch);
@@ -859,14 +1180,16 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 	return result;
 }
 
-static Datum
-common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
+Datum
+plv8_call_validator(PG_FUNCTION_ARGS)
 {
+	current_context = GetPlv8Context();
 	Oid				fn_oid = PG_GETARG_OID(0);
 	HeapTuple		tuple;
 	Form_pg_proc	proc;
 	char			functyptype;
 	bool			is_trigger = false;
+	Isolate::Scope  scope(current_context->isolate);
 
 	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, fn_oid))
 		PG_RETURN_VOID();
@@ -883,13 +1206,12 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 	/* except for TRIGGER, RECORD, INTERNAL, VOID or polymorphic types */
 	if (functyptype == TYPTYPE_PSEUDO)
 	{
-		/* we assume OPAQUE with no arguments means a trigger */
-		if (proc->prorettype == TRIGGEROID ||
-			(proc->prorettype == OPAQUEOID && proc->pronargs == 0))
+    if (proc->prorettype == TRIGGEROID)
 			is_trigger = true;
 		else if (proc->prorettype != RECORDOID &&
 			proc->prorettype != VOIDOID &&
 			proc->prorettype != INTERNALOID &&
+			proc->prorettype != LANGUAGE_HANDLEROID &&
 			!IsPolymorphicType(proc->prorettype))
 			ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -901,13 +1223,10 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 
 	try
 	{
-#ifdef ENABLE_DEBUGGER_SUPPORT
-		Locker				lock;
-#endif  // ENABLE_DEBUGGER_SUPPORT
 		/* Don't use validator's fcinfo */
 		plv8_proc	   *proc = Compile(fn_oid, NULL,
-									   true, is_trigger, dialect);
-		(void) CreateExecEnv(proc->cache->function);
+									   true, is_trigger);
+		(void) CreateExecEnv(proc->cache->function, current_context);
 		/* the result of a validator is ignored */
 		PG_RETURN_VOID();
 	}
@@ -915,24 +1234,6 @@ common_pl_call_validator(PG_FUNCTION_ARGS, Dialect dialect) throw()
 	catch (pg_error& e)	{ e.rethrow(); }
 
 	return (Datum) 0;	// keep compiler quiet
-}
-
-Datum
-plv8_call_validator(PG_FUNCTION_ARGS)
-{
-	return common_pl_call_validator(fcinfo, PLV8_DIALECT_NONE);
-}
-
-Datum
-plcoffee_call_validator(PG_FUNCTION_ARGS)
-{
-	return common_pl_call_validator(fcinfo, PLV8_DIALECT_COFFEE);
-}
-
-Datum
-plls_call_validator(PG_FUNCTION_ARGS)
-{
-	return common_pl_call_validator(fcinfo, PLV8_DIALECT_LIVESCRIPT);
 }
 
 static plv8_proc *
@@ -947,7 +1248,9 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 	char			   *argmodes;
 	MemoryContext		oldcontext;
 
-	procTup = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
+
+//	procTup = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
+	procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
 	if (!HeapTupleIsValid(procTup))
 		elog(ERROR, "cache lookup failed for function %u", fn_oid);
 
@@ -963,6 +1266,12 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 		 * the previous cache user id, as the V8 function is associated
 		 * with the context where it was generated.  In most cases,
 		 * we can expect this doesn't affect runtime performance.
+		 * 
+		 * TODO: we probably should also check if the non-plv8 language 
+		 * handler function has changed, but this would be excessive for 
+		 * normal use case. 
+		 * Maybe just recommend to re-create the functions using the 
+		 * language for immediate effect when return type is language_handler?
 		 */
 		uptodate = (!cache->function.IsEmpty() &&
 			cache->fn_xmin == HeapTupleHeaderGetXmin(procTup->t_data) &&
@@ -992,12 +1301,58 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 	if (cache->function.IsEmpty())
 	{
 		Form_pg_proc	procStruct;
-
+		/* pl/<any> support */
+		Oid					prolang;
+		HeapTuple			langTup;
+		Form_pg_language	langStruct;
+		char				*lang_name;
+		bool				lang_is_plv8;
+		Local<v8::Value>	args[1];
+		Local<v8::Value>	result;
+	
 		procStruct = (Form_pg_proc) GETSTRUCT(procTup);
 
 		prosrc = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_prosrc, &isnull);
 		if (isnull)
 			elog(ERROR, "null prosrc");
+
+		/* if prolang is not plv8 assume it is the js-transpiler pl
+		 * to transpile follow these steps
+		 * - fetch the transpiler function from the pl definition:
+		 *   lang_tuple = SearchSysCache(LANGOID, ObjectIdGetDatum(prolang), 0, 0, 0);
+		 *   transpilerfunc = find_js_function(lang_tuple.lanplcallfoid)
+		 * - set prosrc to transpilerfunc(prosrc)
+		 */
+		prolang = procStruct->prolang;
+//		langTup = SearchSysCache(LANGOID, ObjectIdGetDatum(prolang), 0, 0, 0);
+		langTup = SearchSysCache1(LANGOID, ObjectIdGetDatum(prolang));
+		langStruct = (Form_pg_language) GETSTRUCT(langTup);
+		lang_name = NameStr(langStruct->lanname);
+		lang_is_plv8 = !strcmp(lang_name, "plv8"); // TODO: cache this globally so pure plv8 functions can skip earlier
+		if(!lang_is_plv8)
+		{
+			Oid lang_handler_oid = langStruct->lanplcallfoid;
+			Local<Function> transpiler_func;
+			Local<Context>		context = current_context->localContext();
+
+			ereport(DEBUG1,	(errmsg("pl/<any>: prolang %u, lanname [%s], lang_is_plv8: %d",	prolang, lang_name, lang_is_plv8)));
+
+			lang_handler_oid = langStruct->lanplcallfoid;
+			transpiler_func = find_js_function(lang_handler_oid);
+			// if it raises handle not found - likely handler is not a plv8 function
+			char *prosrc_str = TextDatumGetCString(prosrc);
+			args[0] = v8::String::NewFromUtf8(current_context->isolate, prosrc_str).ToLocalChecked();
+			result = DoCall(context, transpiler_func, context->Global(), lengthof(args), args, false);
+			v8::String::Utf8Value str(current_context->isolate, result->ToString(context).ToLocalChecked());
+
+			oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+			cache->prosrc =  pstrdup((char*) *str);
+			MemoryContextSwitchTo(oldcontext);
+
+			ereport(DEBUG1, (errmsg("pl/<any>: transpiled [%s] to [%s]", prosrc_str, cache->prosrc)));
+		}
+		ReleaseSysCache(langTup);
+		/* pl/<any> done */
 
 		cache->retset = procStruct->proretset;
 		cache->rettype = procStruct->prorettype;
@@ -1028,9 +1383,12 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 			}
 		}
 
-		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-		cache->prosrc = TextDatumGetCString(prosrc);
-		MemoryContextSwitchTo(oldcontext);
+		if(cache->prosrc == NULL)
+		{
+			oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+			cache->prosrc = TextDatumGetCString(prosrc);
+			MemoryContextSwitchTo(oldcontext);
+		}
 
 		ReleaseSysCache(procTup);
 
@@ -1085,14 +1443,14 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 }
 
 static plv8_exec_env *
-CreateExecEnv(Persistent<Function>& function)
+CreateExecEnv(Persistent<Function>& function, plv8_context *context)
 {
 	plv8_exec_env	   *xenv;
-	HandleScope			handle_scope(plv8_isolate);
+	HandleScope			handle_scope(context->isolate);
 
 	PG_TRY();
 	{
-		xenv = plv8_new_exec_env();
+		xenv = plv8_new_exec_env(context->isolate);
 	}
 	PG_CATCH();
 	{
@@ -1100,35 +1458,30 @@ CreateExecEnv(Persistent<Function>& function)
 	}
 	PG_END_TRY();
 
-	GetGlobalContext(xenv->context);
-	Context::Scope		scope(xenv->localContext());
+	xenv->context.Reset(context->isolate, context->context);
+	Local<Context>		ctx = xenv->localContext();
+	Context::Scope		scope(ctx);
 
-	static Persistent<ObjectTemplate> recv_templ;
-	if (recv_templ.IsEmpty())
-	{
-		Local<ObjectTemplate> templ = ObjectTemplate::New(plv8_isolate);
-		templ->SetInternalFieldCount(1);
-		recv_templ.Reset(plv8_isolate, templ);
-	}
-	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, recv_templ);
-	Local<Object> obj = templ->NewInstance();
-	Local<Function> f = Local<Function>::New(plv8_isolate, function);
+	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(context->isolate, context->recv_templ);
+	Local<Object> obj = templ->NewInstance(ctx).ToLocalChecked();
+	Local<Function> f = Local<Function>::New(context->isolate, function);
 	obj->SetInternalField(0, f);
-	xenv->recv.Reset(plv8_isolate, obj);
+	xenv->recv.Reset(context->isolate, obj);
 
 
 	return xenv;
 }
 
 static plv8_exec_env *
-CreateExecEnv(Handle<Function> function)
+CreateExecEnv(Handle<Function> function, plv8_context *context)
 {
+	Isolate::Scope	    iscope(context->isolate);
 	plv8_exec_env	   *xenv;
-	HandleScope			handle_scope(plv8_isolate);
+	HandleScope			handle_scope(context->isolate);
 
 	PG_TRY();
 	{
-		xenv = plv8_new_exec_env();
+		xenv = plv8_new_exec_env(context->isolate);
 	}
 	PG_CATCH();
 	{
@@ -1136,99 +1489,18 @@ CreateExecEnv(Handle<Function> function)
 	}
 	PG_END_TRY();
 
-	GetGlobalContext(xenv->context);
-	Context::Scope		scope(xenv->localContext());
+	xenv->context.Reset(context->isolate, context->context);
+	Local<Context>		ctx = xenv->localContext();
+	Context::Scope		scope(ctx);
 
-	static Persistent<ObjectTemplate> recv_templ;
-	if (recv_templ.IsEmpty())
-	{
-		Local<ObjectTemplate> templ = ObjectTemplate::New(plv8_isolate);
-		templ->SetInternalFieldCount(1);
-		recv_templ.Reset(plv8_isolate, templ);
-	}
-	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(plv8_isolate, recv_templ);
-	Local<Object> obj = templ->NewInstance();
-	Local<Function> f = Local<Function>::New(plv8_isolate, function);
+	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(context->isolate, context->recv_templ);
+	Local<Object> obj = templ->NewInstance(ctx).ToLocalChecked();
+	Local<Function> f = Local<Function>::New(context->isolate, function);
 	obj->SetInternalField(0, f);
-	xenv->recv.Reset(plv8_isolate, obj);
+	xenv->recv.Reset(context->isolate, obj);
 
 
 	return xenv;
-}
-
-/* Source transformation from a dialect (coffee or ls) to js */
-static char *
-CompileDialect(const char *src, Dialect dialect)
-{
-	HandleScope		handle_scope(plv8_isolate);
-	static Persistent<Context>	context;
-	if (context.IsEmpty()) {
-	   Local<Context> ctx = Context::New(plv8_isolate, (ExtensionConfiguration*)NULL);
-	   context.Reset(plv8_isolate, ctx);
-	}
-	Local<Context> ctx = Local<Context>::New(plv8_isolate, context);
-	Context::Scope	context_scope(ctx);
-	TryCatch		try_catch;
-	Local<String>	key;
-	char		   *cresult;
-	const char	   *dialect_binary_data;
-
-	switch (dialect)
-	{
-		case PLV8_DIALECT_COFFEE:
-			if (coffee_script_binary_data[0] == '\0')
-				throw js_error("CoffeeScript is not enabled");
-			key = String::NewFromUtf8(plv8_isolate, "CoffeeScript", String::kInternalizedString);
-			dialect_binary_data = (const char *) coffee_script_binary_data;
-			break;
-		case PLV8_DIALECT_LIVESCRIPT:
-			if (livescript_binary_data[0] == '\0')
-				throw js_error("LiveScript is not enabled");
-			key = String::NewFromUtf8(plv8_isolate, "LiveScript", String::kInternalizedString);
-			dialect_binary_data = (const char *) livescript_binary_data;
-			break;
-		default:
-			throw js_error("Unknown Dialect");
-	}
-
-	if (ctx->Global()->Get(key)->IsUndefined())
-	{
-		HandleScope		handle_scope(plv8_isolate);
-		Local<Script>	script =
-			Script::Compile(ToString(dialect_binary_data), key);
-		if (script.IsEmpty())
-			throw js_error(try_catch);
-		Local<v8::Value>	result = script->Run();
-		if (result.IsEmpty())
-			throw js_error(try_catch);
-	}
-
-	Local<Object>	compiler = Local<Object>::Cast(ctx->Global()->Get(key));
-	Local<Function>	func = Local<Function>::Cast(
-			compiler->Get(String::NewFromUtf8(plv8_isolate, "compile", String::kInternalizedString)));
-	const int		nargs = 1;
-	Handle<v8::Value>	args[nargs];
-
-	args[0] = ToString(src);
-	Local<v8::Value>	value = func->Call(compiler, nargs, args);
-
-	if (value.IsEmpty())
-		throw js_error(try_catch);
-	CString		result(value);
-
-	PG_TRY();
-	{
-		MemoryContext	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-		cresult = pstrdup(result.str());
-		MemoryContextSwitchTo(oldcontext);
-	}
-	PG_CATCH();
-	{
-		throw pg_error();
-	}
-	PG_END_TRY();
-
-	return cresult;
 }
 
 /*
@@ -1236,8 +1508,7 @@ CompileDialect(const char *src, Dialect dialect)
  * we can resolve polymorphic types and use function's memory context.
  */
 static plv8_proc *
-Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger,
-		Dialect dialect)
+Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger)
 {
 	plv8_proc  *proc;
 	char	  **argnames;
@@ -1258,25 +1529,26 @@ Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger,
 	{
 		/*
 		 * We need to create global context before entering CompileFunction
-		 * because GetGlobalContext could call startup procedure, which
+		 * because GetPlv8Context could call startup procedure, which
 		 * could be this cache->function itself.  In this scenario,
 		 * Compile is called recursively and plv8_get_proc tries to refresh
 		 * cache because cache->function is still not yet ready at this
 		 * point.  Then some pointers of cache will become stale by pfree
 		 * and CompileFunction ends up compiling freed function source.
 		 */
-		HandleScope		handle_scope(plv8_isolate);
+		current_context = GetPlv8Context();
+		Isolate::Scope	scope(current_context->isolate);
+		HandleScope		handle_scope(current_context->isolate);
 		Persistent<Context>	global_context;
-		GetGlobalContext(global_context);
-		cache->function.Reset(plv8_isolate, CompileFunction(
-						global_context,
+		global_context.Reset(current_context->isolate, current_context->context);
+		cache->function.Reset(current_context->isolate, CompileFunction(
+						current_context,
 						cache->proname,
 						cache->nargs,
 						(const char **) argnames,
 						cache->prosrc,
 						is_trigger,
-						cache->retset,
-						dialect));
+						cache->retset));
 	}
 
 	return proc;
@@ -1284,27 +1556,20 @@ Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger,
 
 static Local<Function>
 CompileFunction(
-	Persistent<Context>& global_context,
+	plv8_context *global_context,
 	const char *proname,
 	int proarglen,
 	const char *proargs[],
 	const char *prosrc,
 	bool is_trigger,
-	bool retset,
-	Dialect dialect)
+	bool retset)
 {
-	EscapableHandleScope		handle_scope(plv8_isolate);
+	Isolate					   *isolate = Isolate::GetCurrent();
+	EscapableHandleScope		handle_scope(isolate);
 	StringInfoData	src;
 
 	initStringInfo(&src);
 
-	if (dialect != PLV8_DIALECT_NONE)
-		prosrc = CompileDialect(prosrc, dialect);
-	/*
-	 *  (function (<arg1, ...>){
-	 *    <prosrc>
-	 *  })
-	 */
 	appendStringInfo(&src, "(function (");
 	if (is_trigger)
 	{
@@ -1327,30 +1592,92 @@ CompileFunction(
 				appendStringInfo(&src, "$%d", i + 1);	// unnamed argument to $N
 		}
 	}
-	if (dialect)
-		appendStringInfo(&src, "){\nreturn %s\n})", prosrc);
-	else
-		appendStringInfo(&src, "){\n%s\n})", prosrc);
+
+	appendStringInfo(&src, "){\n%s\n})", prosrc);
 
 	Handle<v8::Value> name;
 	if (proname)
 		name = ToString(proname);
 	else
-		name = Undefined(plv8_isolate);
-	Local<String> source = ToString(src.data, src.len);
+		name = Undefined(isolate);
+	Local<v8::String> source = ToString(src.data, src.len);
 	pfree(src.data);
 
-	Local<Context> context = Local<Context>::New(plv8_isolate, global_context);
+	Local<Context> context = Local<Context>::New(isolate, global_context->context);
 	Context::Scope	context_scope(context);
-	TryCatch		try_catch;
-	Local<Script>	script = Script::Compile(source, Handle<String>::Cast(name));
+	TryCatch		try_catch(isolate);
+	v8::ScriptOrigin origin(isolate, name);
 
-	if (script.IsEmpty())
-		throw js_error(try_catch);
+	// set up the signal handlers
+	if (int_handler == NULL) {
+		int_handler = (void *) signal(SIGINT, signal_handler);
+	}
 
-	Local<v8::Value>	result = script->Run();
-	if (result.IsEmpty())
+	if (term_handler == NULL) {
+		term_handler = (void *) signal(SIGTERM, signal_handler);
+	}
+
+#ifdef EXECUTION_TIMEOUT
+	bool timeout = false;
+#ifdef _MSC_VER // windows
+	HANDLE  hThread;
+	DWORD dwThreadId;
+	hThread = CreateThread(NULL, 0, Breakout, isolate, 0, &dwThreadId);
+#else
+	pthread_t breakout_thread;
+	// set up the thread to break out the execution if needed
+	pthread_create(&breakout_thread, NULL, Breakout, isolate);
+#endif
+#endif
+
+	v8::Local<v8::Script> script;
+	v8::Local<v8::Value> result;
+	if (current_context->interrupted) {
+		isolate->CancelTerminateExecution();
+		current_context->interrupted = false;
+	}
+	if (Script::Compile(isolate->GetCurrentContext(), source, &origin).ToLocal(&script)) {
+		if (!script.IsEmpty()) {
+			if (!script->Run(isolate->GetCurrentContext()).ToLocal(&result))
+				throw js_error(try_catch);
+		}
+	}
+
+#ifdef EXECUTION_TIMEOUT
+#ifdef _MSC_VER
+	if (TerminateThread(hThread, NULL) == 0) {
+		timeout = true;
+	}
+#else
+	void *thread_result;
+	pthread_cancel(breakout_thread);
+	pthread_join(breakout_thread, &thread_result);
+	if (thread_result == NULL) {
+		timeout = true;
+	}
+#endif
+#endif
+	signal(SIGINT, (void (*)(int)) int_handler);
+	signal(SIGTERM, (void (*)(int)) term_handler);
+
+	HandleUnhandledPromiseRejections();
+
+	if (result.IsEmpty()) {
+		if (isolate->IsExecutionTerminating()  || current_context->interrupted) {
+			isolate->CancelTerminateExecution();
+			if (current_context->interrupted) {
+				current_context->interrupted = false;
+				throw js_error("Signal caught: interrupted");
+			}
+#ifdef EXECUTION_TIMEOUT
+			if (timeout) {
+				throw js_error("compiler timeout exceeded");
+			}
+#endif
+			throw js_error("Script is out of memory");
+		}
 		throw js_error(try_catch);
+	}
 
 	return handle_scope.Escape(Local<Function>::Cast(result));
 }
@@ -1361,11 +1688,11 @@ find_js_function(Oid fn_oid)
 	HeapTuple		tuple;
 	Form_pg_proc	proc;
 	Oid				prolang;
-	NameData		langnames[] = { {"plv8"}, {"plcoffee"}, {"plls"} };
+	NameData		langnames[] = { {"plv8"} };
 	int				langno;
 	int				langlen = sizeof(langnames) / sizeof(NameData);
 	Local<Function> func;
-
+	Isolate			*isolate = Isolate::GetCurrent();
 
 	tuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 	if (!HeapTupleIsValid(tuple))
@@ -1384,7 +1711,9 @@ find_js_function(Oid fn_oid)
 		tuple = SearchSysCache(LANGNAME, NameGetDatum(&langnames[langno]), 0, 0, 0);
 		if (HeapTupleIsValid(tuple))
 		{
-			Oid langtupoid = HeapTupleGetOid(tuple);
+			Form_pg_database datForm = (Form_pg_database) GETSTRUCT(tuple);
+			Oid langtupoid = datForm->oid;
+
 			ReleaseSysCache(tuple);
 			if (langtupoid == prolang)
 				break;
@@ -1398,37 +1727,14 @@ find_js_function(Oid fn_oid)
 	try
 	{
 		plv8_proc		   *proc = Compile(fn_oid, NULL,
-										   true, false,
-										   (Dialect) (PLV8_DIALECT_NONE + langno));
+										   true, false);
 
-		TryCatch			try_catch;
+		TryCatch			try_catch(isolate);
 
-		func = Local<Function>::New(plv8_isolate, proc->cache->function);
+		func = Local<Function>::New(isolate, proc->cache->function);
 	}
 	catch (js_error& e) { e.rethrow(); }
 	catch (pg_error& e) { e.rethrow(); }
-
-	return func;
-}
-
-/*
- * The signature can be either of regproc or regprocedure format.
- */
-Local<Function>
-find_js_function_by_name(const char *signature)
-{
-	Oid					funcoid;
-	Local<Function>		func;
-
-	if (strchr(signature, '(') == NULL)
-		funcoid = DatumGetObjectId(
-				DirectFunctionCall1(regprocin, CStringGetDatum(signature)));
-	else
-		funcoid = DatumGetObjectId(
-				DirectFunctionCall1(regprocedurein, CStringGetDatum(signature)));
-	func = find_js_function(funcoid);
-	if (func.IsEmpty())
-		elog(ERROR, "javascript function is not found for \"%s\"", signature);
 
 	return func;
 }
@@ -1487,34 +1793,91 @@ charToText(char *string)
 	return result;
 }
 
-static void
-GetGlobalContext(Persistent<Context>& global_context)
-{
+static plv8_context*
+GetPlv8Context() {
 	Oid					user_id = GetUserId();
 	unsigned int		i;
+	plv8_context		*my_context = nullptr;
 
 	for (i = 0; i < ContextVector.size(); i++)
 	{
 		if (ContextVector[i]->user_id == user_id)
 		{
-			global_context.Reset(plv8_isolate, ContextVector[i]->context);
+			my_context = ContextVector[i];
 			break;
 		}
 	}
-	if (global_context.IsEmpty())
+	if (my_context && (my_context->is_dead || (my_context->isolate && my_context->isolate->IsDead()))) {
+		// the isolate is dead because of OOM, kill it and dispose
+		char *username = GetUserNameFromId(my_context->user_id, false);
+		elog(LOG_SERVER_ONLY, "Disposing of a dead isolate for: %s", username);
+		ContextVector.erase(ContextVector.begin() + i);
+		if (my_context->isolate && my_context->isolate->IsInUse()) {
+			my_context->isolate->Exit();
+		}
+		killPlv8Context(my_context);
+		pfree(my_context);
+		my_context = nullptr;
+	}
+	if (!my_context)
 	{
-		HandleScope				handle_scope(plv8_isolate);
-
-		Local<ObjectTemplate>	global = Local<ObjectTemplate>::New(plv8_isolate, GetGlobalObjectTemplate());
-		plv8_context		   *my_context;
-
-		global_context.Reset(plv8_isolate, Context::New(plv8_isolate, NULL, global));
-		my_context = (plv8_context *) MemoryContextAlloc(TopMemoryContext,
+		my_context = (plv8_context *) MemoryContextAllocZero(TopMemoryContext,
 														 sizeof(plv8_context));
+		my_context->is_dead = false;
+		my_context->interrupted = false;
+		my_context->ignore_unhandled_promises = false;
+		CreateIsolate(my_context);
+		Isolate 			   *isolate = my_context->isolate;
+		Isolate::Scope			scope(isolate);
+		HandleScope				handle_scope(isolate);
+
+		Local<ObjectTemplate>	global = Local<ObjectTemplate>::New(isolate, GetGlobalObjectTemplate(isolate));
+
 		new(&my_context->context) Persistent<Context>();
-		my_context->context.Reset(plv8_isolate, global_context);
+		my_context->context.Reset(isolate, Context::New(isolate, NULL, global));
 		my_context->user_id = user_id;
 
+		new(&my_context->recv_templ) Persistent<ObjectTemplate>();
+		Local<ObjectTemplate> templ = ObjectTemplate::New(isolate);
+		templ->SetInternalFieldCount(1);
+		my_context->recv_templ.Reset(isolate, templ);
+
+		new(&my_context->compile_context) Persistent<Context>();
+		Local<Context> ctx = Context::New(isolate, (ExtensionConfiguration*)NULL);
+		my_context->compile_context.Reset(isolate, ctx);
+
+		auto toStringAttr = static_cast<PropertyAttribute>(v8::ReadOnly | v8::DontEnum);
+		auto toStringSymbol = v8::Symbol::GetToStringTag(isolate);
+
+		new(&my_context->plan_template) Persistent<ObjectTemplate>();
+		Local<FunctionTemplate> base = FunctionTemplate::New(isolate);
+		Local<v8::String> planClassName = v8::String::NewFromUtf8Literal(isolate, "PreparedPlan",
+														   NewStringType::kInternalized);
+		base->SetClassName(planClassName);
+		base->PrototypeTemplate()->Set(toStringSymbol, planClassName, toStringAttr);
+		templ = base->InstanceTemplate();
+		SetupPrepFunctions(templ);
+		my_context->plan_template.Reset(isolate, templ);
+
+		new(&my_context->cursor_template) Persistent<ObjectTemplate>();
+		base = FunctionTemplate::New(isolate);
+		Local<v8::String> cursorClassName = v8::String::NewFromUtf8Literal(isolate, "Cursor",
+															 NewStringType::kInternalized);
+		base->SetClassName(cursorClassName);
+		base->PrototypeTemplate()->Set(toStringSymbol, cursorClassName, toStringAttr);
+		templ = base->InstanceTemplate();
+		SetupCursorFunctions(templ);
+		my_context->cursor_template.Reset(isolate, templ);
+
+		new(&my_context->window_template) Persistent<ObjectTemplate>();
+		base = FunctionTemplate::New(isolate);
+		Local<v8::String> windowClassName = v8::String::NewFromUtf8Literal(isolate, "WindowObject",
+															 NewStringType::kInternalized);
+        base->SetClassName(windowClassName);
+		base->PrototypeTemplate()->Set(toStringSymbol, windowClassName, toStringAttr);
+		templ = base->InstanceTemplate();
+		SetupWindowFunctions(templ);
+		my_context->window_template.Reset(isolate, templ);
 		/*
 		 * Need to register it before running any code, as the code
 		 * recursively may want to the global context.
@@ -1528,12 +1891,15 @@ GetGlobalContext(Persistent<Context>& global_context)
 		{
 			Local<Function>		func;
 
-			HandleScope			handle_scope(plv8_isolate);
-			Context::Scope		context_scope(my_context->localContext());
-			TryCatch			try_catch;
+			HandleScope			handle_scope(isolate);
+			Local<Context>		context = my_context->localContext();
+			Context::Scope		context_scope(context);
+			TryCatch			try_catch(isolate);
 			MemoryContext		ctx = CurrentMemoryContext;
 			text *arg;
-			FunctionCallInfoData fake_fcinfo;
+			// Stack-allocate FunctionCallInfoBaseData with
+			// space for 2 arguments:
+			LOCAL_FCINFO(fake_fcinfo, 2);
 			FmgrInfo	flinfo;
 
 			char perm[16];
@@ -1541,40 +1907,37 @@ GetGlobalContext(Persistent<Context>& global_context)
 			arg = charToText(perm);
 
 			PG_TRY();
-			{
-				Oid funcoid = DatumGetObjectId(DirectFunctionCall1(regprocin, CStringGetDatum(plv8_start_proc)));
+					{
+						Oid funcoid = DatumGetObjectId(DirectFunctionCall1(regprocin, CStringGetDatum(plv8_start_proc)));
+						MemSet(&flinfo, 0, sizeof(flinfo));
+						fake_fcinfo->flinfo = &flinfo;
+						flinfo.fn_oid = InvalidOid;
+						flinfo.fn_mcxt = CurrentMemoryContext;
+						fake_fcinfo->nargs = 2;
+						fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
+						fake_fcinfo->args[1].value = PointerGetDatum(arg);
+						Datum ret = has_function_privilege_id(fake_fcinfo);
 
-				MemSet(&fake_fcinfo, 0, sizeof(fake_fcinfo));
-				MemSet(&flinfo, 0, sizeof(flinfo));
-				fake_fcinfo.flinfo = &flinfo;
-				flinfo.fn_oid = InvalidOid;
-				flinfo.fn_mcxt = CurrentMemoryContext;
-				fake_fcinfo.nargs = 2;
-				fake_fcinfo.arg[0] = ObjectIdGetDatum(funcoid);
-				fake_fcinfo.arg[1] = CStringGetDatum(arg);
-
-				Datum ret = has_function_privilege_id(&fake_fcinfo);
-
-				if (ret == 0) {
-					elog(WARNING, "failed to find js function %s", plv8_start_proc);
-				} else {
-					if (DatumGetBool(ret)) {
-						func = find_js_function_by_name(plv8_start_proc);
-					} else {
-						elog(WARNING, "no permission to execute js function %s", plv8_start_proc);
+						if (ret == 0) {
+							elog(WARNING, "failed to find js function %s", plv8_start_proc);
+						} else {
+							if (DatumGetBool(ret)) {
+								func = find_js_function(funcoid);
+							} else {
+								elog(WARNING, "no permission to execute js function %s", plv8_start_proc);
+							}
+						}
 					}
-				}
-			}
-			PG_CATCH();
-			{
-				ErrorData	   *edata;
+				PG_CATCH();
+					{
+						ErrorData	   *edata;
 
-				MemoryContextSwitchTo(ctx);
-				edata = CopyErrorData();
-				elog(WARNING, "failed to find js function %s", edata->message);
-				FlushErrorState();
-				FreeErrorData(edata);
-			}
+						MemoryContextSwitchTo(ctx);
+						edata = CopyErrorData();
+						elog(WARNING, "failed to find js function %s", edata->message);
+						FlushErrorState();
+						FreeErrorData(edata);
+					}
 			PG_END_TRY();
 
 			pfree(arg);
@@ -1582,56 +1945,61 @@ GetGlobalContext(Persistent<Context>& global_context)
 			if (!func.IsEmpty())
 			{
 				Handle<v8::Value>	result =
-					DoCall(func, my_context->localContext()->Global(), 0, NULL);
+						DoCall(context, func, my_context->localContext()->Global(), 0, NULL, false);
 				if (result.IsEmpty())
 					throw js_error(try_catch);
 			}
 		}
-
-#ifdef ENABLE_DEBUGGER_SUPPORT
-		debug_message_context = v8::Persistent<v8::Context>::New(global_context);
-
-		v8::Locker locker;
-
-		v8::Debug::SetDebugMessageDispatchHandler(DispatchDebugMessages, true);
-
-		v8::Debug::EnableAgent("plv8", plv8_debugger_port, false);
-#endif  // ENABLE_DEBUGGER_SUPPORT
 	}
+	return my_context;
 }
 
 static Local<ObjectTemplate>
-GetGlobalObjectTemplate()
+GetGlobalObjectTemplate(Isolate *isolate)
 {
-	static Persistent<ObjectTemplate>	global;
+	Persistent<ObjectTemplate>	global;
 
 	if (global.IsEmpty())
 	{
-		HandleScope				handle_scope(plv8_isolate);
+		HandleScope				handle_scope(isolate);
 
-		Local<ObjectTemplate> templ = ObjectTemplate::New();
+		Local<ObjectTemplate> templ = ObjectTemplate::New(isolate);
 		// ERROR levels for elog
-		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG5", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG5));
-		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG4", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG4));
-		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG3", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG3));
-		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG2", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG2));
-		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG1", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG1));
-		templ->Set(String::NewFromUtf8(plv8_isolate, "DEBUG", String::kInternalizedString), Int32::New(plv8_isolate, DEBUG5));
-		templ->Set(String::NewFromUtf8(plv8_isolate, "LOG", String::kInternalizedString), Int32::New(plv8_isolate, LOG));
-		templ->Set(String::NewFromUtf8(plv8_isolate, "INFO", String::kInternalizedString), Int32::New(plv8_isolate, INFO));
-		templ->Set(String::NewFromUtf8(plv8_isolate, "NOTICE", String::kInternalizedString), Int32::New(plv8_isolate, NOTICE));
-		templ->Set(String::NewFromUtf8(plv8_isolate, "WARNING", String::kInternalizedString), Int32::New(plv8_isolate, WARNING));
-		templ->Set(String::NewFromUtf8(plv8_isolate, "ERROR", String::kInternalizedString), Int32::New(plv8_isolate, ERROR));
-		global.Reset(plv8_isolate, templ);
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG5", NewStringType::kInternalized),
+				   Int32::New(isolate, DEBUG5));
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG4", NewStringType::kInternalized),
+				   Int32::New(isolate, DEBUG4));
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG3", NewStringType::kInternalized),
+				   Int32::New(isolate, DEBUG3));
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG2", NewStringType::kInternalized),
+				   Int32::New(isolate, DEBUG2));
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG1", NewStringType::kInternalized),
+				   Int32::New(isolate, DEBUG1));
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG", NewStringType::kInternalized),
+				   Int32::New(isolate, DEBUG5));
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "LOG", NewStringType::kInternalized),
+				   Int32::New(isolate, LOG));
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "INFO", NewStringType::kInternalized),
+				   Int32::New(isolate, INFO));
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "NOTICE", NewStringType::kInternalized),
+				   Int32::New(isolate, NOTICE));
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "WARNING", NewStringType::kInternalized),
+				   Int32::New(isolate, WARNING));
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "ERROR", NewStringType::kInternalized),
+				   Int32::New(isolate, ERROR));
+		global.Reset(isolate, templ);
 
-		Handle<ObjectTemplate>	plv8 = ObjectTemplate::New();
+		Local<ObjectTemplate> plv8 = ObjectTemplate::New(isolate);
 
 		SetupPlv8Functions(plv8);
-		plv8->Set(String::NewFromUtf8(plv8_isolate, "version", String::kInternalizedString), String::NewFromUtf8(plv8_isolate, PLV8_VERSION));
+		plv8->Set(v8::String::NewFromUtf8Literal(isolate, "version", NewStringType::kInternalized),
+				  v8::String::NewFromUtf8Literal(isolate, PLV8_VERSION));
+		plv8->Set(v8::String::NewFromUtf8Literal(isolate, "v8_version", NewStringType::kInternalized),
+				  v8::String::NewFromUtf8Literal(isolate, V8_VERSION_STRING));
 
-		templ->Set(String::NewFromUtf8(plv8_isolate, "plv8", String::kInternalizedString), plv8);
+		templ->Set(v8::String::NewFromUtf8Literal(isolate, "plv8", NewStringType::kInternalized), plv8);
 	}
-	return Local<ObjectTemplate>::New(plv8_isolate, global);
+	return Local<ObjectTemplate>::New(isolate, global);
 }
 
 /*
@@ -1703,25 +2071,13 @@ Converter::Init()
 		PG_TRY();
 		{
 			if (m_memcontext == NULL)
-#if PG_VERSION_NUM < 110000
-				m_memcontext = AllocSetContextCreate(
-									CurrentMemoryContext,
-									"ConverterContext",
-									ALLOCSET_SMALL_MINSIZE,
-									ALLOCSET_SMALL_INITSIZE,
-									ALLOCSET_SMALL_MAXSIZE);
-			plv8_fill_type(&m_coltypes[c],
-						   m_tupdesc->attrs[c]->atttypid,
-						   m_memcontext);
-#else
 				m_memcontext = AllocSetContextCreate(
 									CurrentMemoryContext,
 									"ConverterContext",
 									ALLOCSET_DEFAULT_SIZES);
 			plv8_fill_type(&m_coltypes[c],
-						   m_tupdesc->attrs[c].atttypid,
+						   TupleDescAttr(m_tupdesc, c)->atttypid,
 						   m_memcontext);
-#endif
 		}
 		PG_CATCH();
 		{
@@ -1736,7 +2092,9 @@ Converter::Init()
 Local<Object>
 Converter::ToValue(HeapTuple tuple)
 {
-	Local<Object>	obj = Object::New(plv8_isolate);
+	Isolate		   *isolate = Isolate::GetCurrent();
+    Local<Context>  context = isolate->GetCurrentContext();
+	Local<Object>	obj = Object::New(isolate);
 
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
@@ -1746,17 +2104,9 @@ Converter::ToValue(HeapTuple tuple)
 		if (TupleDescAttr(m_tupdesc, c)->attisdropped)
 			continue;
 
-#if PG_VERSION_NUM >= 90000
 		datum = heap_getattr(tuple, c + 1, m_tupdesc, &isnull);
-#else
-		/*
-		 * Due to the difference between C and C++ rules,
-		 * we cannot call heap_getattr from < 9.0 unfortunately.
-		 */
-		datum = nocachegetattr(tuple, c + 1, m_tupdesc, &isnull);
-#endif
 
-		obj->Set(m_colnames[c], ::ToValue(datum, isnull, &m_coltypes[c]));
+		obj->Set(context, m_colnames[c], ::ToValue(datum, isnull, &m_coltypes[c])).Check();
 	}
 
 	return obj;
@@ -1765,8 +2115,10 @@ Converter::ToValue(HeapTuple tuple)
 Datum
 Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 {
+	Isolate		   *isolate = Isolate::GetCurrent();
+    Local<Context>  context = isolate->GetCurrentContext();
 	Datum			result;
-	TryCatch		try_catch;
+	TryCatch		try_catch(isolate);
 	Handle<Object>	obj;
 
 	if (!m_is_scalar)
@@ -1787,7 +2139,7 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 
 	if (!m_is_scalar)
 	{
-		Handle<Array> names = obj->GetPropertyNames();
+		Handle<Array> names = obj->GetPropertyNames(isolate->GetCurrentContext()).ToLocalChecked();
 
 		for (int c = 0; c < m_tupdesc->natts; c++)
 		{
@@ -1798,7 +2150,7 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 			CString  colname(m_colnames[c]);
 			for (int d = 0; d < m_tupdesc->natts; d++)
 			{
-				CString fname(names->Get(d));
+				CString fname(names->Get(context, d).ToLocalChecked());
 				if (strcmp(colname, fname) == 0)
 				{
 					found = true;
@@ -1813,17 +2165,13 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
 		/* Make sure dropped columns are skipped by backend code. */
-#if PG_VERSION_NUM < 110000
-		if (m_tupdesc->attrs[c]->attisdropped)
-#else
-		if (m_tupdesc->attrs[c].attisdropped)
-#endif
+		if (TupleDescAttr(m_tupdesc, c)->attisdropped)
 		{
 			nulls[c] = true;
 			continue;
 		}
 
-		Handle<v8::Value> attr = m_is_scalar ? value : obj->Get(m_colnames[c]);
+		Handle<v8::Value> attr = m_is_scalar ? value : obj->Get(context, m_colnames[c]).ToLocalChecked();
 		if (attr.IsEmpty() || attr->IsUndefined() || attr->IsNull())
 			nulls[c] = true;
 		else
@@ -1846,82 +2194,98 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 	return result;
 }
 
-js_error::js_error() throw()
-	: m_msg(NULL), m_code(0), m_detail(NULL), m_hint(NULL), m_context(NULL)
+js_error::js_error() noexcept
+	: m_msg(nullptr), m_code(0), m_detail(nullptr), m_hint(nullptr), m_context(nullptr)
 {
 }
 
-js_error::js_error(const char *msg) throw()
+js_error::js_error(const char *msg) noexcept : js_error()
 {
 	m_msg = pstrdup(msg);
-	m_code = 0;
-	m_detail = NULL;
-	m_hint = NULL;
-	m_context = NULL;
 }
 
-js_error::js_error(TryCatch &try_catch) throw()
-{
-	HandleScope		handle_scope(plv8_isolate);
-	String::Utf8Value	exception(try_catch.Exception());
-	Handle<Message>		message = try_catch.Message();
+js_error::js_error(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<v8::Message> message) noexcept : js_error() {
+	init(isolate, exception, message);
+}
 
-	m_msg = NULL;
-	m_code = 0;
-	m_detail = NULL;
-	m_hint = NULL;
-	m_context = NULL;
+js_error::js_error(v8::TryCatch &try_catch) noexcept : js_error() {
+	Isolate		   		*isolate = Isolate::GetCurrent();
+	HandleScope			handle_scope(isolate);
+
+	init(isolate, try_catch.Exception(), try_catch.Message());
+}
+
+void
+js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Message> message) noexcept
+{
+	HandleScope			handle_scope(isolate);
+	v8::String::Utf8Value	err_message(isolate, exception);
+	Local<Context>      context = isolate->GetCurrentContext();
 
 	try
 	{
-		m_msg = ToCStringCopy(exception);
-		Handle<v8::Object> err = try_catch.Exception()->ToObject();
-		StringInfoData	detailStr;
-		StringInfoData	hintStr;
-		StringInfoData	contextStr;
-		initStringInfo(&detailStr);
-		initStringInfo(&hintStr);
-		initStringInfo(&contextStr);
-
-		if (!err.IsEmpty())
+		m_msg = ToCStringCopy(err_message);
+        StringInfoData	detailStr;
+        StringInfoData	hintStr;
+        StringInfoData	contextStr;
+        initStringInfo(&detailStr);
+        initStringInfo(&hintStr);
+        initStringInfo(&contextStr);
+		Handle<v8::Object> err;
+		if (exception->ToObject(context).ToLocal(&err))
+        {
+            if (!err.IsEmpty())
+            {
+                v8::Local<v8::Value> errCode;
+                if (err->Get(context,
+                             v8::String::NewFromUtf8Literal(isolate, "code")).ToLocal(&errCode))
                 {
-			v8::Local<v8::Value> errCode = err->Get(String::NewFromUtf8(plv8_isolate, "code"));
-			if (!errCode->IsUndefined() && !errCode->IsNull())
-			{
-				int32_t code = errCode->Int32Value();
-				m_code = code;
-			}
-
-			v8::Local<v8::Value> errDetail = err->Get(String::NewFromUtf8(plv8_isolate, "detail"));
-			if (!errDetail->IsUndefined() && !errDetail->IsNull())
-			{
-				CString detail(errDetail);
-				appendStringInfo(&detailStr, "%s", detail.str("?"));
-				m_detail = detailStr.data;
-			}
-
-			v8::Local<v8::Value> errHint = err->Get(String::NewFromUtf8(plv8_isolate, "hint"));
-			if (!errHint->IsUndefined() && !errHint->IsNull())
-			{
-				CString hint(errHint);
-				appendStringInfo(&hintStr, "%s", hint.str("?"));
-				m_hint = hintStr.data;
-			}
-
-			v8::Local<v8::Value> errContext = err->Get(String::NewFromUtf8(plv8_isolate, "context"));
-			if (!errContext->IsUndefined() && !errContext->IsNull())
-			{
-				CString context(errContext);
-				appendStringInfo(&contextStr, "%s\n", context.str("?"));
-			}
+                    if (!errCode->IsUndefined() && !errCode->IsNull())
+                    {
+                        int32_t code = errCode->Int32Value(context).FromJust();
+                        m_code = code;
+                    }
                 }
 
+                v8::Local<v8::Value> errDetail;
+                if (err->Get(context,
+                             v8::String::NewFromUtf8Literal(isolate, "detail")).ToLocal(&errDetail))
+                {
+                    if (!errDetail->IsUndefined() && !errDetail->IsNull())
+                    {
+                        CString detail(errDetail);
+                        appendStringInfo(&detailStr, "%s", detail.str("?"));
+                        m_detail = detailStr.data;
+                    }
+                }
+
+                v8::Local<v8::Value> errHint;
+                if (err->Get(context,
+                             v8::String::NewFromUtf8Literal(isolate, "hint")).ToLocal(&errHint))
+                {
+                    if (!errHint->IsUndefined() && !errHint->IsNull())
+                    {
+                        CString hint(errHint);
+                        appendStringInfo(&hintStr, "%s", hint.str("?"));
+                        m_hint = hintStr.data;
+                    }
+                }
+
+                v8::Local<v8::Value> errContext;
+                if (err->Get(context, v8::String::NewFromUtf8Literal(isolate, "context")).ToLocal(&errContext))
+                    if (!errContext->IsUndefined() && !errContext->IsNull())
+                    {
+                        CString str_context(errContext);
+                        appendStringInfo(&contextStr, "%s\n", str_context.str("?"));
+                    }
+            }
+        }
 
 		if (!message.IsEmpty())
 		{
 			CString		script(message->GetScriptResourceName());
-			int		lineno = message->GetLineNumber();
-			CString		source(message->GetSourceLine());
+			int		lineno = message->GetLineNumber(context).FromJust();
+			CString		source(message->GetSourceLine(context).ToLocalChecked());
 			// TODO: Get stack trace?
 			//Handle<StackTrace> stackTrace(message->GetStackTrace());
 
@@ -1954,22 +2318,37 @@ js_error::error_object()
 	 */
 	if (strstr(msg, "Error: ") == msg)
 		msg += 7;
-	Local<String> message = ToString(msg);
+	Local<v8::String> message = ToString(msg);
 	return Exception::Error(message);
+}
+
+void
+js_error::log(int elevel, const char *msg_format) noexcept {
+	if (elevel >= ERROR) {
+		return rethrow(msg_format);
+	}
+	ereport(elevel,
+			(
+					m_code ? errcode(m_code): 0,
+					m_msg ? errmsg((msg_format ? msg_format : "%s"), m_msg) : 0,
+					m_detail ? errdetail("%s", m_detail) : 0,
+					m_hint ? errhint("%s", m_hint) : 0,
+					m_context ? errcontext("%s", m_context) : 0
+			));
 }
 
 __attribute__((noreturn))
 void
-js_error::rethrow() throw()
+js_error::rethrow(const char *msg_format) noexcept
 {
 	ereport(ERROR,
-		(
-			m_code ? errcode(m_code): 0,
-			m_msg ? errmsg("%s", m_msg) : 0,
-			m_detail ? errdetail("%s", m_detail) : 0,
-			m_hint ? errhint("%s", m_hint) : 0,
-			m_context ? errcontext("%s", m_context) : 0
-                ));
+			(
+					m_code ? errcode(m_code): 0,
+					m_msg ? errmsg((msg_format ? msg_format : "%s"), m_msg) : 0,
+					m_detail ? errdetail("%s", m_detail) : 0,
+					m_hint ? errhint("%s", m_hint) : 0,
+					m_context ? errcontext("%s", m_context) : 0
+			));
 	exit(0);	// keep compiler quiet
 }
 

@@ -44,7 +44,14 @@ extern "C" {
 #endif
 #endif
 
+#if PG_VERSION_NUM >= 180000
+PG_MODULE_MAGIC_EXT(
+	.name = "plv8",
+	.version = PLV8_VERSION
+);
+#else
 PG_MODULE_MAGIC;
+#endif
 
 PGDLLEXPORT Datum	plv8_call_handler(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plv8_call_validator(PG_FUNCTION_ARGS);

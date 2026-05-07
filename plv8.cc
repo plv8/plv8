@@ -528,14 +528,19 @@ plv8_call_handler(PG_FUNCTION_ARGS)
 		plv8_proc *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
 		plv8_proc_cache *cache = proc->cache;
 
-		if (is_trigger)
-			return CallTrigger(fcinfo, proc->xenv);
-		else if (cache->retset)
-			return CallSRFunction(fcinfo, proc->xenv,
-						cache->nargs, proc->argtypes, &proc->rettype);
-		else
-			return CallFunction(fcinfo, proc->xenv,
-						cache->nargs, proc->argtypes, &proc->rettype);
+		{
+			Isolate::Scope	iscope(proc->xenv->isolate);
+			HandleScope		hscope(proc->xenv->isolate);
+
+			if (is_trigger)
+				return CallTrigger(fcinfo, proc->xenv);
+			else if (cache->retset)
+				return CallSRFunction(fcinfo, proc->xenv,
+							cache->nargs, proc->argtypes, &proc->rettype);
+			else
+				return CallFunction(fcinfo, proc->xenv,
+							cache->nargs, proc->argtypes, &proc->rettype);
+		}
 	}
 	catch (js_error& e)	{ e.rethrow(); }
 	catch (pg_error& e)	{ e.rethrow(); }

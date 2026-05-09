@@ -33,6 +33,7 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "utils/hsearch.h"
 
 #include <signal.h>
 

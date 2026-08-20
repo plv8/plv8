@@ -33,6 +33,9 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#if PG_VERSION_NUM >= 190000
+#include "utils/hsearch.h"
+#endif
 
 #include <signal.h>
 

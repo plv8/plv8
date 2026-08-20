@@ -13,7 +13,8 @@ jobs:
             REL_15_STABLE,
             REL_16_STABLE,
             REL_17_STABLE,
-            REL_18_BETA1
+            REL_18_STABLE,
+            REL_19_STABLE
           ]
     runs-on: ${{ matrix.os }}
 

@@ -270,10 +270,17 @@ ConvertJsonb(JsonbContainer *in) {
 	return JsonbIterate(&it, container);
 }
 
+#if PG_VERSION_NUM >= 190000
+static JsonbValue *
+JsonbObjectFromObject(JsonbInState *pstate, Local<v8::Object> object);
+static JsonbValue *
+JsonbArrayFromArray(JsonbInState *pstate, Local<v8::Object> object);
+#else
 static JsonbValue *
 JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object);
 static JsonbValue *
 JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object);
+#endif
 
 static void LogType(Local<v8::Value> val, bool asError = true) {
 	if( val->IsUndefined() )
@@ -387,7 +394,11 @@ TimeAs8601 (double millis) {
 }
 
 static JsonbValue *
+#if PG_VERSION_NUM >= 190000
+JsonbFromValue(JsonbInState *pstate, Local<v8::Value> value, JsonbIteratorToken type) {
+#else
 JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorToken type) {
+#endif
 	Isolate *isolate = Isolate::GetCurrent();
 	Local<Context>		context = isolate->GetCurrentContext();
 	JsonbValue val;
@@ -444,14 +455,28 @@ JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorTo
 		}
 	}
 
+#if PG_VERSION_NUM >= 190000
+	pushJsonbValue(pstate, type, &val);
+	return pstate->result;
+#else
 	return pushJsonbValue(pstate, type, &val);
+#endif
 }
 
 static JsonbValue *
+#if PG_VERSION_NUM >= 190000
+JsonbArrayFromArray(JsonbInState *pstate, Local<v8::Object> object) {
+#else
 JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object) {
+#endif
 	Isolate *isolate = Isolate::GetCurrent();
 	Local<Context>		context = isolate->GetCurrentContext();
+#if PG_VERSION_NUM >= 190000
+	pushJsonbValue(pstate, WJB_BEGIN_ARRAY, NULL);
+	JsonbValue *val = pstate->result;
+#else
 	JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_ARRAY, NULL);
+#endif
 	Local<v8::Array> a = Local<v8::Array>::Cast(object);
 	for (size_t i = 0; i < a->Length(); i++) {
 		Local<v8::Value> o = a->Get(context, i).ToLocalChecked();
@@ -465,16 +490,30 @@ JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object) {
 		}
 	}
 
+#if PG_VERSION_NUM >= 190000
+	pushJsonbValue(pstate, WJB_END_ARRAY, NULL);
+	val = pstate->result;
+#else
 	val = pushJsonbValue(pstate, WJB_END_ARRAY, NULL);
+#endif
 
 	return val;
 }
 
 static JsonbValue *
+#if PG_VERSION_NUM >= 190000
+JsonbObjectFromObject(JsonbInState *pstate, Local<v8::Object> object) {
+#else
 JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object) {
+#endif
 	Isolate *isolate = Isolate::GetCurrent();
 	Local<Context>		context = isolate->GetCurrentContext();
+#if PG_VERSION_NUM >= 190000
+	pushJsonbValue(pstate, WJB_BEGIN_OBJECT, NULL);
+	JsonbValue *val = pstate->result;
+#else
 	JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_OBJECT, NULL);
+#endif
 	Local<Array> arr = object->GetOwnPropertyNames(context).ToLocalChecked();
 
 	for (size_t i = 0; i < arr->Length(); i++) {
@@ -492,7 +531,12 @@ JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object) {
 			val = JsonbFromValue(pstate, o, WJB_VALUE);
 		}
 	}
+#if PG_VERSION_NUM >= 190000
+	pushJsonbValue(pstate, WJB_END_OBJECT, NULL);
+	val = pstate->result;
+#else
 	val = pushJsonbValue(pstate, WJB_END_OBJECT, NULL);
+#endif
 	return val;
 }
 
@@ -508,7 +552,11 @@ ConvertObject(Local<v8::Object> object) {
 
 	MemoryContextSwitchTo(conversion_context);
 
+#if PG_VERSION_NUM >= 190000
+  JsonbInState pstate = {0};
+#else
   JsonbParseState *pstate = NULL;
+#endif
   JsonbValue *val;
 
 	if (object->IsArray()) {
@@ -518,7 +566,12 @@ ConvertObject(Local<v8::Object> object) {
 	} else {
 		pushJsonbValue(&pstate, WJB_BEGIN_ARRAY, NULL);
 		JsonbFromValue(&pstate, object, WJB_ELEM);
+#if PG_VERSION_NUM >= 190000
+		pushJsonbValue(&pstate, WJB_END_ARRAY, NULL);
+		val = pstate.result;
+#else
 		val = pushJsonbValue(&pstate, WJB_END_ARRAY, NULL);
+#endif
                 val->val.array.rawScalar = true;
 	}
 

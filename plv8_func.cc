@@ -899,7 +899,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 		throw js_error("cannot find cursor");
 	}
 
-	CString				cname(self->GetInternalField(0));
+	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
 	int					nfetch = 1;
 	bool				forward = true, wantarray = false;
@@ -965,7 +965,7 @@ plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate*			isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
-	CString				cname(self->GetInternalField(0));
+	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
 	int					nmove = 1;
 	bool				forward = true;
@@ -1007,7 +1007,7 @@ static void
 plv8_CursorClose(const FunctionCallbackInfo<v8::Value> &args)
 {
 	Handle<v8::Object>	self = args.This();
-	CString				cname(self->GetInternalField(0));
+	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
 
 	if (!cursor)
@@ -1035,7 +1035,7 @@ static void
 plv8_ReturnNext(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Handle<v8::Object>	self = args.This();
-	Handle<v8::Value>	conv_value = self->GetInternalField(PLV8_INTNL_CONV);
+	Handle<v8::Value>	conv_value = self->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
 
 	if (!conv_value->IsExternal())
 		throw js_error("return_next called in context that cannot accept a set");
@@ -1158,7 +1158,7 @@ plv8_GetWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 	Isolate*			isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
 	Handle<v8::Value>	fcinfo_value =
-			self->GetInternalField(PLV8_INTNL_FCINFO);
+			self->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>();
 
 	if (!fcinfo_value->IsExternal())
 		throw js_error("get_window_object called in wrong context");

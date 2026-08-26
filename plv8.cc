@@ -1554,7 +1554,7 @@ CompileFunction(
 	Local<Context> context = Local<Context>::New(isolate, global_context->context);
 	Context::Scope	context_scope(context);
 	TryCatch		try_catch(isolate);
-	v8::ScriptOrigin origin(isolate, name);
+	v8::ScriptOrigin origin(name);
 
 	// set up the signal handlers
 	if (int_handler == NULL) {

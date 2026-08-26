@@ -59,13 +59,3 @@ void ArrayAllocator::Free(void* data, size_t length) {
 	next_size -= length;
 	this->allocator->Free(data, length);
 }
-
-void* ArrayAllocator::Reallocate(void *data, size_t old_length, size_t new_length) {
-	ssize_t delta = static_cast<ssize_t>(new_length) - static_cast<ssize_t>(old_length);
-	if (delta > 0) {
-		if (!check(delta)) {
-			return nullptr;
-		}
-	}
-	return this->allocator->Reallocate(data, old_length, new_length);
-}

@@ -206,7 +206,7 @@ class WindowFunctionSupport
 private:
 	WindowObject			m_winobj;
 	v8::Handle<v8::Object>	m_plv8obj;
-	v8::Handle<v8::Value>	m_prev_fcinfo;
+	v8::Handle<v8::Data>	m_prev_fcinfo;
 
 public:
 	WindowFunctionSupport(v8::Handle<v8::Context> context,
@@ -249,7 +249,7 @@ class SRFSupport
 {
 private:
 	v8::Handle<v8::Object> m_plv8obj;
-	v8::Handle<v8::Value> m_prev_conv, m_prev_tupstore;
+	v8::Handle<v8::Data> m_prev_conv, m_prev_tupstore;
 
 public:
 	SRFSupport(v8::Handle<v8::Context> context,

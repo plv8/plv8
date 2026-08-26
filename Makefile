@@ -1,12 +1,12 @@
 
 PLV8_VERSION = 3.2.4
+V8_CMAKE_DIR := deps/v8-cmake
+V8_BUILD_DIR := $(V8_CMAKE_DIR)/build
 
 CP := cp
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
-SHLIB_LINK += -std=c++17
 PG_CPPFLAGS := -fPIC -Wall -Wno-register -xc++
-PG_LDFLAGS := -std=c++17
 
 SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc plv8_guc.cc
 OBJS = $(SRCS:.cc=.o)
@@ -17,16 +17,18 @@ PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql
 ifeq ($(OS),Windows_NT)
 	# noop for now
 else
-	SHLIB_LINK += -Ldeps/v8-cmake/build
+	SHLIB_LINK += -L$(V8_BUILD_DIR)
+	ABSL_LIB_DIRS = $(sort $(dir $(wildcard $(V8_BUILD_DIR)/v8/third_party/abseil-cpp/absl/*/libabsl_*.a)))
+	SHLIB_LINK += $(addprefix -L,$(ABSL_LIB_DIRS))
 	UNAME_S := $(shell uname -s)
 	ifeq ($(UNAME_S),Darwin)
 		CCFLAGS += -stdlib=libc++
-		SHLIB_LINK += -stdlib=libc++ -std=c++17 -lc++
+		SHLIB_LINK += -stdlib=libc++ -lc++
 		NUMPROC := $(shell sysctl hw.ncpu | awk '{print $$2}')
 		PATCH_V8 := patches/v8-cmake/macos-build.patch
 	endif
 	ifeq ($(UNAME_S),Linux)
-		SHLIB_LINK += -lrt -std=c++17
+		SHLIB_LINK += -lrt
 		NUMPROC := $(shell grep -c ^processor /proc/cpuinfo)
 	endif
 endif
@@ -35,26 +37,24 @@ ifeq ($(NUMPROC),0)
 	NUMPROC = 1
 endif
 
-SHLIB_LINK += -Ldeps/v8-cmake/build
-
 all: v8 $(OBJS)
 
 # For some reason, this solves parallel make dependency.
 plv8_config.h plv8.so: v8
 
-deps/v8-cmake/README.md:
+$(V8_CMAKE_DIR)/README.md:
 	@git submodule update --init --recursive
-	$(foreach patch,$(PATCH_V8),cd deps/v8-cmake && patch -p1 <../../$(patch);)
+	$(foreach patch,$(PATCH_V8),cd $(V8_CMAKE_DIR) && patch -p1 <../../$(patch);)
 
-deps/v8-cmake/build/libv8_libbase.a: deps/v8-cmake/README.md
-	@cd deps/v8-cmake && mkdir -p build && cd build && cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Denable-fPIC=ON -DCMAKE_BUILD_TYPE=Release ../ && make -j $(NUMPROC)
+$(V8_BUILD_DIR)/libv8_snapshot.a: $(V8_CMAKE_DIR)/README.md
+	@cmake -S $(V8_CMAKE_DIR) -B $(V8_BUILD_DIR) -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_TYPE=Release && cmake --build $(V8_BUILD_DIR) -j$(NUMPROC) --target v8_snapshot
 
-v8: deps/v8-cmake/build/libv8_libbase.a
+v8: $(V8_BUILD_DIR)/libv8_snapshot.a
 
 # enable direct jsonb conversion by default
 CCFLAGS += -DJSONB_DIRECT_CONVERSION
 
-CCFLAGS += -Ideps/v8-cmake/v8/include -std=c++17
+CCFLAGS += -I$(V8_CMAKE_DIR)/v8/include -Wno-pointer-arith -Wno-comment
 
 ifdef EXECUTION_TIMEOUT
 	CCFLAGS += -DEXECUTION_TIMEOUT
@@ -76,9 +76,36 @@ else
 	REGRESS += bigint_graceful
 endif
 
-SHLIB_LINK += -lv8_base_without_compiler -lv8_compiler -lv8_snapshot -lv8_inspector -lv8_libplatform -lv8_base_without_compiler -lv8_libsampler -lv8_torque_generated -lv8_libbase
+SHLIB_LINK += -Wl,--exclude-libs,ALL,--start-group \
+	-labsl_base \
+	-labsl_city \
+	-labsl_civil_time \
+	-labsl_debugging_internal \
+	-labsl_hash \
+	-labsl_hashtablez_sampler \
+	-labsl_kernel_timeout_internal \
+	-labsl_low_level_hash \
+	-labsl_malloc_internal \
+	-labsl_raw_hash_set \
+	-labsl_raw_logging_internal \
+	-labsl_spinlock_wait \
+	-labsl_stacktrace \
+	-labsl_strings \
+	-labsl_synchronization \
+	-labsl_throw_delegate \
+	-labsl_time_zone \
+	-lv8_base_without_compiler \
+	-lv8_compiler \
+	-lv8_libbase \
+	-lv8_libplatform \
+	-lv8_libsampler \
+	-lv8_simdutf \
+	-lv8_snapshot \
+	-lv8_torque_generated \
+	-Wl,--whole-archive -labsl_time -Wl,--no-whole-archive \
+	-Wl,--end-group
 
-OPTFLAGS = -std=c++17 -fno-rtti -O2
+OPTFLAGS = -std=c++20 -fno-rtti -O2
 CCFLAGS += -Wall $(OPTFLAGS)
 
 generate_upgrades:
@@ -92,7 +119,7 @@ plv8_config.h: plv8_config.h.in Makefile
 	sed -e 's/^#undef PLV8_VERSION/#define PLV8_VERSION "$(PLV8_VERSION)"/' $< > $@
 
 %.o : %.cc plv8_config.h plv8.h
-	$(CXX) $(CCFLAGS) $(CPPFLAGS) -fPIC -c -o $@ $<
+	$(CXX) $(CCFLAGS) $(CPPFLAGS) -fconcepts -fPIC -c -o $@ $<
 
 COMPILE.cxx.bc = $(CLANG) -xc++ -Wno-ignored-attributes $(BITCODE_CXXFLAGS) $(CCFLAGS) $(CPPFLAGS) -emit-llvm -c
 
@@ -116,7 +143,7 @@ subclean:
 clean: subclean
 
 distclean: clean
-	@cd deps/v8-cmake/build && make clean
+	@cd $(V8_BUILD_DIR) && make clean
 
 .PHONY: subclean all clean installcheck
 

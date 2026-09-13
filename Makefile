@@ -14,6 +14,12 @@ MODULE_big = plv8-$(PLV8_VERSION)
 EXTENSION = plv8
 PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql
 
+# Patches applied to the v8-cmake submodule when it is first checked out.
+# gcc14-stats-collector.patch: GCC 14 / libstdc++ 14 no longer provides
+# std::remove transitively, so the header must include <algorithm> itself
+# (fixed upstream in V8 11.6).
+PATCH_V8 := patches/v8-cmake/gcc14-stats-collector.patch
+
 ifeq ($(OS),Windows_NT)
 	# noop for now
 else
@@ -23,7 +29,7 @@ else
 		CCFLAGS += -stdlib=libc++
 		SHLIB_LINK += -stdlib=libc++ -std=c++17 -lc++
 		NUMPROC := $(shell sysctl hw.ncpu | awk '{print $$2}')
-		PATCH_V8 := patches/v8-cmake/macos-build.patch
+		PATCH_V8 += patches/v8-cmake/macos-build.patch
 	endif
 	ifeq ($(UNAME_S),Linux)
 		SHLIB_LINK += -lrt -std=c++17
@@ -47,9 +53,13 @@ deps/v8-cmake/README.md:
 	$(foreach patch,$(PATCH_V8),cd deps/v8-cmake && patch -p1 <../../$(patch);)
 
 deps/v8-cmake/build/libv8_libbase.a: deps/v8-cmake/README.md
-	@cd deps/v8-cmake && mkdir -p build && cd build && cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Denable-fPIC=ON -DCMAKE_BUILD_TYPE=Release ../ && make -j $(NUMPROC)
+	@cd deps/v8-cmake && mkdir -p build && cd build && cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Denable-fPIC=ON -DCMAKE_BUILD_TYPE=Release $(V8_CMAKE_ARGS) ../ && make -j $(NUMPROC)
 
 v8: deps/v8-cmake/build/libv8_libbase.a
+
+# Extra arguments for the v8-cmake configure step, for example
+# V8_CMAKE_ARGS='-DCMAKE_CXX_FLAGS=-fstack-protector-strong'.
+V8_CMAKE_ARGS ?=
 
 # enable direct jsonb conversion by default
 CCFLAGS += -DJSONB_DIRECT_CONVERSION
@@ -121,4 +131,13 @@ distclean: clean
 .PHONY: subclean all clean installcheck
 
 include $(PGXS)
+# PGXS links MODULE_big with $(CC); point it at the C++ compiler.
 CC=$(CXX)
+# Do not leak the PGXS toolchain settings into the v8-cmake build.  Packaging
+# environments export CC and the *FLAGS variables (rpm's %set_build_flags,
+# which EL10/Fedora apply automatically; Debian's dpkg-buildflags), and make
+# then re-exports whatever this Makefile and PGXS turned them into.  CC=g++
+# makes CMake fail its C compiler check, and PostgreSQL's CXXFLAGS (for
+# example -flto=auto) break the V8 link.  V8 is built with its own flags;
+# use V8_CMAKE_ARGS to pass additional options to cmake.
+unexport CC CFLAGS CXXFLAGS LDFLAGS

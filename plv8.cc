@@ -2170,12 +2170,31 @@ void
 js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Message> message) noexcept
 {
 	HandleScope			handle_scope(isolate);
-	v8::String::Utf8Value	err_message(isolate, exception);
 	Local<Context>      context = isolate->GetCurrentContext();
 
 	try
 	{
-		m_msg = ToCStringCopy(err_message);
+		/*
+		 * Converting the exception to a string may fail, e.g. when the
+		 * JavaScript stack is exhausted (infinite recursion) and
+		 * toString() cannot run, or when the exception is empty.  In
+		 * that case Utf8Value yields NULL, so fall back to the message
+		 * text V8 already formatted, and then to a generic message,
+		 * rather than dereferencing NULL below.
+		 */
+		if (!exception.IsEmpty())
+		{
+			v8::String::Utf8Value	err_message(isolate, exception);
+			m_msg = ToCStringCopy(err_message);
+		}
+		if (m_msg == NULL && !message.IsEmpty())
+		{
+			v8::String::Utf8Value	err_message(isolate, message->Get());
+			m_msg = ToCStringCopy(err_message);
+		}
+		if (m_msg == NULL)
+			m_msg = pstrdup("unknown exception");
+
         StringInfoData	detailStr;
         StringInfoData	hintStr;
         StringInfoData	contextStr;
@@ -2193,8 +2212,9 @@ js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Messa
                 {
                     if (!errCode->IsUndefined() && !errCode->IsNull())
                     {
-                        int32_t code = errCode->Int32Value(context).FromJust();
-                        m_code = code;
+                        int32_t code;
+                        if (errCode->Int32Value(context).To(&code))
+                            m_code = code;
                     }
                 }
 
@@ -2235,8 +2255,11 @@ js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Messa
 		if (!message.IsEmpty())
 		{
 			CString		script(message->GetScriptResourceName());
-			int		lineno = message->GetLineNumber(context).FromJust();
-			CString		source(message->GetSourceLine(context).ToLocalChecked());
+			int		lineno = message->GetLineNumber(context).FromMaybe(1);
+			Local<v8::String>	sourceLine;
+			/* leaves sourceLine empty on failure, printed as "?" */
+			(void) message->GetSourceLine(context).ToLocal(&sourceLine);
+			CString		source(sourceLine);
 			// TODO: Get stack trace?
 			//Handle<StackTrace> stackTrace(message->GetStackTrace());
 

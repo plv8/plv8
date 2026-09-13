@@ -1,5 +1,11 @@
 Revision history for plv8
 
+3.2.5       unreleased
+            - fix crash in js_error::init when the exception message cannot be
+              converted to a string, e.g. on infinite recursion
+            - add missing <cstdlib> include for std::malloc in plv8_allocator.cc
+            - postgres 19 support
+
 3.2.4       2025-07-05
             - fix GUC assignment issue
             - fix possible out of bounds in windowing

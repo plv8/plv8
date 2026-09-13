@@ -1,4 +1,5 @@
 #include "plv8_allocator.h"
+#include <cstdlib>
 
 #define RECHECK_INCREMENT 1_MB
 

@@ -106,3 +106,14 @@ plv8.elog(NOTICE, "should not come here");
 $$ LANGUAGE plv8;
 SELECT catch_elog_error2();
 
+-- infinite recursion must raise an error, not crash the backend (issue #603)
+CREATE FUNCTION infinite_recursion(counter integer DEFAULT 0) RETURNS void AS $$
+  plv8.execute('SELECT infinite_recursion($1)', [counter + 1]);
+$$ LANGUAGE plv8;
+DO $$
+BEGIN
+  PERFORM infinite_recursion();
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'caught recursion error';
+END $$;
+SELECT 'still alive' AS status;

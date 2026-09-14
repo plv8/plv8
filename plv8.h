@@ -126,6 +126,7 @@ typedef struct plv8_context
 	bool 						is_dead;
 	bool						interrupted;
 	Oid							user_id;
+	uint64						id;			/* unique for the life of the backend */
 	std::vector<std::tuple<v8::Global<v8::Promise>, v8::Global<v8::Message>, v8::Global<v8::Value>>> unhandled_promises;
 	bool 						ignore_unhandled_promises;
 } plv8_context;
@@ -278,6 +279,28 @@ public:
 };
 
 extern plv8_context* current_context;
+
+/*
+ * Points current_context at the context that is about to execute JavaScript
+ * and restores the previous value when the scope ends.  Nested calls (a
+ * JavaScript function running SQL that calls a SECURITY DEFINER routine which
+ * calls another plv8 function, for example) may execute in another user's
+ * context, and the outer function must get its own context back afterwards.
+ */
+class CurrentContextScope
+{
+private:
+	plv8_context   *m_saved;
+public:
+	explicit CurrentContextScope(plv8_context *context) : m_saved(current_context)
+	{
+		current_context = context;
+	}
+	~CurrentContextScope()
+	{
+		current_context = m_saved;
+	}
+};
 extern v8::Local<v8::Function> find_js_function(Oid fn_oid);
 extern v8::Local<v8::Function> find_js_function_by_name(const char *signature);
 extern const char *FormatSPIStatus(int status) throw();

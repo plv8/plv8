@@ -321,6 +321,14 @@ plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 	HandleScope		handle_scope(isolate);
 	MemoryContext	ctx = CurrentMemoryContext;
 	FunctionCallback	fn = UnwrapCallback(args.Data());
+	/*
+	 * A callback that runs SQL may call into another plv8 function under a
+	 * different user (SECURITY DEFINER), which switches current_context and,
+	 * if it errors out, never gets to switch it back.  Restore it here so
+	 * the JavaScript that continues after this callback still sees its own
+	 * context.
+	 */
+	CurrentContextScope	context_scope(current_context);
 
 	try
 	{

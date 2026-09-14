@@ -95,6 +95,7 @@ typedef struct plv8_proc_cache
 } plv8_proc_cache;
 
 plv8_context *current_context = nullptr;
+static uint64 next_context_id = 1;
 size_t plv8_memory_limit = 0;
 size_t plv8_last_heap_size = 0;
 
@@ -109,6 +110,7 @@ typedef struct plv8_exec_env
 	Persistent<Object>		recv;
 	Persistent<Context>		context;
 	Local<Context> localContext() { return Local<Context>::New(isolate, context) ; }
+	uint64					context_id;	/* plv8_context.id this env was created for */
 	struct plv8_exec_env   *next;
 } plv8_exec_env;
 
@@ -490,14 +492,15 @@ plv8_xact_cb(XactEvent event, void *arg)
 }
 
 static inline plv8_exec_env *
-plv8_new_exec_env(Isolate *isolate)
+plv8_new_exec_env(plv8_context *context)
 {
 	plv8_exec_env	   *xenv = (plv8_exec_env *)
 		MemoryContextAllocZero(TopTransactionContext, sizeof(plv8_exec_env));
 
 	new(&xenv->context) Persistent<Context>();
 	new(&xenv->recv) Persistent<Object>();
-	xenv->isolate = isolate;
+	xenv->isolate = context->isolate;
+	xenv->context_id = context->id;
 
 	/*
 	 * Add it to the list, which will be freed in the end of top transaction.
@@ -511,24 +514,43 @@ plv8_new_exec_env(Isolate *isolate)
 Datum
 plv8_call_handler(PG_FUNCTION_ARGS)
 {
-	current_context = GetPlv8Context();
+	plv8_context   *context = GetPlv8Context();
 	Oid		fn_oid = fcinfo->flinfo->fn_oid;
 	bool	is_trigger = CALLED_AS_TRIGGER(fcinfo);
 
 	try
 	{
-		Isolate::Scope	scope(current_context->isolate);
-		HandleScope	handle_scope(current_context->isolate);
+		CurrentContextScope	context_scope(context);
+		Isolate::Scope	scope(context->isolate);
+		HandleScope	handle_scope(context->isolate);
+		plv8_proc	   *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
 
-		if (!fcinfo->flinfo->fn_extra)
+		/*
+		 * The proc cached in fn_extra carries an execution environment that
+		 * was created for the context of whoever first called the function
+		 * through this FmgrInfo.  If the effective user has changed since
+		 * (a SECURITY DEFINER routine, SET ROLE) or that context is gone
+		 * (plv8_reset(), an isolate killed after running out of memory),
+		 * it refers to a different isolate than the one we just entered.
+		 * Running it there mixes isolates and crashes V8 (issue #606), so
+		 * rebuild it for the current context instead.  This is the same
+		 * thing that happens on the first call under a new user, when
+		 * plv8_get_proc() notices the user change and recompiles.
+		 */
+		if (proc && proc->xenv->context_id != context->id)
 		{
-			plv8_proc	   *proc = Compile(fn_oid, fcinfo,
-										   false, is_trigger);
-			proc->xenv = CreateExecEnv(proc->cache->function, current_context);
+			pfree(proc);
+			proc = NULL;
+			fcinfo->flinfo->fn_extra = NULL;
+		}
+
+		if (!proc)
+		{
+			proc = Compile(fn_oid, fcinfo, false, is_trigger);
+			proc->xenv = CreateExecEnv(proc->cache->function, context);
 			fcinfo->flinfo->fn_extra = proc;
 		}
 
-		plv8_proc *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
 		plv8_proc_cache *cache = proc->cache;
 
 		if (is_trigger)
@@ -565,6 +587,23 @@ static void killPlv8Context(plv8_context *ctx) {
 		}
 		cache = (plv8_proc_cache *) hash_seq_search(&status);
 	}
+
+	/*
+	 * Execution environments created for this context hold global handles
+	 * in the isolate we are about to dispose of.  Release them now, or
+	 * plv8_xact_cb would try to at the end of the transaction, on a dead
+	 * isolate.  The call handler will notice the context id mismatch and
+	 * rebuild any of them that is still referenced from a fn_extra.
+	 */
+	for (plv8_exec_env *env = exec_env_head; env != NULL; env = env->next)
+	{
+		if (env->context_id == ctx->id)
+		{
+			env->recv.Reset();
+			env->context.Reset();
+		}
+	}
+
 	ctx->isolate->Dispose();
 	delete ctx->array_buffer_allocator;
 }
@@ -670,17 +709,16 @@ plv8_inline_handler(PG_FUNCTION_ARGS)
 
 	try
 	{
-		current_context = GetPlv8Context();
-		Isolate::Scope		scope(current_context->isolate);
-		HandleScope			handle_scope(current_context->isolate);
+		plv8_context	   *context = GetPlv8Context();
+		CurrentContextScope	context_scope(context);
+		Isolate::Scope		scope(context->isolate);
+		HandleScope			handle_scope(context->isolate);
 		char			   *source_text = codeblock->source_text;
-		Persistent<Context> global_context;
-		global_context.Reset(current_context->isolate, current_context->context);
 
-		Local<Function>	function = CompileFunction(current_context,
+		Local<Function>	function = CompileFunction(context,
 										NULL, 0, NULL,
 										source_text, false, false);
-		plv8_exec_env	   *xenv = CreateExecEnv(function, current_context);
+		plv8_exec_env	   *xenv = CreateExecEnv(function, context);
 		return CallFunction(fcinfo, xenv, 0, NULL, NULL);
 	}
 	catch (js_error& e)	{ e.rethrow(); }
@@ -1192,13 +1230,14 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 Datum
 plv8_call_validator(PG_FUNCTION_ARGS)
 {
-	current_context = GetPlv8Context();
+	plv8_context   *context = GetPlv8Context();
 	Oid				fn_oid = PG_GETARG_OID(0);
 	HeapTuple		tuple;
 	Form_pg_proc	proc;
 	char			functyptype;
 	bool			is_trigger = false;
-	Isolate::Scope  scope(current_context->isolate);
+	CurrentContextScope	context_scope(context);
+	Isolate::Scope  scope(context->isolate);
 
 	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, fn_oid))
 		PG_RETURN_VOID();
@@ -1234,7 +1273,7 @@ plv8_call_validator(PG_FUNCTION_ARGS)
 		/* Don't use validator's fcinfo */
 		plv8_proc	   *proc = Compile(fn_oid, NULL,
 									   true, is_trigger);
-		(void) CreateExecEnv(proc->cache->function, current_context);
+		(void) CreateExecEnv(proc->cache->function, context);
 		/* the result of a validator is ignored */
 		PG_RETURN_VOID();
 	}
@@ -1276,7 +1315,7 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 		uptodate = (!cache->function.IsEmpty() &&
 			cache->fn_xmin == HeapTupleHeaderGetXmin(procTup->t_data) &&
 			ItemPointerEquals(&cache->fn_tid, &procTup->t_self) &&
-			cache->user_id == GetUserId());
+			cache->user_id == current_context->user_id);
 
 		if (!uptodate)
 		{
@@ -1314,7 +1353,7 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 		strlcpy(cache->proname, NameStr(procStruct->proname), NAMEDATALEN);
 		cache->fn_xmin = HeapTupleHeaderGetXmin(procTup->t_data);
 		cache->fn_tid = procTup->t_self;
-		cache->user_id = GetUserId();
+		cache->user_id = current_context->user_id;
 
 		int nargs = get_func_arg_info(procTup, &argtypes, argnames, &argmodes);
 
@@ -1401,7 +1440,7 @@ CreateExecEnv(Persistent<Function>& function, plv8_context *context)
 
 	PG_TRY();
 	{
-		xenv = plv8_new_exec_env(context->isolate);
+		xenv = plv8_new_exec_env(context);
 	}
 	PG_CATCH();
 	{
@@ -1432,7 +1471,7 @@ CreateExecEnv(Handle<Function> function, plv8_context *context)
 
 	PG_TRY();
 	{
-		xenv = plv8_new_exec_env(context->isolate);
+		xenv = plv8_new_exec_env(context);
 	}
 	PG_CATCH();
 	{
@@ -1479,19 +1518,17 @@ Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger)
 	if (cache->function.IsEmpty())
 	{
 		/*
-		 * We need to create global context before entering CompileFunction
-		 * because GetPlv8Context could call startup procedure, which
-		 * could be this cache->function itself.  In this scenario,
-		 * Compile is called recursively and plv8_get_proc tries to refresh
-		 * cache because cache->function is still not yet ready at this
-		 * point.  Then some pointers of cache will become stale by pfree
-		 * and CompileFunction ends up compiling freed function source.
+		 * Compile into current_context, which the caller has already set
+		 * up (and whose startup procedure, if any, has already run): the
+		 * call handler and the validator point it at the effective user's
+		 * context, and find_js_function() is invoked while that context
+		 * is executing.  Looking the context up again here by user id
+		 * would compile into the wrong isolate when they differ, and
+		 * could re-enter Compile() through the startup procedure while
+		 * this cache entry is still being filled in.
 		 */
-		current_context = GetPlv8Context();
 		Isolate::Scope	scope(current_context->isolate);
 		HandleScope		handle_scope(current_context->isolate);
-		Persistent<Context>	global_context;
-		global_context.Reset(current_context->isolate, current_context->context);
 		cache->function.Reset(current_context->isolate, CompileFunction(
 						current_context,
 						cache->proname,
@@ -1787,6 +1824,7 @@ GetPlv8Context() {
 		new(&my_context->context) Persistent<Context>();
 		my_context->context.Reset(isolate, Context::New(isolate, NULL, global));
 		my_context->user_id = user_id;
+		my_context->id = next_context_id++;
 
 		new(&my_context->recv_templ) Persistent<ObjectTemplate>();
 		Local<ObjectTemplate> templ = ObjectTemplate::New(isolate);
@@ -1842,6 +1880,7 @@ GetPlv8Context() {
 		{
 			Local<Function>		func;
 
+			CurrentContextScope	current_scope(my_context);
 			HandleScope			handle_scope(isolate);
 			Local<Context>		context = my_context->localContext();
 			Context::Scope		context_scope(context);

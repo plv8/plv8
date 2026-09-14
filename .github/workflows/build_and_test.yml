@@ -60,3 +60,59 @@ jobs:
         if: failure() && steps.regression-tests.outcome != 'success'
         run: |
           cat plv8/regression.diffs
+
+  # Rocky Linux 10 ships GCC 14, and its rpm build macros export CC, CXX and
+  # the *FLAGS variables into every %build.  Both broke the bundled V8 build
+  # in the past (#604), so build and test the way an EL10 rpm build would.
+  build-and-test-el10:
+    strategy:
+      matrix:
+        pg_major: [18]
+    runs-on: ubuntu-latest
+    container: rockylinux/rockylinux:10
+
+    steps:
+      - name: Test details
+        run: echo Build and test plv8 on Rocky Linux 10 with PGDG PostgreSQL ${{ matrix.pg_major }}
+
+      - name: Install build dependencies and PostgreSQL
+        run: |
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled crb
+          dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-10-$(uname -m)/pgdg-redhat-repo-latest.noarch.rpm
+          dnf install -y gcc gcc-c++ cmake make git patch python3 which redhat-rpm-config \
+            postgresql${{ matrix.pg_major }}-devel postgresql${{ matrix.pg_major }}-server
+
+      - name: Start PostgreSQL
+        run: |
+          mkdir -p /var/lib/pgsql/${{ matrix.pg_major }}/data
+          chown -R postgres:postgres /var/lib/pgsql/${{ matrix.pg_major }}
+          su postgres -c "/usr/pgsql-${{ matrix.pg_major }}/bin/initdb -D /var/lib/pgsql/${{ matrix.pg_major }}/data"
+          su postgres -c "/usr/pgsql-${{ matrix.pg_major }}/bin/pg_ctl -D /var/lib/pgsql/${{ matrix.pg_major }}/data -l /tmp/postgresql.log start"
+
+      - name: Checkout plv8 extension code
+        uses: actions/checkout@v4
+        with:
+          path: plv8
+
+      - name: Build and test plv8 extension
+        id: regression-tests-el10
+        run: |
+          export PATH="/usr/pgsql-${{ matrix.pg_major }}/bin:$PATH"
+          # Reproduce the rpmbuild environment: EL10 applies %set_build_flags
+          # automatically, exporting CC, CXX, CFLAGS, CXXFLAGS and LDFLAGS.
+          eval "$(rpm --eval %set_build_flags)"
+          # The Makefile runs git to fetch the v8-cmake submodule; make sure git
+          # accepts the checkout regardless of which uid created it.
+          git config --global --add safe.directory "$(pwd)/plv8"
+          pushd plv8
+          make with_llvm=no
+          make install with_llvm=no
+          chown -R postgres .
+          su postgres -c "PATH=$PATH make installcheck with_llvm=no"
+          popd
+
+      - name: Print regression.diffs if regression tests failed
+        if: failure() && steps.regression-tests-el10.outcome != 'success'
+        run: |
+          cat plv8/regression.diffs

@@ -1,10 +1,17 @@
 Revision history for plv8
 
-3.2.5       unreleased
+3.2.5       2026-09-20
+            - fix crash when a cached function is run as a different user via
+              security definer or set role, or after plv8_reset() (#606)
             - fix crash in js_error::init when the exception message cannot be
               converted to a string, e.g. on infinite recursion
+            - fix v8 build on el10 / gcc 14 and when CC or *FLAGS are exported
+              by packaging environments (#604)
+            - add V8_CMAKE_ARGS for passing extra options to the v8 build
             - add missing <cstdlib> include for std::malloc in plv8_allocator.cc
+            - use PG_MODULE_MAGIC_EXT on postgres 18 and later
             - postgres 19 support
+            - add rocky linux 10 to ci
 
 3.2.4       2025-07-05
             - fix GUC assignment issue

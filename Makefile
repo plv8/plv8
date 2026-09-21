@@ -1,5 +1,5 @@
 
-PLV8_VERSION = 3.2.4
+PLV8_VERSION = 3.2.5
 
 CP := cp
 PG_CONFIG = pg_config
@@ -50,7 +50,7 @@ plv8_config.h plv8.so: v8
 
 deps/v8-cmake/README.md:
 	@git submodule update --init --recursive
-	$(foreach patch,$(PATCH_V8),cd deps/v8-cmake && patch -p1 <../../$(patch);)
+	cd deps/v8-cmake && $(foreach patch,$(PATCH_V8),patch -p1 <../../$(patch) &&) true
 
 deps/v8-cmake/build/libv8_libbase.a: deps/v8-cmake/README.md
 	@cd deps/v8-cmake && mkdir -p build && cd build && cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Denable-fPIC=ON -DCMAKE_BUILD_TYPE=Release $(V8_CMAKE_ARGS) ../ && make -j $(NUMPROC)

@@ -20,6 +20,7 @@ extern "C" {
 #include "access/xact.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_language.h"
 #include "catalog/pg_type.h"
 #include "commands/trigger.h"
 #include "common/hashfn.h"
@@ -88,6 +89,9 @@ typedef struct plv8_proc_cache
 	ItemPointerData			fn_tid;
 	Oid						user_id;
 
+	int						nhandlers;
+	plv8_handler_dep		handlers[PLV8_MAX_LANG_HANDLER_DEPTH];
+
 	int						nargs;
 	bool					retset;		/* true if SRF */
 	Oid						rettype;
@@ -132,13 +136,17 @@ static HTAB *plv8_proc_cache_hash = NULL;
 static plv8_exec_env		   *exec_env_head = NULL;
 
 static void killPlv8Context(plv8_context *ctx);
+static void plv8_cache_function_remove(Oid fn_oid);
+static bool plv8_cache_handlers_valid(plv8_proc_cache *cache, HeapTuple proctuple, Oid *stale_handler_oid);
+static bool plv8_is_js_language(Oid lang_oid);
+static char *plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *ndeps);
 
 /*
  * lower_case_functions are postgres-like C functions.
  * They could raise errors with elog/ereport(ERROR).
  */
 static plv8_proc *plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo,
-		bool validate, char ***argnames) throw();
+		bool validate, char ***argnames, Oid *prolang_out, char **raw_prosrc_out) throw();
 static void plv8_xact_cb(XactEvent event, void *arg);
 
 /*
@@ -514,12 +522,12 @@ plv8_new_exec_env(plv8_context *context)
 Datum
 plv8_call_handler(PG_FUNCTION_ARGS)
 {
-	plv8_context   *context = GetPlv8Context();
 	Oid		fn_oid = fcinfo->flinfo->fn_oid;
 	bool	is_trigger = CALLED_AS_TRIGGER(fcinfo);
 
 	try
 	{
+		plv8_context   *context = GetPlv8Context();
 		CurrentContextScope	context_scope(context);
 		Isolate::Scope	scope(context->isolate);
 		HandleScope	handle_scope(context->isolate);
@@ -536,12 +544,38 @@ plv8_call_handler(PG_FUNCTION_ARGS)
 		 * rebuild it for the current context instead.  This is the same
 		 * thing that happens on the first call under a new user, when
 		 * plv8_get_proc() notices the user change and recompiles.
+		 *
+		 * Also rebuild if the cache entry was invalidated or any upstream
+		 * language handler in its chain has changed in the catalog.
 		 */
-		if (proc && proc->xenv->context_id != context->id)
+		if (proc)
 		{
-			pfree(proc);
-			proc = NULL;
-			fcinfo->flinfo->fn_extra = NULL;
+			bool valid = (proc->xenv->context_id == context->id &&
+						  !proc->cache->function.IsEmpty());
+			if (valid && proc->cache->nhandlers > 0)
+			{
+				PG_TRY();
+				{
+					Oid stale_handler_oid = InvalidOid;
+					if (!plv8_cache_handlers_valid(proc->cache, NULL, &stale_handler_oid))
+					{
+						valid = false;
+						if (OidIsValid(stale_handler_oid))
+							plv8_cache_function_remove(stale_handler_oid);
+					}
+				}
+				PG_CATCH();
+				{
+					throw pg_error();
+				}
+				PG_END_TRY();
+			}
+			if (!valid)
+			{
+				pfree(proc);
+				proc = NULL;
+				fcinfo->flinfo->fn_extra = NULL;
+			}
 		}
 
 		if (!proc)
@@ -584,6 +618,7 @@ static void killPlv8Context(plv8_context *ctx) {
 				cache->prosrc = NULL;
 			}
 			cache->function.Reset();
+			cache->nhandlers = 0;
 		}
 		cache = (plv8_proc_cache *) hash_seq_search(&status);
 	}
@@ -713,7 +748,10 @@ plv8_inline_handler(PG_FUNCTION_ARGS)
 		CurrentContextScope	context_scope(context);
 		Isolate::Scope		scope(context->isolate);
 		HandleScope			handle_scope(context->isolate);
-		char			   *source_text = codeblock->source_text;
+		char			   *source_text = plv8_transpile_src(
+										codeblock->source_text,
+										codeblock->langOid,
+										NULL, NULL);
 
 		Local<Function>	function = CompileFunction(context,
 										NULL, 0, NULL,
@@ -901,20 +939,6 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Local<Context>		context = xenv->localContext();
 	Context::Scope		context_scope(context);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS];
-	Oid fn_oid = fcinfo->flinfo->fn_oid;
-
- HeapTuple proctuple =
-      SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
-
-  Oid retoid;
-  Form_pg_proc pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
-
-  if (fcinfo && IsPolymorphicType(pg_proc_entry->prorettype)) {
-    retoid = get_fn_expr_rettype(fcinfo->flinfo);
-  } else {
-    retoid = pg_proc_entry->prorettype;
-  }
-  ReleaseSysCache(proctuple);
 
 	bool nonatomic = fcinfo->context &&
 		IsA(fcinfo->context, CallContext) &&
@@ -950,25 +974,37 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Local<v8::Value> result =
 		DoCall(context, fn, recv, nargs, args, nonatomic);
 
+	Oid retoid = rettype ? rettype->typid : VOIDOID;
 	if (retoid == RECORDOID)
-  {
-    Oid calltype;
-    TupleDesc tupdesc;
-    get_call_result_type(fcinfo, &calltype, &tupdesc);
-    if (tupdesc == NULL) {
-      return ToDatum(result, &fcinfo->isnull, rettype);
-    }
-    plv8_type type;
-    plv8_fill_type(&type, calltype);
-    return ToRecordDatum(result, &fcinfo->isnull, &type, tupdesc);
-  }
-  else
-  {
-    if (rettype)
-      return ToDatum(result, &fcinfo->isnull, rettype);
-    else
-      PG_RETURN_VOID( );
-  }
+	{
+		Oid calltype;
+		TupleDesc tupdesc;
+		plv8_type type;
+
+		PG_TRY();
+		{
+			get_call_result_type(fcinfo, &calltype, &tupdesc);
+			if (tupdesc != NULL)
+				plv8_fill_type(&type, calltype);
+		}
+		PG_CATCH();
+		{
+			throw pg_error();
+		}
+		PG_END_TRY();
+
+		if (tupdesc == NULL)
+			return ToDatum(result, &fcinfo->isnull, rettype);
+
+		return ToRecordDatum(result, &fcinfo->isnull, &type, tupdesc);
+	}
+	else
+	{
+		if (rettype)
+			return ToDatum(result, &fcinfo->isnull, rettype);
+		else
+			PG_RETURN_VOID();
+	}
 }
 
 static Tuplestorestate *
@@ -1230,14 +1266,11 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 Datum
 plv8_call_validator(PG_FUNCTION_ARGS)
 {
-	plv8_context   *context = GetPlv8Context();
 	Oid				fn_oid = PG_GETARG_OID(0);
 	HeapTuple		tuple;
 	Form_pg_proc	proc;
 	char			functyptype;
 	bool			is_trigger = false;
-	CurrentContextScope	context_scope(context);
-	Isolate::Scope  scope(context->isolate);
 
 	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, fn_oid))
 		PG_RETURN_VOID();
@@ -1251,29 +1284,48 @@ plv8_call_validator(PG_FUNCTION_ARGS)
 	functyptype = get_typtype(proc->prorettype);
 
 	/* Disallow pseudotype result */
-	/* except for TRIGGER, RECORD, INTERNAL, VOID or polymorphic types */
+	/* except for TRIGGER, RECORD, INTERNAL, VOID, LANGUAGE_HANDLER or polymorphic types */
 	if (functyptype == TYPTYPE_PSEUDO)
 	{
-    if (proc->prorettype == TRIGGEROID)
+		if (proc->prorettype == TRIGGEROID)
 			is_trigger = true;
 		else if (proc->prorettype != RECORDOID &&
 			proc->prorettype != VOIDOID &&
 			proc->prorettype != INTERNALOID &&
+			proc->prorettype != LANGUAGE_HANDLEROID &&
 			!IsPolymorphicType(proc->prorettype))
+		{
+			Oid prorettype = proc->prorettype;
+			ReleaseSysCache(tuple);
 			ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("PL/v8 functions cannot return type %s",
-						format_type_be(proc->prorettype))));
+						format_type_be(prorettype))));
+		}
 	}
 
 	ReleaseSysCache(tuple);
 
+	/*
+	 * Invalidate any cached entry for this function or any downstream
+	 * functions whose language handler chain includes this function.
+	 */
+	plv8_cache_function_remove(fn_oid);
+
+	if (!check_function_bodies)
+		PG_RETURN_VOID();
+
 	try
 	{
+		plv8_context   *context = GetPlv8Context();
+		CurrentContextScope	context_scope(context);
+		Isolate::Scope  scope(context->isolate);
+		HandleScope		handle_scope(context->isolate);
+
 		/* Don't use validator's fcinfo */
-		plv8_proc	   *proc = Compile(fn_oid, NULL,
-									   true, is_trigger);
-		(void) CreateExecEnv(proc->cache->function, context);
+		plv8_proc	   *compiled = Compile(fn_oid, NULL,
+										   true, is_trigger);
+		(void) CreateExecEnv(compiled->cache->function, context);
 		/* the result of a validator is ignored */
 		PG_RETURN_VOID();
 	}
@@ -1283,8 +1335,322 @@ plv8_call_validator(PG_FUNCTION_ARGS)
 	return (Datum) 0;	// keep compiler quiet
 }
 
+static void
+plv8_cache_function_remove(Oid fn_oid)
+{
+	HASH_SEQ_STATUS		status;
+	plv8_proc_cache	   *cache;
+
+	if (!plv8_proc_cache_hash || !OidIsValid(fn_oid))
+		return;
+
+	hash_seq_init(&status, plv8_proc_cache_hash);
+	while ((cache = (plv8_proc_cache *) hash_seq_search(&status)) != nullptr)
+	{
+		bool remove = (cache->fn_oid == fn_oid);
+
+		if (!remove)
+		{
+			for (int i = 0; i < cache->nhandlers; i++)
+			{
+				if (cache->handlers[i].fn_oid == fn_oid)
+				{
+					remove = true;
+					break;
+				}
+			}
+		}
+
+		if (remove)
+		{
+			if (cache->prosrc)
+			{
+				pfree(cache->prosrc);
+				cache->prosrc = NULL;
+			}
+			cache->function.Reset();
+			cache->nhandlers = 0;
+		}
+	}
+}
+
+static bool
+plv8_cache_handlers_valid(plv8_proc_cache *cache, HeapTuple proctuple, Oid *stale_handler_oid)
+{
+	if (stale_handler_oid != NULL)
+		*stale_handler_oid = InvalidOid;
+
+	if (cache == NULL)
+		return false;
+
+	if (cache->nhandlers == 0)
+		return true;
+
+	Oid lang_oid = InvalidOid;
+	if (proctuple != NULL)
+	{
+		Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(proctuple);
+		lang_oid = procStruct->prolang;
+	}
+	else
+	{
+		HeapTuple fnTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(cache->fn_oid));
+		if (!HeapTupleIsValid(fnTup))
+			return false;
+		if (cache->fn_xmin != HeapTupleHeaderGetXmin(fnTup->t_data) ||
+			!ItemPointerEquals(&cache->fn_tid, &fnTup->t_self))
+		{
+			ReleaseSysCache(fnTup);
+			return false;
+		}
+		Form_pg_proc fnStruct = (Form_pg_proc) GETSTRUCT(fnTup);
+		lang_oid = fnStruct->prolang;
+		ReleaseSysCache(fnTup);
+	}
+
+	NameData plv8_lang_name = {"plv8"};
+	HeapTuple plv8Tup = SearchSysCache1(LANGNAME, NameGetDatum(&plv8_lang_name));
+	if (!HeapTupleIsValid(plv8Tup))
+		return false;
+	Oid plv8_lang_oid = ((Form_pg_language) GETSTRUCT(plv8Tup))->oid;
+	ReleaseSysCache(plv8Tup);
+
+	for (int i = 0; i < cache->nhandlers; i++)
+	{
+		if (!OidIsValid(lang_oid) || lang_oid == plv8_lang_oid)
+			return false;
+
+		HeapTuple langTup = SearchSysCache1(LANGOID, ObjectIdGetDatum(lang_oid));
+		if (!HeapTupleIsValid(langTup))
+			return false;
+		Form_pg_language langStruct = (Form_pg_language) GETSTRUCT(langTup);
+		Oid handler_oid = langStruct->lanplcallfoid;
+		ReleaseSysCache(langTup);
+
+		if (handler_oid != cache->handlers[i].fn_oid)
+		{
+			if (stale_handler_oid != NULL)
+				*stale_handler_oid = cache->handlers[i].fn_oid;
+			return false;
+		}
+
+		HeapTuple handlerTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(handler_oid));
+		if (!HeapTupleIsValid(handlerTup))
+		{
+			if (stale_handler_oid != NULL)
+				*stale_handler_oid = handler_oid;
+			return false;
+		}
+
+		bool match = (cache->handlers[i].fn_xmin == HeapTupleHeaderGetXmin(handlerTup->t_data) &&
+					  ItemPointerEquals(&cache->handlers[i].fn_tid, &handlerTup->t_self));
+		Form_pg_proc handlerStruct = (Form_pg_proc) GETSTRUCT(handlerTup);
+		lang_oid = handlerStruct->prolang;
+		ReleaseSysCache(handlerTup);
+
+		if (!match)
+		{
+			if (stale_handler_oid != NULL)
+				*stale_handler_oid = handler_oid;
+			return false;
+		}
+	}
+
+	return (lang_oid == plv8_lang_oid);
+}
+
+static bool
+plv8_is_js_language(Oid lang_oid)
+{
+	if (!OidIsValid(lang_oid))
+		return false;
+
+	NameData plv8_lang_name = {"plv8"};
+	HeapTuple tuple = SearchSysCache1(LANGNAME, NameGetDatum(&plv8_lang_name));
+	if (!HeapTupleIsValid(tuple))
+		return false;
+	Oid plv8_lang_oid = ((Form_pg_language) GETSTRUCT(tuple))->oid;
+	ReleaseSysCache(tuple);
+
+	Oid cur_lang_oid = lang_oid;
+	for (int depth = 0; depth < PLV8_MAX_LANG_HANDLER_DEPTH; depth++)
+	{
+		if (cur_lang_oid == plv8_lang_oid)
+			return true;
+
+		tuple = SearchSysCache1(LANGOID, ObjectIdGetDatum(cur_lang_oid));
+		if (!HeapTupleIsValid(tuple))
+			return false;
+		Form_pg_language langStruct = (Form_pg_language) GETSTRUCT(tuple);
+		Oid handler_oid = langStruct->lanplcallfoid;
+		ReleaseSysCache(tuple);
+
+		if (!OidIsValid(handler_oid))
+			return false;
+
+		tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(handler_oid));
+		if (!HeapTupleIsValid(tuple))
+			return false;
+		Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(tuple);
+		cur_lang_oid = procStruct->prolang;
+		ReleaseSysCache(tuple);
+
+		if (!OidIsValid(cur_lang_oid))
+			return false;
+	}
+
+	return false;
+}
+
+/*
+ * Transpile source code from custom language to JS if needed.
+ *
+ * When lang_oid is not plv8, looks up the language's call handler chain,
+ * records the catalog tuple identities in deps/ndeps, executes the handler
+ * function in V8 with the raw source string as arguments[0], and returns a
+ * palloc'd C string in CurrentMemoryContext containing the transpiled JS code.
+ */
+static char *
+plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *ndeps)
+{
+	Oid				plv8_lang_oid = InvalidOid;
+	Oid				lang_handler_oid = InvalidOid;
+	char		   *result_cstr = NULL;
+
+	if (ndeps != NULL)
+		*ndeps = 0;
+
+	PG_TRY();
+	{
+		NameData plv8_lang_name = {"plv8"};
+		HeapTuple plv8Tup = SearchSysCache1(LANGNAME, NameGetDatum(&plv8_lang_name));
+		if (HeapTupleIsValid(plv8Tup))
+		{
+			plv8_lang_oid = ((Form_pg_language) GETSTRUCT(plv8Tup))->oid;
+			ReleaseSysCache(plv8Tup);
+		}
+
+		if (OidIsValid(plv8_lang_oid) && lang_oid == plv8_lang_oid)
+		{
+			result_cstr = pstrdup(src);
+		}
+		else
+		{
+			Oid cur_lang_oid = lang_oid;
+			int depth = 0;
+
+			while (!OidIsValid(plv8_lang_oid) || cur_lang_oid != plv8_lang_oid)
+			{
+				if (depth >= PLV8_MAX_LANG_HANDLER_DEPTH)
+					ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("language handler chain depth limit (%d) exceeded",
+								PLV8_MAX_LANG_HANDLER_DEPTH)));
+
+				HeapTuple langTup = SearchSysCache1(LANGOID, ObjectIdGetDatum(cur_lang_oid));
+				if (!HeapTupleIsValid(langTup))
+					elog(ERROR, "cache lookup failed for language %u", cur_lang_oid);
+				Form_pg_language langStruct = (Form_pg_language) GETSTRUCT(langTup);
+				Oid handler_oid = langStruct->lanplcallfoid;
+				ReleaseSysCache(langTup);
+
+				if (!OidIsValid(handler_oid))
+					elog(ERROR, "javascript language handler function is not found for language %u", lang_oid);
+
+				if (depth == 0)
+					lang_handler_oid = handler_oid;
+
+				HeapTuple procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(handler_oid));
+				if (!HeapTupleIsValid(procTup))
+					elog(ERROR, "cache lookup failed for function %u", handler_oid);
+				TransactionId handler_xmin = HeapTupleHeaderGetXmin(procTup->t_data);
+				ItemPointerData handler_tid = procTup->t_self;
+				Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
+				cur_lang_oid = procStruct->prolang;
+				ReleaseSysCache(procTup);
+
+				if (deps != NULL && ndeps != NULL)
+				{
+					deps[depth].fn_oid = handler_oid;
+					deps[depth].fn_xmin = handler_xmin;
+					deps[depth].fn_tid = handler_tid;
+					(*ndeps) = depth + 1;
+				}
+				depth++;
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	if (result_cstr != NULL)
+		return result_cstr;
+
+	Isolate *isolate = current_context->isolate;
+	Isolate::Scope iscope(isolate);
+	HandleScope handle_scope(isolate);
+	Local<Context> context = current_context->localContext();
+	Context::Scope context_scope(context);
+	HandlerExecutionScope handler_scope(context);
+
+	Local<Function> fn = find_js_function(lang_handler_oid);
+	if (fn.IsEmpty())
+	{
+		PG_TRY();
+		{
+			elog(ERROR, "javascript language handler function %u is not found", lang_handler_oid);
+		}
+		PG_CATCH();
+		{
+			throw pg_error();
+		}
+		PG_END_TRY();
+	}
+
+	plv8_exec_env *xenv = CreateExecEnv(fn, current_context);
+	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
+	Local<v8::Value> args[1];
+	args[0] = ToString(src);
+
+	Local<v8::Value> transpiled = DoCall(context, fn, recv, 1, args, false);
+	if (transpiled.IsEmpty() || transpiled->IsNull() || transpiled->IsUndefined())
+		throw js_error("language handler returned null or undefined source code");
+	if (!transpiled->IsString())
+	{
+		PG_TRY();
+		{
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("language handler function %u did not return a string",
+						lang_handler_oid)));
+		}
+		PG_CATCH();
+		{
+			throw pg_error();
+		}
+		PG_END_TRY();
+	}
+
+	CString str(transpiled);
+	PG_TRY();
+	{
+		result_cstr = pstrdup(str.str());
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return result_cstr;
+}
+
 static plv8_proc *
-plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnames) throw()
+plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate,
+			  char ***argnames, Oid *prolang_out, char **raw_prosrc_out) throw()
 {
 	HeapTuple			procTup;
 	plv8_proc_cache	   *cache;
@@ -1293,14 +1659,18 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 	Datum				prosrc;
 	Oid				   *argtypes;
 	char			   *argmodes;
-	MemoryContext		oldcontext;
+
+	if (prolang_out != NULL)
+		*prolang_out = InvalidOid;
+	if (raw_prosrc_out != NULL)
+		*raw_prosrc_out = NULL;
 
 	procTup = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 	if (!HeapTupleIsValid(procTup))
 		elog(ERROR, "cache lookup failed for function %u", fn_oid);
 
 	cache = (plv8_proc_cache *)
-		hash_search(plv8_proc_cache_hash,&fn_oid, HASH_ENTER, &found);
+		hash_search(plv8_proc_cache_hash, &fn_oid, HASH_ENTER, &found);
 
 	if (found)
 	{
@@ -1317,6 +1687,17 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 			ItemPointerEquals(&cache->fn_tid, &procTup->t_self) &&
 			cache->user_id == current_context->user_id);
 
+		if (uptodate && cache->nhandlers > 0)
+		{
+			Oid stale_handler_oid = InvalidOid;
+			if (!plv8_cache_handlers_valid(cache, procTup, &stale_handler_oid))
+			{
+				uptodate = false;
+				if (OidIsValid(stale_handler_oid))
+					plv8_cache_function_remove(stale_handler_oid);
+			}
+		}
+
 		if (!uptodate)
 		{
 			if (cache->prosrc)
@@ -1325,6 +1706,7 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 				cache->prosrc = NULL;
 			}
 			cache->function.Reset();
+			cache->nhandlers = 0;
 		}
 		else
 		{
@@ -1335,6 +1717,7 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 	{
 		new(&cache->function) Persistent<Function>();
 		cache->prosrc = NULL;
+		cache->nhandlers = 0;
 	}
 
 	if (cache->function.IsEmpty())
@@ -1345,7 +1728,10 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 
 		prosrc = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_prosrc, &isnull);
 		if (isnull)
+		{
+			ReleaseSysCache(procTup);
 			elog(ERROR, "null prosrc");
+		}
 
 		cache->retset = procStruct->proretset;
 		cache->rettype = procStruct->prorettype;
@@ -1354,6 +1740,8 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 		cache->fn_xmin = HeapTupleHeaderGetXmin(procTup->t_data);
 		cache->fn_tid = procTup->t_self;
 		cache->user_id = current_context->user_id;
+		if (prolang_out != NULL)
+			*prolang_out = procStruct->prolang;
 
 		int nargs = get_func_arg_info(procTup, &argtypes, argnames, &argmodes);
 
@@ -1369,16 +1757,19 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 				if (get_typtype(argtypes[i]) == TYPTYPE_PSEUDO &&
 						argtypes[i] != INTERNALOID &&
 						!IsPolymorphicType(argtypes[i]))
+				{
+					Oid bad_argtype = argtypes[i];
+					ReleaseSysCache(procTup);
 					ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("PL/v8 functions cannot accept type %s",
-								format_type_be(argtypes[i]))));
+								format_type_be(bad_argtype))));
+				}
 			}
 		}
 
-		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-		cache->prosrc = TextDatumGetCString(prosrc);
-		MemoryContextSwitchTo(oldcontext);
+		if (raw_prosrc_out != NULL)
+			*raw_prosrc_out = TextDatumGetCString(prosrc);
 
 		ReleaseSysCache(procTup);
 
@@ -1501,11 +1892,13 @@ static plv8_proc *
 Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger)
 {
 	plv8_proc  *proc;
-	char	  **argnames;
+	char	  **argnames = NULL;
+	Oid			prolang = InvalidOid;
+	char	   *raw_prosrc = NULL;
 
 	PG_TRY();
 	{
-		proc = plv8_get_proc(fn_oid, fcinfo, validate, &argnames);
+		proc = plv8_get_proc(fn_oid, fcinfo, validate, &argnames, &prolang, &raw_prosrc);
 	}
 	PG_CATCH();
 	{
@@ -1517,6 +1910,10 @@ Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger)
 
 	if (cache->function.IsEmpty())
 	{
+		plv8_handler_dep	deps[PLV8_MAX_LANG_HANDLER_DEPTH];
+		int					ndeps = 0;
+		char			   *transpiled = plv8_transpile_src(raw_prosrc, prolang, deps, &ndeps);
+
 		/*
 		 * Compile into current_context, which the caller has already set
 		 * up (and whose startup procedure, if any, has already run): the
@@ -1529,14 +1926,36 @@ Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger)
 		 */
 		Isolate::Scope	scope(current_context->isolate);
 		HandleScope		handle_scope(current_context->isolate);
-		cache->function.Reset(current_context->isolate, CompileFunction(
+		Local<Function>	fn = CompileFunction(
 						current_context,
 						cache->proname,
 						cache->nargs,
 						(const char **) argnames,
-						cache->prosrc,
+						transpiled,
 						is_trigger,
-						cache->retset));
+						cache->retset);
+
+		if (cache->prosrc)
+		{
+			pfree(cache->prosrc);
+			cache->prosrc = NULL;
+		}
+		cache->function.Reset(current_context->isolate, fn);
+		PG_TRY();
+		{
+			MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+			cache->prosrc = pstrdup(transpiled);
+			MemoryContextSwitchTo(oldcontext);
+		}
+		PG_CATCH();
+		{
+			cache->function.Reset();
+			throw pg_error();
+		}
+		PG_END_TRY();
+		cache->nhandlers = ndeps;
+		if (ndeps > 0)
+			memcpy(cache->handlers, deps, sizeof(plv8_handler_dep) * ndeps);
 	}
 
 	return proc;
@@ -1675,54 +2094,34 @@ find_js_function(Oid fn_oid)
 {
 	HeapTuple		tuple;
 	Form_pg_proc	proc;
-	Oid				prolang;
-	NameData		langnames[] = { {"plv8"} };
-	int				langno;
-	int				langlen = sizeof(langnames) / sizeof(NameData);
+	Oid				prolang = InvalidOid;
 	Local<Function> func;
 	Isolate			*isolate = Isolate::GetCurrent();
+	bool			is_js_lang = false;
 
-	tuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for function %u", fn_oid);
-	proc = (Form_pg_proc) GETSTRUCT(tuple);
-	prolang = proc->prolang;
-	ReleaseSysCache(tuple);
-
-	/* Should not happen? */
-	if (!OidIsValid(prolang))
-		return func;
-
-	/* See if the function language is a compatible one */
-	for (langno = 0; langno < langlen; langno++)
+	PG_TRY();
 	{
-		tuple = SearchSysCache(LANGNAME, NameGetDatum(&langnames[langno]), 0, 0, 0);
-		if (HeapTupleIsValid(tuple))
-		{
-			Form_pg_database datForm = (Form_pg_database) GETSTRUCT(tuple);
-			Oid langtupoid = datForm->oid;
+		tuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for function %u", fn_oid);
+		proc = (Form_pg_proc) GETSTRUCT(tuple);
+		prolang = proc->prolang;
+		ReleaseSysCache(tuple);
 
-			ReleaseSysCache(tuple);
-			if (langtupoid == prolang)
-				break;
-		}
+		is_js_lang = plv8_is_js_language(prolang);
 	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
 
 	/* Not found or non-JS function */
-	if (langno >= langlen)
+	if (!is_js_lang)
 		return func;
 
-	try
-	{
-		plv8_proc		   *proc = Compile(fn_oid, NULL,
-										   true, false);
-
-		TryCatch			try_catch(isolate);
-
-		func = Local<Function>::New(isolate, proc->cache->function);
-	}
-	catch (js_error& e) { e.rethrow(); }
-	catch (pg_error& e) { e.rethrow(); }
+	plv8_proc *compiled_proc = Compile(fn_oid, NULL, true, false);
+	func = Local<Function>::New(isolate, compiled_proc->cache->function);
 
 	return func;
 }
@@ -1879,6 +2278,8 @@ GetPlv8Context() {
 		if (plv8_start_proc != NULL)
 		{
 			Local<Function>		func;
+			Oid					funcoid = InvalidOid;
+			bool				has_priv = false;
 
 			CurrentContextScope	current_scope(my_context);
 			HandleScope			handle_scope(isolate);
@@ -1897,40 +2298,62 @@ GetPlv8Context() {
 			arg = charToText(perm);
 
 			PG_TRY();
-					{
-						Oid funcoid = DatumGetObjectId(DirectFunctionCall1(regprocin, CStringGetDatum(plv8_start_proc)));
-						MemSet(&flinfo, 0, sizeof(flinfo));
-						fake_fcinfo->flinfo = &flinfo;
-						flinfo.fn_oid = InvalidOid;
-						flinfo.fn_mcxt = CurrentMemoryContext;
-						fake_fcinfo->nargs = 2;
-						fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
-						fake_fcinfo->args[1].value = PointerGetDatum(arg);
-						Datum ret = has_function_privilege_id(fake_fcinfo);
+			{
+				funcoid = DatumGetObjectId(DirectFunctionCall1(regprocin, CStringGetDatum(plv8_start_proc)));
+				MemSet(&flinfo, 0, sizeof(flinfo));
+				fake_fcinfo->flinfo = &flinfo;
+				flinfo.fn_oid = InvalidOid;
+				flinfo.fn_mcxt = CurrentMemoryContext;
+				fake_fcinfo->nargs = 2;
+				fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
+				fake_fcinfo->args[1].value = PointerGetDatum(arg);
+				Datum ret = has_function_privilege_id(fake_fcinfo);
 
-						if (ret == 0) {
-							elog(WARNING, "failed to find js function %s", plv8_start_proc);
-						} else {
-							if (DatumGetBool(ret)) {
-								func = find_js_function(funcoid);
-							} else {
-								elog(WARNING, "no permission to execute js function %s", plv8_start_proc);
-							}
-						}
+				if (ret == 0) {
+					elog(WARNING, "failed to find js function %s", plv8_start_proc);
+				} else {
+					if (DatumGetBool(ret)) {
+						has_priv = true;
+					} else {
+						elog(WARNING, "no permission to execute js function %s", plv8_start_proc);
 					}
-				PG_CATCH();
-					{
-						ErrorData	   *edata;
+				}
+			}
+			PG_CATCH();
+			{
+				ErrorData	   *edata;
 
-						MemoryContextSwitchTo(ctx);
-						edata = CopyErrorData();
-						elog(WARNING, "failed to find js function %s", edata->message);
-						FlushErrorState();
-						FreeErrorData(edata);
-					}
+				MemoryContextSwitchTo(ctx);
+				edata = CopyErrorData();
+				elog(WARNING, "failed to find js function %s", edata->message);
+				FlushErrorState();
+				FreeErrorData(edata);
+			}
 			PG_END_TRY();
 
 			pfree(arg);
+
+			if (has_priv)
+			{
+				try
+				{
+					func = find_js_function(funcoid);
+				}
+				catch (js_error& e)
+				{
+					e.log(WARNING);
+				}
+				catch (pg_error& e)
+				{
+					ErrorData *edata;
+
+					MemoryContextSwitchTo(ctx);
+					edata = CopyErrorData();
+					elog(WARNING, "failed to find js function %s", edata->message);
+					FlushErrorState();
+					FreeErrorData(edata);
+				}
+			}
 
 			if (!func.IsEmpty())
 			{

@@ -278,6 +278,60 @@ public:
 	}
 };
 
+#define PLV8_MAX_LANG_HANDLER_DEPTH 32
+
+typedef struct plv8_handler_dep
+{
+	Oid				fn_oid;
+	TransactionId	fn_xmin;
+	ItemPointerData	fn_tid;
+} plv8_handler_dep;
+
+/*
+ * Temporarily clear SRF and window function state on the global plv8 object
+ * while a language handler transpiler executes, so a handler cannot call
+ * plv8.return_next() or plv8.get_window_object() against an outer function's
+ * state.
+ */
+class HandlerExecutionScope
+{
+private:
+	v8::Local<v8::Object> m_plv8obj;
+	v8::Local<v8::Value> m_prev_conv;
+	v8::Local<v8::Value> m_prev_tupstore;
+	v8::Local<v8::Value> m_prev_fcinfo;
+
+public:
+	explicit HandlerExecutionScope(v8::Local<v8::Context> context)
+	{
+		v8::Isolate *isolate = context->GetIsolate();
+		v8::Local<v8::Value> val;
+		if (context->Global()->Get(context, v8::String::NewFromUtf8Literal(
+				isolate,
+				"plv8",
+				v8::NewStringType::kInternalized)).ToLocal(&val) &&
+			!val.IsEmpty() && val->IsObject())
+		{
+			m_plv8obj = v8::Local<v8::Object>::Cast(val);
+			m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
+			m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE).As<v8::Value>();
+			m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>();
+			m_plv8obj->SetInternalField(PLV8_INTNL_CONV, v8::Undefined(isolate));
+			m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, v8::Undefined(isolate));
+			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO, v8::Undefined(isolate));
+		}
+	}
+	~HandlerExecutionScope()
+	{
+		if (!m_plv8obj.IsEmpty())
+		{
+			m_plv8obj->SetInternalField(PLV8_INTNL_CONV, m_prev_conv);
+			m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, m_prev_tupstore);
+			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO, m_prev_fcinfo);
+		}
+	}
+};
+
 extern plv8_context* current_context;
 
 /*

@@ -1115,7 +1115,8 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 	char perm[16];
 	strcpy(perm, "EXECUTE");
 	arg = charToText(perm);
-	Oid funcoid;
+	Oid funcoid = InvalidOid;
+	bool has_priv = false;
 
 	PG_TRY();
 	{
@@ -1139,9 +1140,7 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 			elog(WARNING, "failed to find or no permission for js function %s", signature.str());
 		} else {
 			if (DatumGetBool(ret)) {
-				func = find_js_function(funcoid);
-				if (func.IsEmpty())
-					elog(ERROR, "javascript function is not found for \"%s\"", signature.str());
+				has_priv = true;
 			} else {
 				elog(WARNING, "no permission to execute js function %s", signature.str());
 			}
@@ -1152,6 +1151,23 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 		throw pg_error();
 	}
 	PG_END_TRY();
+
+	if (has_priv)
+	{
+		func = find_js_function(funcoid);
+		if (func.IsEmpty())
+		{
+			PG_TRY();
+			{
+				elog(ERROR, "javascript function is not found for \"%s\"", signature.str());
+			}
+			PG_CATCH();
+			{
+				throw pg_error();
+			}
+			PG_END_TRY();
+		}
+	}
 
 	args.GetReturnValue().Set(func);
 }

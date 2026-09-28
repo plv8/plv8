@@ -216,17 +216,18 @@ public:
 		m_winobj = PG_WINDOW_OBJECT();
 		if (WindowObjectIsValid(m_winobj))
 		{
+			v8::Isolate *isolate = v8::Isolate::GetCurrent();
 			m_plv8obj = v8::Handle<v8::Object>::Cast(
 					context->Global()->Get(context, v8::String::NewFromUtf8Literal(
-						context->GetIsolate(),
+						isolate,
 						"plv8",
 						v8::NewStringType::kInternalized)).ToLocalChecked());
 			if (m_plv8obj.IsEmpty())
 				throw js_error("plv8 object not found");
 			/* Stash the current item, just in case of nested call */
-			m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO);
+			m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>();
 			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO,
-					v8::External::New(context->GetIsolate(), fcinfo));
+					v8::External::New(isolate, fcinfo, v8::kExternalPointerTypeTagDefault));
 		}
 	}
 	bool IsWindowCall() { return WindowObjectIsValid(m_winobj); }
@@ -256,19 +257,20 @@ public:
 	SRFSupport(v8::Handle<v8::Context> context,
 			   Converter *conv, Tuplestorestate *tupstore)
 	{
+	    v8::Isolate *isolate = v8::Isolate::GetCurrent();
 	    v8::Local<v8::Value> m_val;
 	    if (!context->Global()->Get(context, v8::String::NewFromUtf8Literal(
-                context->GetIsolate(),
+                isolate,
                 "plv8",
                 v8::NewStringType::kInternalized)).ToLocal(&m_val))
             throw js_error("plv8 object not found");
 	    m_plv8obj = v8::Handle<v8::Object>::Cast(m_val);
-		m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV);
-		m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE);
+		m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
+		m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE).As<v8::Value>();
 		m_plv8obj->SetInternalField(PLV8_INTNL_CONV,
-									v8::External::New(context->GetIsolate(), conv));
+									v8::External::New(isolate, conv, v8::kExternalPointerTypeTagDefault));
 		m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE,
-									v8::External::New(context->GetIsolate(), tupstore));
+									v8::External::New(isolate, tupstore, v8::kExternalPointerTypeTagDefault));
 	}
 	~SRFSupport()
 	{
@@ -304,7 +306,7 @@ private:
 public:
 	explicit HandlerExecutionScope(v8::Local<v8::Context> context)
 	{
-		v8::Isolate *isolate = context->GetIsolate();
+		v8::Isolate *isolate = v8::Isolate::GetCurrent();
 		v8::Local<v8::Value> val;
 		if (context->Global()->Get(context, v8::String::NewFromUtf8Literal(
 				isolate,

@@ -244,7 +244,11 @@ void GCEpilogueCallback(Isolate* isolate, GCType type, GCCallbackFlags /* flags 
 size_t NearHeapLimitHandler(void* data, size_t current_heap_limit,
 								size_t initial_heap_limit) {
 	Isolate *isolate = Isolate::GetCurrent();
-	isolate->TerminateExecution();
+	HeapStatistics heap_statistics;
+	isolate->GetHeapStatistics(&heap_statistics);
+	if (heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB) {
+		isolate->TerminateExecution();
+	}
 	// need to give back more space
 	// to make sure it can unwind the stack and process exceptions
 	return current_heap_limit + 1_MB;
@@ -252,10 +256,10 @@ size_t NearHeapLimitHandler(void* data, size_t current_heap_limit,
 
 void PromiseRejectCB(PromiseRejectMessage rejection) {
 	auto event = rejection.GetEvent();
-	if (event == kPromiseRejectAfterResolved || event == kPromiseResolveAfterResolved)
+	if (event != v8::kPromiseRejectWithNoHandler && event != v8::kPromiseHandlerAddedAfterReject)
 		return;
 	auto	promise = rejection.GetPromise();
-	auto	isolate = promise->GetIsolate();
+	auto	isolate = Isolate::GetCurrent();
 
 	if (rejection.GetEvent() == v8::kPromiseHandlerAddedAfterReject) {
 		if (current_context->ignore_unhandled_promises) return;
@@ -839,7 +843,7 @@ static Local<v8::Value>
 DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 	int nargs, Handle<v8::Value> args[], bool nonatomic)
 {
-	Isolate 	   *isolate = ctx->GetIsolate();
+	Isolate 	   *isolate = Isolate::GetCurrent();
 	TryCatch		try_catch(isolate);
 
 	if (isolate->IsExecutionTerminating() || current_context->interrupted) {
@@ -968,8 +972,7 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	}
 
 	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
-	Local<Function>		fn =
-		Local<Function>::Cast(recv->GetInternalField(0));
+	Local<Function>		fn = recv->GetInternalField(0).As<Function>();
 	
 	Local<v8::Value> result =
 		DoCall(context, fn, recv, nargs, args, nonatomic);
@@ -1097,8 +1100,7 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	}
 
 	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
-	Local<Function>		fn =
-		Local<Function>::Cast(recv->GetInternalField(0));
+	Local<Function>		fn = recv->GetInternalField(0).As<Function>();
 
 	Handle<v8::Value> result = DoCall(context, fn, recv, nargs, args, nonatomic);
 
@@ -1231,8 +1233,7 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 
 	TryCatch			try_catch(xenv->isolate);
 	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
-	Local<Function>		fn =
-		Local<Function>::Cast(recv->GetInternalField(0));
+	Local<Function>		fn = recv->GetInternalField(0).As<Function>();
 	Handle<v8::Value> newtup =
 		DoCall(context, fn, recv, lengthof(args), args, nonatomic);
 
@@ -2013,7 +2014,7 @@ CompileFunction(
 	Local<Context> context = Local<Context>::New(isolate, global_context->context);
 	Context::Scope	context_scope(context);
 	TryCatch		try_catch(isolate);
-	v8::ScriptOrigin origin(isolate, name);
+	v8::ScriptOrigin origin(name);
 
 	// set up the signal handlers
 	if (int_handler == NULL) {

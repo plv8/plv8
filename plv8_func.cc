@@ -71,14 +71,15 @@ WrapCallback(FunctionCallback func)
 	Isolate* isolate = Isolate::GetCurrent();
 	return External::New(isolate,
 			reinterpret_cast<void *>(
-				reinterpret_cast<uintptr_t>(func)));
+				reinterpret_cast<uintptr_t>(func)),
+			v8::kExternalPointerTypeTagDefault);
 }
 
 static inline FunctionCallback
 UnwrapCallback(Handle<v8::Value> value)
 {
 	return reinterpret_cast<FunctionCallback>(
-			reinterpret_cast<uintptr_t>(External::Cast(*value)->Value()));
+			reinterpret_cast<uintptr_t>(External::Cast(*value)->Value(v8::kExternalPointerTypeTagDefault)));
 }
 
 static inline void
@@ -653,8 +654,8 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(isolate, current_context->plan_template);
 
 	Local<v8::Object> result = templ->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
-	result->SetInternalField(0, External::New(isolate, saved));
-	result->SetInternalField(1, External::New(isolate, parstate));
+	result->SetInternalField(0, External::New(isolate, saved, v8::kExternalPointerTypeTagDefault));
+	result->SetInternalField(1, External::New(isolate, parstate, v8::kExternalPointerTypeTagDefault));
 
 	args.GetReturnValue().Set(result);
 }
@@ -677,7 +678,7 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 	plv8_param_state   *parstate = NULL;
 
 	plan = static_cast<SPIPlanPtr>(
-			Handle<External>::Cast(self->GetInternalField(0))->Value());
+			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (plan == NULL) {
 		StringInfoData	buf;
@@ -702,7 +703,7 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 	 * If the plan has the variable param info, use it.
 	 */
 	parstate = static_cast<plv8_param_state *>(
-			Handle<External>::Cast(self->GetInternalField(1))->Value());
+			self->GetInternalField(1).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (parstate)
 		argcount = parstate->numParams;
@@ -785,7 +786,7 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 
 
 	plan = static_cast<SPIPlanPtr>(
-			Handle<External>::Cast(self->GetInternalField(0))->Value());
+			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 	/* XXX: Add plan validation */
 
 	if (args.Length() > 0)
@@ -801,7 +802,7 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 	 * If the plan has the variable param info, use it.
 	 */
 	parstate = static_cast<plv8_param_state *>(
-			Handle<External>::Cast(self->GetInternalField(1))->Value());
+			self->GetInternalField(1).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (parstate)
 		argcount = parstate->numParams;
@@ -876,19 +877,19 @@ plv8_PlanFree(const FunctionCallbackInfo<v8::Value> &args)
 	int					status = 0;
 
 	plan = static_cast<SPIPlanPtr>(
-			Handle<External>::Cast(self->GetInternalField(0))->Value());
+			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (plan)
 		status = SPI_freeplan(plan);
 
-	self->SetInternalField(0, External::New(isolate, 0));
+	self->SetInternalField(0, External::New(isolate, 0, v8::kExternalPointerTypeTagDefault));
 
 	parstate = static_cast<plv8_param_state *>(
-			Handle<External>::Cast(self->GetInternalField(1))->Value());
+			self->GetInternalField(1).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (parstate)
 		pfree(parstate);
-	self->SetInternalField(1, External::New(isolate, 0));
+	self->SetInternalField(1, External::New(isolate, 0, v8::kExternalPointerTypeTagDefault));
 
 	args.GetReturnValue().Set(Int32::New(isolate, status));
 }
@@ -907,7 +908,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 		throw js_error("cannot find cursor");
 	}
 
-	CString				cname(self->GetInternalField(0));
+	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
 	int					nfetch = 1;
 	bool				forward = true, wantarray = false;
@@ -973,7 +974,7 @@ plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate*			isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
-	CString				cname(self->GetInternalField(0));
+	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
 	int					nmove = 1;
 	bool				forward = true;
@@ -1015,7 +1016,7 @@ static void
 plv8_CursorClose(const FunctionCallbackInfo<v8::Value> &args)
 {
 	Handle<v8::Object>	self = args.This();
-	CString				cname(self->GetInternalField(0));
+	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
 
 	if (!cursor)
@@ -1043,17 +1044,16 @@ static void
 plv8_ReturnNext(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Handle<v8::Object>	self = args.This();
-	Handle<v8::Value>	conv_value = self->GetInternalField(PLV8_INTNL_CONV);
+	Handle<v8::Value>	conv_value = self->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
 
 	if (!conv_value->IsExternal())
 		throw js_error("return_next called in context that cannot accept a set");
 
 	Converter *conv = static_cast<Converter *>(
-			Handle<External>::Cast(conv_value)->Value());
+			Handle<External>::Cast(conv_value)->Value(v8::kExternalPointerTypeTagDefault));
 
 	Tuplestorestate *tupstore = static_cast<Tuplestorestate *>(
-			Handle<External>::Cast(
-				self->GetInternalField(PLV8_INTNL_TUPSTORE))->Value());
+			self->GetInternalField(PLV8_INTNL_TUPSTORE).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	conv->ToDatum(args[0], tupstore);
 
@@ -1182,7 +1182,7 @@ plv8_GetWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 	Isolate*			isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
 	Handle<v8::Value>	fcinfo_value =
-			self->GetInternalField(PLV8_INTNL_FCINFO);
+			self->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>();
 
 	if (!fcinfo_value->IsExternal())
 		throw js_error("get_window_object called in wrong context");
@@ -1203,7 +1203,7 @@ plv8_MyWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 	Handle<v8::Object>	self = args.This();
 	/* fcinfo is embedded in the internal field.  See plv8_GetWindowObject() */
 	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
-			Handle<External>::Cast(self->GetInternalField(0))->Value());
+			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (fcinfo == NULL)
 		throw js_error("window function api called with wrong object");
@@ -1225,7 +1225,7 @@ plv8_MyArgType(const FunctionCallbackInfo<v8::Value>& args, int argno)
 {
 	Handle<v8::Object>	self = args.This();
 	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
-			Handle<External>::Cast(self->GetInternalField(0))->Value());
+			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (fcinfo == NULL)
 		throw js_error("window function api called with wrong object");
@@ -1660,7 +1660,7 @@ plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args)
 
 void GetMemoryInfo(v8::Local<v8::Object> obj) {
 	HeapStatistics  	v8_heap_stats;
-	Isolate 		   *isolate = obj->GetIsolate();
+	Isolate 		   *isolate = Isolate::GetCurrent();
 	Handle<Context> context = isolate->GetCurrentContext();
 
 	isolate->GetHeapStatistics(&v8_heap_stats);

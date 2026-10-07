@@ -1,5 +1,5 @@
 
-PLV8_VERSION = 3.2.5
+PLV8_VERSION = 4.0.0-ALPHA
 
 CP := cp
 PG_CONFIG = pg_config
@@ -129,6 +129,20 @@ distclean: clean
 	@cd deps/v8-cmake/build && make clean
 
 .PHONY: subclean all clean installcheck
+
+# PostgreSQL records the macOS SDK it was built against in PG_SYSROOT, which
+# disappears when Xcode or the Command Line Tools are updated; fall back to the
+# currently selected SDK. This has to happen before PGXS expands CPPFLAGS.
+ifeq ($(UNAME_S),Darwin)
+ifeq ($(origin PG_SYSROOT),undefined)
+PG_SYSROOT_CONFIGURED := $(shell $(PG_CONFIG) --cppflags | sed -n 's/.*-isysroot \([^ ]*\).*/\1/p')
+ifneq ($(PG_SYSROOT_CONFIGURED),)
+ifeq ($(wildcard $(PG_SYSROOT_CONFIGURED)),)
+override PG_SYSROOT := $(shell xcrun --sdk macosx --show-sdk-path)
+endif
+endif
+endif
+endif
 
 include $(PGXS)
 # PGXS links MODULE_big with $(CC); point it at the C++ compiler.

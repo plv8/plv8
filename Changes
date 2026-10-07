@@ -1,5 +1,8 @@
 Revision history for plv8
 
+4.0.0
+            - update MacOS compilation around SDK upgrades
+
 3.2.5       2026-09-20
             - fix crash when a cached function is run as a different user via
               security definer or set role, or after plv8_reset() (#606)

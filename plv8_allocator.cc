@@ -1,3 +1,5 @@
+#include <cstdlib>
+
 #include "plv8_allocator.h"
 #include <cstdlib>
 

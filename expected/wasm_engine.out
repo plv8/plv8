@@ -1,0 +1,354 @@
+-- End-to-End Verification for Item 3: First-Class WASM Engine (pg_tle + plv8 / pl/v8-wasm)
+-- Includes regression tests for:
+--   - Bug 1: Direct custom base type arguments (TYPCATEGORY_USER) in manifest.functions
+--   - Bug 2: Untrusted WASM modules (is_trusted = false) in pgtle.modules privilege check
+--   - Bug 6: Both design_3_wasm_engine.md keys (sql_name, wasm_export, input_func, output_func, symbol, top-level operators) and legacy keys
+\set ON_ERROR_STOP on
+SET client_min_messages = warning;
+DROP EXTENSION IF EXISTS wasm_design_schema_ext CASCADE;
+DROP EXTENSION IF EXISTS wasm_suite CASCADE;
+DROP EXTENSION IF EXISTS plv8 CASCADE;
+DROP EXTENSION IF EXISTS pg_tle CASCADE;
+RESET client_min_messages;
+CREATE EXTENSION pg_tle;
+CREATE EXTENSION plv8;
+-- 1. Install wasm_suite extension via pgtle.install_wasm_extension()
+-- Note: includes BOTH types[0].operators AND direct manifest.functions taking/returning public.wasm_vec2i (Bug 1 test)!
+SELECT pgtle.install_wasm_extension(
+  'wasm_suite',
+  '1.0.0',
+  'First-Class WASM Engine Test Suite (Scalars, Linear Memory Buffers, and Custom Base Types)',
+  decode('0061736d01000000012e0760027f7f017f60027e7e017e60027c7c017c60017f017f60047f7f7f7f017e60027f7f017e60047f7f7f7f017f030d0c000102030004050505040606050301000207ac010d066d656d6f72790200076164645f693332000009666e7631615f69363400010c6879706f745f73715f66363400021069735f706f7369746976655f6576656e00030b63726333325f627974657300040a786f725f636970686572000512726576657273655f75707065725f7465787400060876656332695f696e00070976656332695f6f757400080976656332695f61646400090876656332695f6571000a0976656332695f646f74000b0abe060c0700200020016a0b0f00200020018542b383808080207e0b0d0020002000a220012001a2a00b0e00200041004a200041017145710b3701027f410021024100210302400340200220014e0d012003200020026a2d0000200241016a6c6a2103200241016a21020c000b0b20030b4a01027f4180800121054100210402400340200420014e0d01200520046a200020046a2d0000200220042003706a2d0000733a0000200441016a21040c000b0b2001ad4220862005ad840b5f01037f4180a00121044100210202400340200220014e0d012000200141016b20026b6a2d00002103200341e1004e200341fa004c710440200341206b21030b200420026a20033a0000200241016a21020c000b0b2001ad4220862004ad840bed0101067f2001450440000b410021024100210720002d00004128460440410121020b034041012104410021054100210620022001490440200020026a2d0000412d460440417f2104200241016a21020b0b02400340200220014e0d01200020026a2d000021032003412c462003412946720d012003413049200341394b720440000b2005410a6c200341306b6a2105200641016a2106200241016a21020c000b0b2006450440000b4180c000200741046c6a200520046c3602002007450440200220014e0440000b200020026a2d0000412c470440000b200241016a2102410121070c010b0b4280c0808080010bde0101057f41c0c00041283a0000410121024100210303402000200341046c6a28020021042004410048044041c0c00020026a412d3a0000200241016a2102410020046b21040b4100210503404180c10020056a2004410a7041306a3a0000200541016a21052004410a6e2104200441004b0d000b0340200541016b210541c0c00020026a4180c10020056a2d00003a0000200241016a2102200541004b0d000b200345044041c0c00020026a412c3a0000200241016a2102410121030c010b0b41c0c00020026a41293a0000200241016a21022002ad42208642c0c000840b2d004180c000200028020020022802006a3602004184c000200028020420022802046a3602004280c0808080010b0d0020002903002002290300510b1900200028020020022802006c200028020420022802046c6a0b', 'hex'),
+  $manifest$
+  {
+    "types": [
+      {
+        "schema": "public",
+        "name": "wasm_vec2i",
+        "internallength": 8,
+        "alignment": "int4",
+        "storage": "plain",
+        "input_export": "vec2i_in",
+        "output_export": "vec2i_out",
+        "operators": [
+          {
+            "name": "wasm_vec2i_add",
+            "export": "vec2i_add",
+            "nargs": 2,
+            "returns": "public.wasm_vec2i",
+            "operator": "+"
+          },
+          {
+            "name": "wasm_vec2i_eq",
+            "export": "vec2i_eq",
+            "nargs": 2,
+            "returns": "boolean",
+            "operator": "="
+          },
+          {
+            "name": "wasm_vec2i_dot",
+            "export": "vec2i_dot",
+            "nargs": 2,
+            "returns": "int4"
+          }
+        ]
+      }
+    ],
+    "functions": [
+      {
+        "name": "wasm_add_i32",
+        "args": ["int4", "int4"],
+        "returns": "int4",
+        "export": "add_i32",
+        "volatility": "IMMUTABLE"
+      },
+      {
+        "name": "wasm_fnv1a_i64",
+        "args": ["int8", "int8"],
+        "returns": "int8",
+        "export": "fnv1a_i64",
+        "volatility": "IMMUTABLE"
+      },
+      {
+        "name": "wasm_hypot_sq",
+        "args": ["float8", "float8"],
+        "returns": "float8",
+        "export": "hypot_sq_f64",
+        "volatility": "IMMUTABLE"
+      },
+      {
+        "name": "wasm_is_pos_even",
+        "args": ["int4"],
+        "returns": "boolean",
+        "export": "is_positive_even",
+        "volatility": "IMMUTABLE"
+      },
+      {
+        "name": "wasm_crc32_bytes",
+        "args": ["bytea"],
+        "returns": "int4",
+        "export": "crc32_bytes",
+        "volatility": "IMMUTABLE"
+      },
+      {
+        "name": "wasm_xor_cipher",
+        "args": ["bytea", "bytea"],
+        "returns": "bytea",
+        "export": "xor_cipher",
+        "volatility": "IMMUTABLE"
+      },
+      {
+        "name": "wasm_reverse_upper",
+        "args": ["text"],
+        "returns": "text",
+        "export": "reverse_upper_text",
+        "volatility": "IMMUTABLE"
+      },
+      {
+        "name": "wasm_vec2i_dot_direct",
+        "args": ["public.wasm_vec2i", "public.wasm_vec2i"],
+        "returns": "int4",
+        "export": "vec2i_dot",
+        "volatility": "IMMUTABLE"
+      },
+      {
+        "name": "wasm_vec2i_add_direct",
+        "args": ["public.wasm_vec2i", "public.wasm_vec2i"],
+        "returns": "public.wasm_vec2i",
+        "export": "vec2i_add",
+        "volatility": "IMMUTABLE"
+      }
+    ]
+  }
+  $manifest$::jsonb
+) AS installed_wasm_ext;
+ installed_wasm_ext 
+--------------------
+ t
+(1 row)
+
+-- 2. Activate the WASM extension via standard CREATE EXTENSION
+CREATE EXTENSION wasm_suite;
+-- 3. Verify Scalar WASM Functions (int4, int8/bigint, float8, boolean)
+SELECT
+  wasm_add_i32(120, 305) AS add_res,
+  wasm_fnv1a_i64(42, 100) AS i64_small_res,
+  wasm_fnv1a_i64(5000000000::int8, 123456789012::int8) AS i64_large_res,
+  wasm_hypot_sq(3.0, 4.0) AS hypot_sq_res,
+  wasm_is_pos_even(42) AS even_42,
+  wasm_is_pos_even(41) AS even_41,
+  wasm_is_pos_even(-4) AS even_neg4;
+ add_res | i64_small_res  |    i64_large_res     | hypot_sq_res | even_42 | even_41 | even_neg4 
+---------+----------------+----------------------+--------------+---------+---------+-----------
+     425 | 85761907000458 | -7140379953360643588 |           25 | t       | f       | f
+(1 row)
+
+-- 4. Verify Linear Memory Buffer WASM Functions (bytea & text)
+SELECT
+  wasm_crc32_bytes('ABC'::bytea) AS crc_abc,
+  convert_from(
+    wasm_xor_cipher(
+      wasm_xor_cipher('PostgreSQL 19 First-Class WASM Engine!'::bytea, 'secret_key'::bytea),
+      'secret_key'::bytea
+    ),
+    'UTF8'
+  ) AS xor_roundtrip,
+  wasm_reverse_upper('hello_wasm_19') AS rev_upper_res;
+ crc_abc |             xor_roundtrip              | rev_upper_res 
+---------+----------------------------------------+---------------
+     398 | PostgreSQL 19 First-Class WASM Engine! | 91_MSAW_OLLEH
+(1 row)
+
+-- 5. Verify WASM Custom Base Type (wasm_vec2i: input, output, table storage, +, =, dot product, AND direct custom base type functions for Bug 1)
+CREATE TEMP TABLE wasm_vectors (
+  id int PRIMARY KEY,
+  v wasm_vec2i NOT NULL
+);
+INSERT INTO wasm_vectors VALUES
+  (1, '(10,-25)'::wasm_vec2i),
+  (2, '(30,40)'::wasm_vec2i);
+SELECT
+  v1.v::text AS v1_txt,
+  v2.v::text AS v2_txt,
+  (v1.v + v2.v)::text AS v_sum,
+  (v1.v = '(10,-25)'::wasm_vec2i) AS v1_eq_self,
+  (v1.v = v2.v) AS v1_eq_v2,
+  wasm_vec2i_dot(v1.v, v2.v) AS v_dot,
+  wasm_vec2i_dot_direct(v1.v, v2.v) AS v_dot_direct,
+  wasm_vec2i_add_direct(v1.v, v2.v)::text AS v_sum_direct
+FROM wasm_vectors v1
+JOIN wasm_vectors v2 ON v1.id = 1 AND v2.id = 2;
+  v1_txt  | v2_txt  |  v_sum  | v1_eq_self | v1_eq_v2 | v_dot | v_dot_direct | v_sum_direct 
+----------+---------+---------+------------+----------+-------+--------------+--------------
+ (10,-25) | (30,40) | (40,15) | t          | f        |  -700 |         -700 | (40,15)
+(1 row)
+
+-- 6. Verify Bug 6 fix: manifest using design_3_wasm_engine.md keys (sql_name, wasm_export, input_func, output_func, symbol, top-level operators)
+SELECT pgtle.install_wasm_extension(
+  'wasm_design_schema_ext',
+  '1.0.0',
+  'Manifest schema from design_3_wasm_engine.md',
+  (SELECT bytecode FROM pgtle.modules WHERE module_name = 'wasm_suite' LIMIT 1),
+  $manifest$
+  {
+    "types": [
+      {
+        "name": "design_vec2i",
+        "internallength": 8,
+        "input_func": "vec2i_in",
+        "output_func": "vec2i_out"
+      }
+    ],
+    "functions": [
+      {
+        "sql_name": "design_vec2i_add",
+        "wasm_export": "vec2i_add",
+        "args": ["design_vec2i", "design_vec2i"],
+        "returns": "design_vec2i"
+      }
+    ],
+    "operators": [
+      {
+        "symbol": "+",
+        "leftarg": "design_vec2i",
+        "rightarg": "design_vec2i",
+        "func": "design_vec2i_add"
+      }
+    ]
+  }
+  $manifest$::jsonb
+) AS installed_design_schema_ext;
+ installed_design_schema_ext 
+-----------------------------
+ t
+(1 row)
+
+CREATE EXTENSION wasm_design_schema_ext;
+SELECT ('(11,22)'::design_vec2i + '(33,-12)'::design_vec2i)::text AS design_schema_vec_sum;
+ design_schema_vec_sum 
+-----------------------
+ (44,10)
+(1 row)
+
+-- 7. Verify WASM Trap Recovery on Invalid Custom Base Type Input
+DO $$
+DECLARE
+  recovered wasm_vec2i;
+BEGIN
+  BEGIN
+    recovered := 'invalid_vector_literal'::wasm_vec2i;
+    RAISE EXCEPTION 'Expected invalid wasm_vec2i literal to fail';
+  EXCEPTION WHEN OTHERS THEN
+    -- Expected trap from WASM vec2i_in
+  END;
+
+  -- Verify instance automatically re-instantiates from cached WebAssembly.Module on next call
+  recovered := '(-7,99)'::wasm_vec2i;
+  IF recovered::text <> '(-7,99)' THEN
+    RAISE EXCEPTION 'Unexpected recovered value: %', recovered::text;
+  END IF;
+END;
+$$;
+-- 9. Verify Cross-Backend Shared DSA + dshash WASM Native Code Cache Stats
+SELECT
+  (COALESCE(plv8_info()->'wasm_cache', plv8_info()->0->'wasm_cache')->>'enabled')::boolean AS cache_enabled,
+  (COALESCE(plv8_info()->'wasm_cache', plv8_info()->0->'wasm_cache')->>'entries')::int >= 1 AS has_cached_entries,
+  (COALESCE(plv8_info()->'wasm_cache', plv8_info()->0->'wasm_cache')->>'stores')::int >= 1 AS has_stores,
+  (COALESCE(plv8_info()->'wasm_cache', plv8_info()->0->'wasm_cache')->>'hits')::int >= 1 AS has_hits;
+ cache_enabled | has_cached_entries | has_stores | has_hits 
+---------------+--------------------+------------+----------
+ t             | t                  | t          | t
+(1 row)
+
+-- 10. Verify Negative Magic Header Validation & Unprivileged Role Security (including Bug 2: untrusted WASM module in pgtle.modules)
+DO $$
+BEGIN
+  BEGIN
+    PERFORM pgtle.install_wasm_extension('bad_wasm', '1.0', 'Bad WASM', 'not_a_wasm_binary'::bytea);
+    RAISE EXCEPTION 'Expected invalid WASM header to be rejected';
+  EXCEPTION WHEN invalid_parameter_value THEN
+    -- Expected
+  END;
+END;
+$$;
+SELECT pgtle.install_module(
+  'untrusted_wasm_mod',
+  '1.0.0',
+  '/* untrusted wasm */',
+  (SELECT bytecode FROM pgtle.modules WHERE module_name = 'wasm_suite' LIMIT 1),
+  NULL,
+  false
+);
+ install_module 
+----------------
+ t
+(1 row)
+
+CREATE OR REPLACE FUNCTION wasm_untrusted_add(a int4, b int4)
+RETURNS int4 LANGUAGE "pl/v8-wasm" AS $$
+  { "module": "tle:untrusted_wasm_mod", "export": "add_i32" }
+$$;
+-- Superuser succeeds on untrusted WASM module
+SELECT wasm_untrusted_add(10, 20) AS super_untrusted_wasm_add;
+ super_untrusted_wasm_add 
+--------------------------
+                       30
+(1 row)
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'wasm_unpriv_tester') THEN
+    EXECUTE 'DROP OWNED BY wasm_unpriv_tester';
+    EXECUTE 'DROP ROLE wasm_unpriv_tester';
+  END IF;
+END;
+$$;
+CREATE ROLE wasm_unpriv_tester;
+GRANT USAGE ON SCHEMA public, pgtle TO wasm_unpriv_tester;
+GRANT EXECUTE ON FUNCTION wasm_untrusted_add(int4, int4) TO wasm_unpriv_tester;
+SET ROLE wasm_unpriv_tester;
+-- Unprivileged role can execute trusted WASM functions and custom base type operators
+SELECT
+  wasm_add_i32(5, 6) AS unpriv_add,
+  wasm_reverse_upper('unpriv_ok') AS unpriv_text,
+  ('(1,2)'::wasm_vec2i + '(3,4)'::wasm_vec2i)::text AS unpriv_vec_add,
+  wasm_vec2i_dot_direct('(1,2)'::wasm_vec2i, '(3,4)'::wasm_vec2i) AS unpriv_vec_dot_direct;
+ unpriv_add | unpriv_text | unpriv_vec_add | unpriv_vec_dot_direct 
+------------+-------------+----------------+-----------------------
+         11 | KO_VIRPNU   | (4,6)          |                    11
+(1 row)
+
+-- Unprivileged role is denied execution of untrusted WASM module (Bug 2 fix)
+DO $$
+BEGIN
+  BEGIN
+    PERFORM wasm_untrusted_add(1, 2);
+    RAISE EXCEPTION 'Unprivileged role should not be able to execute untrusted WASM module';
+  EXCEPTION WHEN OTHERS THEN
+    IF SQLERRM NOT LIKE '%permission denied for untrusted WASM module%' THEN
+      RAISE EXCEPTION 'Unexpected error for untrusted WASM module: %', SQLERRM;
+    END IF;
+  END;
+END;
+$$;
+-- Unprivileged role cannot call pgtle.install_wasm_extension() or modify plv8_wasm_modules
+DO $$
+BEGIN
+  BEGIN
+    PERFORM pgtle.install_wasm_extension('hack_wasm', '1.0', 'Hack', decode('0061736d01000000', 'hex'));
+    RAISE EXCEPTION 'Unprivileged role should not be able to call install_wasm_extension';
+  EXCEPTION WHEN insufficient_privilege THEN
+    -- Expected
+  END;
+
+  BEGIN
+    DELETE FROM public.plv8_wasm_modules;
+    RAISE EXCEPTION 'Unprivileged role should not be able to delete from plv8_wasm_modules';
+  EXCEPTION WHEN insufficient_privilege THEN
+    -- Expected
+  END;
+END;
+$$;
+RESET ROLE;
+DROP OWNED BY wasm_unpriv_tester;
+DROP ROLE wasm_unpriv_tester;

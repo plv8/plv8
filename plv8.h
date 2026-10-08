@@ -10,6 +10,7 @@
 
 #include "plv8_config.h"
 #include <v8.h>
+#include <v8-wasm.h>
 #ifdef ENABLE_DEBUGGER_SUPPORT
 #include <v8-debug.h>
 #endif  // ENABLE_DEBUGGER_SUPPORT
@@ -17,6 +18,7 @@
 #include <vector>
 
 extern "C" {
+#define String PG_Node_String
 #include "postgres.h"
 
 #include "access/htup.h"
@@ -24,6 +26,7 @@ extern "C" {
 #include "mb/pg_wchar.h"
 #include "utils/tuplestore.h"
 #include "windowapi.h"
+#undef String
 }
 #include <string>
 
@@ -116,6 +119,7 @@ typedef struct plv8_context
 {
 	v8::Isolate				   	   	   *isolate;
 	v8::ArrayBuffer::Allocator	   	   *array_buffer_allocator;
+	v8::MicrotaskQueue				   *microtask_queue;
 	v8::Persistent<v8::Context>			context;
 	v8::Persistent<v8::ObjectTemplate>	recv_templ;
 	v8::Persistent<v8::Context>			compile_context;
@@ -386,8 +390,17 @@ extern void HandleUnhandledPromiseRejections();
 
 extern void GetMemoryInfo(v8::Local<v8::Object> obj);
 
+extern bool plv8_pass_user_types_as_bytes;
+extern bool plv8_wasm_cache_lookup(const char *key, std::vector<uint8_t> *out);
+extern bool plv8_wasm_cache_store(const char *key, const uint8_t *bytes, size_t len);
+
 extern struct config_generic *plv8_find_option(const char *name);
 char *plv8_string_option(struct config_generic * record);
 int plv8_int_option(struct config_generic * record);
+
+extern bool is_main_pg_thread(void);
+extern void plv8_assert_main_pg_thread(const char *api_name);
+#define PLV8_ASSERT_MAIN_PG_THREAD() plv8_assert_main_pg_thread(__func__)
+extern const intptr_t plv8_external_references[];
 
 #endif	// _PLV8_

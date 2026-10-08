@@ -40,9 +40,14 @@ $$ LANGUAGE plv8;
 CREATE FUNCTION plv8_reset() RETURNS void
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 
-CREATE FUNCTION plv8_info() RETURNS JSON
+CREATE FUNCTION plv8_info() RETURNS jsonb
 	AS 'MODULE_PATHNAME' LANGUAGE C;
 REVOKE ALL ON FUNCTION plv8_info() FROM PUBLIC;
+
+CREATE FUNCTION plv8_save_snapshot(output_path text, fn_oids regprocedure[] DEFAULT NULL) RETURNS jsonb
+	AS 'MODULE_PATHNAME', 'plv8_save_snapshot'
+	LANGUAGE C VOLATILE;
+REVOKE ALL ON FUNCTION plv8_save_snapshot(text, regprocedure[]) FROM PUBLIC;
 
 #endif
 

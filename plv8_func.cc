@@ -87,6 +87,8 @@ const intptr_t plv8_external_references[] = {
 	reinterpret_cast<intptr_t>(plv8_Commit),
 	reinterpret_cast<intptr_t>(plv8_Rollback),
 	reinterpret_cast<intptr_t>(plv8_CompileWasmCached),
+	reinterpret_cast<intptr_t>(plv8_Require),
+	reinterpret_cast<intptr_t>(plv8_CompileBytecode),
 	0
 };
 
@@ -388,8 +390,19 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	SetCallback(plv8, "rollback", plv8_Rollback, attrFull);
 	SetCallback(plv8, "commit", plv8_Commit, attrFull);
 	SetCallback(plv8, "compile_wasm_cached", plv8_CompileWasmCached, attrFull);
+	SetCallback(plv8, "require", plv8_Require, attrFull);
+	SetCallback(plv8, "compile_bytecode", plv8_CompileBytecode, attrFull);
 
 	plv8->SetInternalFieldCount(PLV8_INTNL_MAX);
+}
+
+void
+SetupGlobalFunctions(Handle<ObjectTemplate> global)
+{
+	PropertyAttribute	attrFull =
+		PropertyAttribute(ReadOnly | DontEnum | DontDelete);
+
+	SetCallback(global, "require", plv8_Require, attrFull);
 }
 
 void

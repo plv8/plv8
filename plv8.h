@@ -15,6 +15,7 @@
 #include <v8-debug.h>
 #endif  // ENABLE_DEBUGGER_SUPPORT
 #include <v8-version-string.h>
+#include <unordered_map>
 #include <vector>
 
 extern "C" {
@@ -133,6 +134,9 @@ typedef struct plv8_context
 	uint64						id;			/* unique for the life of the backend */
 	std::vector<std::tuple<v8::Global<v8::Promise>, v8::Global<v8::Message>, v8::Global<v8::Value>>> unhandled_promises;
 	bool 						ignore_unhandled_promises;
+	std::unordered_map<std::string, v8::Global<v8::Module>> tle_module_map;
+	std::unordered_map<int, std::string> tle_module_id_to_spec;
+	uint64						tle_modules_fp;
 } plv8_context;
 
 /*
@@ -382,6 +386,7 @@ extern v8::Handle<v8::Function> CreateYieldFunction(Converter *conv, Tuplestores
 extern void Subtransaction(const v8::FunctionCallbackInfo<v8::Value>& info) throw();
 
 extern void SetupPlv8Functions(v8::Handle<v8::ObjectTemplate> plv8);
+extern void SetupGlobalFunctions(v8::Handle<v8::ObjectTemplate> global);
 extern void SetupPrepFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupCursorFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupWindowFunctions(v8::Handle<v8::ObjectTemplate> templ);
@@ -393,6 +398,24 @@ extern void GetMemoryInfo(v8::Local<v8::Object> obj);
 extern bool plv8_pass_user_types_as_bytes;
 extern bool plv8_wasm_cache_lookup(const char *key, std::vector<uint8_t> *out);
 extern bool plv8_wasm_cache_store(const char *key, const uint8_t *bytes, size_t len);
+extern uint64 plv8_tle_modules_fingerprint(void);
+extern void plv8_Require(const v8::FunctionCallbackInfo<v8::Value>& args);
+extern void plv8_CompileBytecode(const v8::FunctionCallbackInfo<v8::Value>& args);
+extern v8::MaybeLocal<v8::Module> plv8_ResolveModuleCallback(
+	v8::Local<v8::Context> context,
+	v8::Local<v8::String> specifier,
+	v8::Local<v8::FixedArray> import_attributes,
+	v8::Local<v8::Module> referrer);
+extern v8::MaybeLocal<v8::Promise> plv8_HostImportModuleDynamicallyCallback(
+	v8::Local<v8::Context> context,
+	v8::Local<v8::Data> host_defined_options,
+	v8::Local<v8::Value> resource_name,
+	v8::Local<v8::String> specifier,
+	v8::Local<v8::FixedArray> import_attributes);
+extern void plv8_HostInitializeImportMetaObjectCallback(
+	v8::Local<v8::Context> context,
+	v8::Local<v8::Module> module,
+	v8::Local<v8::Object> meta);
 
 extern struct config_generic *plv8_find_option(const char *name);
 char *plv8_string_option(struct config_generic * record);

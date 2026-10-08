@@ -249,6 +249,22 @@ BEGIN
   END IF;
 END;
 $$;
+-- 8. Verify Direct ES Module import & CommonJS require() of WASM Module from pgtle.modules in plv8
+CREATE OR REPLACE FUNCTION test_plv8_import_wasm_module(a int, b int)
+RETURNS int LANGUAGE plv8 AS $$
+  import wasm, { memory } from 'tle:wasm_suite';
+  const cjsWasm = require('tle:wasm_suite');
+  if (!(memory instanceof WebAssembly.Memory)) {
+    throw new Error('Expected memory export to be WebAssembly.Memory');
+  }
+  return wasm.add_i32(a, b) + cjsWasm.add_i32(10, 20);
+$$;
+SELECT test_plv8_import_wasm_module(7, 8) AS esm_and_cjs_wasm_res;
+ esm_and_cjs_wasm_res 
+----------------------
+                   45
+(1 row)
+
 -- 9. Verify Cross-Backend Shared DSA + dshash WASM Native Code Cache Stats
 SELECT
   (COALESCE(plv8_info()->'wasm_cache', plv8_info()->0->'wasm_cache')->>'enabled')::boolean AS cache_enabled,

@@ -13,39 +13,56 @@
 
 #include "libplatform/libplatform.h"
 #include "plv8_allocator.h"
+#include <atomic>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
+#include <pthread.h>
+#include <sstream>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 
 extern "C" {
+#define String PG_Node_String
+#include "access/heapam.h"
 #include "access/htup_details.h"
+#include "access/table.h"
+#include "access/tableam.h"
 #include "access/xact.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_language.h"
 #include "catalog/pg_type.h"
 #include "commands/trigger.h"
 #include "common/hashfn.h"
 #include "executor/spi.h"
 #include "funcapi.h"
+#include "lib/dshash.h"
 #include "miscadmin.h"
+#include "storage/ipc.h"
+#include "storage/lwlock.h"
+#include "storage/proc.h"
+#include "storage/shmem.h"
 #include "utils/builtins.h"
+#include "utils/dsa.h"
 #include "utils/guc.h"
 #include "utils/guc_tables.h"
+#include "utils/jsonb.h"
 #include "utils/memutils.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "utils/timeout.h"
+#include "utils/timestamp.h"
 #if PG_VERSION_NUM >= 190000
 #include "utils/hsearch.h"
 #endif
 
 #include <signal.h>
-
-#ifdef EXECUTION_TIMEOUT
-#ifdef _MSC_VER
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
-#endif
 
 #if PG_VERSION_NUM >= 180000
 PG_MODULE_MAGIC_EXT(
@@ -60,11 +77,13 @@ PGDLLEXPORT Datum	plv8_call_handler(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plv8_call_validator(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plv8_reset(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plv8_info(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_save_snapshot(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(plv8_call_handler);
 PG_FUNCTION_INFO_V1(plv8_call_validator);
 PG_FUNCTION_INFO_V1(plv8_reset);
 PG_FUNCTION_INFO_V1(plv8_info);
+PG_FUNCTION_INFO_V1(plv8_save_snapshot);
 
 
 PGDLLEXPORT void _PG_init(void);
@@ -72,9 +91,75 @@ PGDLLEXPORT void _PG_init(void);
 PGDLLEXPORT Datum	plv8_inline_handler(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(plv8_inline_handler);
+#undef String
 } // extern "C"
 
 using namespace v8;
+
+static pthread_t main_pg_thread_id;
+static bool main_pg_thread_initialized = false;
+
+bool
+is_main_pg_thread(void)
+{
+	if (!main_pg_thread_initialized)
+		return true;
+	return pthread_equal(pthread_self(), main_pg_thread_id) != 0;
+}
+
+void
+plv8_assert_main_pg_thread(const char *api_name)
+{
+	if (!is_main_pg_thread())
+	{
+		fprintf(stderr, "FATAL: PL/v8 attempted to call PostgreSQL backend API (%s) from a non-main V8 worker thread!\n",
+				api_name ? api_name : "unknown");
+		abort();
+	}
+}
+
+static void
+refresh_main_pg_thread_after_fork(void)
+{
+	main_pg_thread_id = pthread_self();
+	main_pg_thread_initialized = true;
+}
+
+/*
+ * ScopedSignalBlockerForV8Workers temporarily masks asynchronous PostgreSQL
+ * backend signals before V8 spawns any background platform or compiler threads.
+ * Synchronous hardware fault/trap signals (SIGSEGV, SIGBUS, SIGFPE, SIGILL,
+ * SIGTRAP, SIGSYS) are intentionally left unblocked so V8 trap handlers and
+ * crash diagnostics continue to work normally.
+ */
+class ScopedSignalBlockerForV8Workers
+{
+private:
+	sigset_t old_mask_;
+	bool active_;
+
+public:
+	ScopedSignalBlockerForV8Workers() : active_(false)
+	{
+		sigset_t block_mask;
+		sigemptyset(&block_mask);
+		sigaddset(&block_mask, SIGHUP);
+		sigaddset(&block_mask, SIGINT);
+		sigaddset(&block_mask, SIGQUIT);
+		sigaddset(&block_mask, SIGUSR1);
+		sigaddset(&block_mask, SIGALRM);
+		sigaddset(&block_mask, SIGTERM);
+		sigaddset(&block_mask, SIGCHLD);
+		if (pthread_sigmask(SIG_BLOCK, &block_mask, &old_mask_) == 0)
+			active_ = true;
+	}
+
+	~ScopedSignalBlockerForV8Workers()
+	{
+		if (active_)
+			pthread_sigmask(SIG_SETMASK, &old_mask_, nullptr);
+	}
+};
 
 typedef struct plv8_proc_cache
 {
@@ -87,6 +172,10 @@ typedef struct plv8_proc_cache
 	TransactionId			fn_xmin;
 	ItemPointerData			fn_tid;
 	Oid						user_id;
+	uint64					tle_modules_fp;
+
+	int						nhandlers;
+	plv8_handler_dep		handlers[PLV8_MAX_LANG_HANDLER_DEPTH];
 
 	int						nargs;
 	bool					retset;		/* true if SRF */
@@ -95,9 +184,267 @@ typedef struct plv8_proc_cache
 } plv8_proc_cache;
 
 plv8_context *current_context = nullptr;
+static v8::Isolate *current_isolate = nullptr;
+static ArrayAllocator *current_allocator = nullptr;
+static bool plv8_isolate_oom_killed = false;
+bool plv8_pass_user_types_as_bytes = false;
 static uint64 next_context_id = 1;
-size_t plv8_memory_limit = 0;
+size_t plv8_memory_limit = 256;
 size_t plv8_last_heap_size = 0;
+static int plv8_wasm_cache_size = 64;
+static int plv8_thread_pool_size = 0;
+static char *plv8_boot_script_file = NULL;
+static char *plv8_snapshot_file = NULL;
+static int plv8_execution_timeout = 300;
+
+#define PLV8_SNAPSHOT_MAGIC "PLV8SN01"
+#define PLV8_SNAPSHOT_VERSION 1
+
+struct Plv8SnapshotHeader
+{
+	char		magic[8];
+	uint32		version;
+	uint32		num_functions;
+	uint64		blob_size;
+};
+
+struct Plv8SnapshotSlot
+{
+	Oid					fn_oid;
+	TransactionId		fn_xmin;
+	ItemPointerData		fn_tid;
+	int					nhandlers;
+	plv8_handler_dep	handlers[PLV8_MAX_LANG_HANDLER_DEPTH];
+};
+
+static v8::StartupData plv8_active_snapshot_blob = { nullptr, 0 };
+static std::vector<Plv8SnapshotSlot> plv8_snapshot_slots;
+static bool plv8_snapshot_is_mmap = false;
+static void *plv8_snapshot_mmap_addr = nullptr;
+static size_t plv8_snapshot_mmap_len = 0;
+static uint64 plv8_snapshot_functions_restored = 0;
+static char plv8_snapshot_source[256] = "none";
+static bool plv8_bypass_snapshot_restore = false;
+
+#define PLV8_WASM_KEY_MAX_LEN 128
+
+struct Plv8SharedState
+{
+	LWLock			   *lock;
+	int					dsa_tranche_id;
+	int					dshash_tranche_id;
+	dsa_handle			wasm_dsa_handle;
+	dshash_table_handle	wasm_dshash_handle;
+	pg_atomic_uint64	bytes_used;
+	pg_atomic_uint64	entries_count;
+	pg_atomic_uint64	hits;
+	pg_atomic_uint64	misses;
+	pg_atomic_uint64	stores;
+};
+
+struct Plv8WasmCacheEntry
+{
+	char				key[PLV8_WASM_KEY_MAX_LEN];
+	dsa_pointer			code_ptr;
+	uint32				code_size;
+};
+
+static Plv8SharedState *plv8_shared_state = nullptr;
+static dsa_area *local_wasm_dsa = nullptr;
+static dshash_table *local_wasm_dshash = nullptr;
+
+static shmem_request_hook_type prev_shmem_request_hook = nullptr;
+static shmem_startup_hook_type prev_shmem_startup_hook = nullptr;
+
+static void
+plv8_shmem_request(void)
+{
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+
+	RequestAddinShmemSpace(MAXALIGN(sizeof(Plv8SharedState)));
+	RequestNamedLWLockTranche("plv8_wasm_cache", 1);
+}
+
+static void
+plv8_shmem_startup(void)
+{
+	if (prev_shmem_startup_hook)
+		prev_shmem_startup_hook();
+
+	bool found = false;
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	plv8_shared_state = static_cast<Plv8SharedState *>(
+		ShmemInitStruct("plv8_shared_state", sizeof(Plv8SharedState), &found));
+	if (!found)
+	{
+		memset(plv8_shared_state, 0, sizeof(Plv8SharedState));
+		plv8_shared_state->lock = &(GetNamedLWLockTranche("plv8_wasm_cache"))[0].lock;
+#if PG_VERSION_NUM >= 190000
+		plv8_shared_state->dsa_tranche_id = LWLockNewTrancheId("plv8_wasm_dsa");
+		plv8_shared_state->dshash_tranche_id = LWLockNewTrancheId("plv8_wasm_dshash");
+#else
+		plv8_shared_state->dsa_tranche_id = LWLockNewTrancheId();
+		LWLockRegisterTranche(plv8_shared_state->dsa_tranche_id, "plv8_wasm_dsa");
+		plv8_shared_state->dshash_tranche_id = LWLockNewTrancheId();
+		LWLockRegisterTranche(plv8_shared_state->dshash_tranche_id, "plv8_wasm_dshash");
+#endif
+		plv8_shared_state->wasm_dsa_handle = DSA_HANDLE_INVALID;
+		plv8_shared_state->wasm_dshash_handle = DSHASH_HANDLE_INVALID;
+		pg_atomic_init_u64(&plv8_shared_state->bytes_used, 0);
+		pg_atomic_init_u64(&plv8_shared_state->entries_count, 0);
+		pg_atomic_init_u64(&plv8_shared_state->hits, 0);
+		pg_atomic_init_u64(&plv8_shared_state->misses, 0);
+		pg_atomic_init_u64(&plv8_shared_state->stores, 0);
+	}
+	LWLockRelease(AddinShmemInitLock);
+}
+
+static dshash_table *
+plv8_get_wasm_dshash()
+{
+	if (plv8_shared_state == nullptr || plv8_wasm_cache_size <= 0)
+		return nullptr;
+
+	if (local_wasm_dshash != nullptr)
+		return local_wasm_dshash;
+
+	dshash_parameters params = {
+		PLV8_WASM_KEY_MAX_LEN,
+		sizeof(Plv8WasmCacheEntry),
+		dshash_memcmp,
+		dshash_memhash,
+		dshash_memcpy,
+		plv8_shared_state->dshash_tranche_id
+	};
+
+	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	LWLockAcquire(plv8_shared_state->lock, LW_EXCLUSIVE);
+	PG_TRY();
+	{
+#if PG_VERSION_NUM < 190000
+		LWLockRegisterTranche(plv8_shared_state->dsa_tranche_id, "plv8_wasm_dsa");
+		LWLockRegisterTranche(plv8_shared_state->dshash_tranche_id, "plv8_wasm_dshash");
+#endif
+
+		if (plv8_shared_state->wasm_dsa_handle == DSA_HANDLE_INVALID)
+		{
+			local_wasm_dsa = dsa_create(plv8_shared_state->dsa_tranche_id);
+			dsa_pin(local_wasm_dsa);
+			dsa_pin_mapping(local_wasm_dsa);
+			dsa_set_size_limit(local_wasm_dsa,
+							   (size_t) plv8_wasm_cache_size * 1024ULL * 1024ULL);
+			plv8_shared_state->wasm_dsa_handle = dsa_get_handle(local_wasm_dsa);
+
+			local_wasm_dshash = dshash_create(local_wasm_dsa, &params, nullptr);
+			plv8_shared_state->wasm_dshash_handle =
+				dshash_get_hash_table_handle(local_wasm_dshash);
+		}
+		else
+		{
+			local_wasm_dsa = dsa_attach(plv8_shared_state->wasm_dsa_handle);
+			dsa_pin_mapping(local_wasm_dsa);
+			local_wasm_dshash = dshash_attach(
+				local_wasm_dsa, &params, plv8_shared_state->wasm_dshash_handle, nullptr);
+		}
+	}
+	PG_CATCH();
+	{
+		LWLockRelease(plv8_shared_state->lock);
+		MemoryContextSwitchTo(oldcxt);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	LWLockRelease(plv8_shared_state->lock);
+	MemoryContextSwitchTo(oldcxt);
+	return local_wasm_dshash;
+}
+
+bool
+plv8_wasm_cache_lookup(const char *key, std::vector<uint8_t> *out_bytes)
+{
+	PLV8_ASSERT_MAIN_PG_THREAD();
+	dshash_table *ht = plv8_get_wasm_dshash();
+	if (ht == nullptr)
+		return false;
+
+	char padded_key[PLV8_WASM_KEY_MAX_LEN];
+	memset(padded_key, 0, sizeof(padded_key));
+	strncpy(padded_key, key, PLV8_WASM_KEY_MAX_LEN - 1);
+
+	Plv8WasmCacheEntry *entry = static_cast<Plv8WasmCacheEntry *>(
+		dshash_find(ht, padded_key, false));
+	if (entry == nullptr)
+	{
+		pg_atomic_fetch_add_u64(&plv8_shared_state->misses, 1);
+		return false;
+	}
+
+	if (DsaPointerIsValid(entry->code_ptr) && entry->code_size > 0)
+	{
+		const uint8_t *src = static_cast<const uint8_t *>(
+			dsa_get_address(local_wasm_dsa, entry->code_ptr));
+		out_bytes->assign(src, src + entry->code_size);
+		dshash_release_lock(ht, entry);
+		pg_atomic_fetch_add_u64(&plv8_shared_state->hits, 1);
+		return true;
+	}
+
+	dshash_release_lock(ht, entry);
+	pg_atomic_fetch_add_u64(&plv8_shared_state->misses, 1);
+	return false;
+}
+
+bool
+plv8_wasm_cache_store(const char *key, const uint8_t *bytes, size_t len)
+{
+	PLV8_ASSERT_MAIN_PG_THREAD();
+	if (bytes == nullptr || len == 0)
+		return false;
+
+	dshash_table *ht = plv8_get_wasm_dshash();
+	if (ht == nullptr)
+		return false;
+
+	size_t max_bytes = (size_t) plv8_wasm_cache_size * 1024ULL * 1024ULL;
+	if (pg_atomic_read_u64(&plv8_shared_state->bytes_used) + len > max_bytes)
+		return false;
+
+	char padded_key[PLV8_WASM_KEY_MAX_LEN];
+	memset(padded_key, 0, sizeof(padded_key));
+	strncpy(padded_key, key, PLV8_WASM_KEY_MAX_LEN - 1);
+
+	bool found = false;
+	Plv8WasmCacheEntry *entry = static_cast<Plv8WasmCacheEntry *>(
+		dshash_find_or_insert(ht, padded_key, &found));
+	if (entry == nullptr)
+		return false;
+
+	if (found && DsaPointerIsValid(entry->code_ptr))
+	{
+		dshash_release_lock(ht, entry);
+		return true;
+	}
+
+	dsa_pointer dp = dsa_allocate_extended(local_wasm_dsa, len, DSA_ALLOC_NO_OOM);
+	if (!DsaPointerIsValid(dp))
+	{
+		dshash_delete_entry(ht, entry);
+		return false;
+	}
+
+	void *dst = dsa_get_address(local_wasm_dsa, dp);
+	memcpy(dst, bytes, len);
+	entry->code_ptr = dp;
+	entry->code_size = static_cast<uint32>(len);
+	dshash_release_lock(ht, entry);
+
+	pg_atomic_fetch_add_u64(&plv8_shared_state->bytes_used, len);
+	pg_atomic_fetch_add_u64(&plv8_shared_state->entries_count, 1);
+	pg_atomic_fetch_add_u64(&plv8_shared_state->stores, 1);
+	return true;
+}
 
 /*
  * The function and context are created at the first invocation.  Their
@@ -131,14 +478,24 @@ static HTAB *plv8_proc_cache_hash = NULL;
 
 static plv8_exec_env		   *exec_env_head = NULL;
 
-static void killPlv8Context(plv8_context *ctx);
+static void DisposePlv8ContextHandles(plv8_context *ctx);
+static void KillIsolateAndAllContexts(void);
+static void EnsureSharedIsolate(void);
+static void plv8_cache_function_remove(Oid fn_oid);
+static bool plv8_cache_handlers_valid(plv8_proc_cache *cache, HeapTuple proctuple, Oid *stale_handler_oid);
+static bool plv8_is_js_language(Oid lang_oid);
+static char *plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *ndeps, plv8_proc *proc);
+static bool plv8_extract_hoisted_imports(const char *src, std::string *imports_out, std::string *body_out);
+static Local<Object> plv8_compile_and_eval_anon_module(Local<Context> context, const char *name, const char *mod_src);
+static void plv8_sync_tle_module_cache(plv8_context *ctx);
+static bool plv8_try_restore_function_from_snapshot(plv8_proc_cache *cache, plv8_context *global_context, const char *raw_prosrc);
 
 /*
  * lower_case_functions are postgres-like C functions.
  * They could raise errors with elog/ereport(ERROR).
  */
 static plv8_proc *plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo,
-		bool validate, char ***argnames) throw();
+		bool validate, char ***argnames, Oid *prolang_out, char **raw_prosrc_out) throw();
 static void plv8_xact_cb(XactEvent event, void *arg);
 
 /*
@@ -160,7 +517,6 @@ static Datum CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 static Datum CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv);
 static plv8_context *GetPlv8Context();
 static Local<ObjectTemplate> GetGlobalObjectTemplate(Isolate *isolate);
-static void CreateIsolate(plv8_context *context);
 
 /* A GUC to specify a custom start up function to call */
 static char *plv8_start_proc = NULL;
@@ -174,11 +530,363 @@ static char *plv8_icu_data = NULL;
 /* A GUC to specify the remote debugger port */
 static int plv8_debugger_port;
 
-#ifdef EXECUTION_TIMEOUT
-static int plv8_execution_timeout = 300;
-#endif
+/*
+ * ForkSafePlatform wraps a single-threaded V8 Platform in the postmaster
+ * (so zero background threads exist before postmaster fork()), and lazily
+ * creates a multi-threaded V8 DefaultPlatform inside each child backend
+ * process after fork() with async PostgreSQL signals masked.
+ */
+class ForkSafePlatform : public v8::Platform
+{
+private:
+	std::unique_ptr<v8::Platform> postmaster_platform_;
+	std::unique_ptr<v8::Platform> backend_platform_;
+	pid_t backend_platform_pid_;
 
-static std::unique_ptr<v8::Platform> v8_platform = NULL;
+	v8::Platform *Active()
+	{
+		if (backend_platform_ && backend_platform_pid_ == getpid())
+			return backend_platform_.get();
+		return postmaster_platform_.get();
+	}
+
+public:
+	ForkSafePlatform()
+		: postmaster_platform_(v8::platform::NewSingleThreadedDefaultPlatform()),
+		  backend_platform_(nullptr),
+		  backend_platform_pid_(0)
+	{
+	}
+
+	void EnsureBackendPlatform()
+	{
+		pid_t cur_pid = getpid();
+		if (!backend_platform_ || backend_platform_pid_ != cur_pid)
+		{
+			refresh_main_pg_thread_after_fork();
+			ScopedSignalBlockerForV8Workers sig_blocker;
+			int threads = plv8_thread_pool_size > 0 ? plv8_thread_pool_size : 0;
+			backend_platform_ = v8::platform::NewDefaultPlatform(threads);
+			backend_platform_pid_ = cur_pid;
+		}
+	}
+
+	int ActiveWorkerCount() const
+	{
+		if (backend_platform_ && backend_platform_pid_ == getpid())
+			return backend_platform_->NumberOfWorkerThreads();
+		return 0;
+	}
+
+	v8::PageAllocator *GetPageAllocator() override
+	{
+		return postmaster_platform_->GetPageAllocator();
+	}
+
+	void OnCriticalMemoryPressure() override
+	{
+		Active()->OnCriticalMemoryPressure();
+	}
+
+	int NumberOfWorkerThreads() override
+	{
+		return Active()->NumberOfWorkerThreads();
+	}
+
+	std::shared_ptr<v8::TaskRunner> GetForegroundTaskRunner(
+		v8::Isolate *isolate, v8::TaskPriority priority) override
+	{
+		return Active()->GetForegroundTaskRunner(isolate, priority);
+	}
+
+	void PostTaskOnWorkerThreadImpl(
+		v8::TaskPriority priority,
+		std::unique_ptr<v8::Task> task,
+		const v8::SourceLocation &location) override
+	{
+		EnsureBackendPlatform();
+		ScopedSignalBlockerForV8Workers sig_blocker;
+		Active()->PostTaskOnWorkerThread(priority, std::move(task), location);
+	}
+
+	void PostDelayedTaskOnWorkerThreadImpl(
+		v8::TaskPriority priority,
+		std::unique_ptr<v8::Task> task,
+		double delay_in_seconds,
+		const v8::SourceLocation &location) override
+	{
+		EnsureBackendPlatform();
+		ScopedSignalBlockerForV8Workers sig_blocker;
+		Active()->PostDelayedTaskOnWorkerThread(
+			priority, std::move(task), delay_in_seconds, location);
+	}
+
+	bool IdleTasksEnabled(v8::Isolate *isolate) override
+	{
+		return Active()->IdleTasksEnabled(isolate);
+	}
+
+	std::unique_ptr<v8::JobHandle> CreateJobImpl(
+		v8::TaskPriority priority,
+		std::unique_ptr<v8::JobTask> job_task,
+		const v8::SourceLocation &location) override
+	{
+		EnsureBackendPlatform();
+		ScopedSignalBlockerForV8Workers sig_blocker;
+		return Active()->CreateJob(priority, std::move(job_task), location);
+	}
+
+	double MonotonicallyIncreasingTime() override
+	{
+		return Active()->MonotonicallyIncreasingTime();
+	}
+
+	double CurrentClockTimeMillis() override
+	{
+		return Active()->CurrentClockTimeMillis();
+	}
+
+	v8::TracingController *GetTracingController() override
+	{
+		return Active()->GetTracingController();
+	}
+};
+
+static ForkSafePlatform *v8_platform = nullptr;
+static bool v8_engine_initialized = false;
+
+static void
+plv8_init_v8_engine(void)
+{
+	refresh_main_pg_thread_after_fork();
+
+	if (v8_engine_initialized)
+	{
+		return;
+	}
+
+	ScopedSignalBlockerForV8Workers sig_blocker;
+
+	if (plv8_icu_data == NULL) {
+		elog(DEBUG1, "no icu dir");
+		V8::InitializeICU();
+	} else {
+		elog(DEBUG1, "init icu data %s", plv8_icu_data);
+		V8::InitializeICU(plv8_icu_data);
+	}
+
+#if (V8_MAJOR_VERSION == 4 && V8_MINOR_VERSION >= 6) || V8_MAJOR_VERSION >= 5
+	V8::InitializeExternalStartupData("plv8");
+#endif
+	if (!v8_platform) {
+		v8_platform = new ForkSafePlatform();
+	}
+
+	const char *default_wasm_flags = "--no-wasm-lazy-compilation --no-liftoff";
+	V8::SetFlagsFromString(default_wasm_flags, strlen(default_wasm_flags));
+	if (plv8_v8_flags != NULL) {
+		V8::SetFlagsFromString(plv8_v8_flags, strlen(plv8_v8_flags));
+	}
+
+	V8::InitializePlatform(v8_platform);
+
+	V8::Initialize();
+	v8_engine_initialized = true;
+}
+
+static bool
+LoadPlv8SnapshotFileInPreload(const char *path)
+{
+	if (path == nullptr || path[0] == '\0')
+		return false;
+
+	int fd = open(path, O_RDONLY);
+	if (fd < 0)
+	{
+		elog(WARNING, "plv8: could not open snapshot_file \"%s\": %m",
+			 path);
+		return false;
+	}
+
+	struct stat st;
+	if (fstat(fd, &st) < 0 || (size_t) st.st_size < sizeof(Plv8SnapshotHeader))
+	{
+		close(fd);
+		elog(WARNING, "plv8: snapshot_file \"%s\" is invalid or too small", path);
+		return false;
+	}
+
+	size_t map_len = (size_t) st.st_size;
+	void *addr = mmap(nullptr, map_len, PROT_READ, MAP_SHARED, fd, 0);
+	close(fd);
+	if (addr == MAP_FAILED)
+	{
+		elog(WARNING, "plv8: mmap failed for snapshot_file \"%s\": %m",
+			 path);
+		return false;
+	}
+
+	const Plv8SnapshotHeader *hdr = static_cast<const Plv8SnapshotHeader *>(addr);
+	if (memcmp(hdr->magic, PLV8_SNAPSHOT_MAGIC, 8) != 0 ||
+		hdr->version != PLV8_SNAPSHOT_VERSION)
+	{
+		munmap(addr, map_len);
+		elog(WARNING, "plv8: snapshot_file \"%s\" header magic/version mismatch", path);
+		return false;
+	}
+
+	size_t slots_bytes = (size_t) hdr->num_functions * sizeof(Plv8SnapshotSlot);
+	size_t header_total = sizeof(Plv8SnapshotHeader) + slots_bytes;
+	if (header_total + hdr->blob_size > map_len || hdr->blob_size == 0)
+	{
+		munmap(addr, map_len);
+		elog(WARNING, "plv8: snapshot_file \"%s\" size corrupt", path);
+		return false;
+	}
+
+	const Plv8SnapshotSlot *slots_ptr = reinterpret_cast<const Plv8SnapshotSlot *>(
+		static_cast<const char *>(addr) + sizeof(Plv8SnapshotHeader));
+	plv8_snapshot_slots.assign(slots_ptr, slots_ptr + hdr->num_functions);
+
+	plv8_active_snapshot_blob.data =
+		static_cast<const char *>(addr) + header_total;
+	plv8_active_snapshot_blob.raw_size = static_cast<int>(hdr->blob_size);
+	plv8_snapshot_is_mmap = true;
+	plv8_snapshot_mmap_addr = addr;
+	plv8_snapshot_mmap_len = map_len;
+	snprintf(plv8_snapshot_source, sizeof(plv8_snapshot_source), "snapshot_file");
+	return true;
+}
+
+static bool
+BuildBootScriptSnapshotInPreload(const char *script_path)
+{
+	if (script_path == nullptr || script_path[0] == '\0')
+		return false;
+
+	int fd = open(script_path, O_RDONLY);
+	if (fd < 0)
+	{
+		elog(WARNING, "plv8: could not open boot_script_file \"%s\": %m",
+			 script_path);
+		return false;
+	}
+	struct stat st;
+	if (fstat(fd, &st) < 0 || st.st_size <= 0)
+	{
+		close(fd);
+		elog(WARNING, "plv8: boot_script_file \"%s\" is empty or unreadable", script_path);
+		return false;
+	}
+	std::string script_src((size_t) st.st_size, '\0');
+	ssize_t nread = read(fd, &script_src[0], (size_t) st.st_size);
+	close(fd);
+	if (nread != st.st_size)
+		return false;
+
+	/*
+	 * Compile the boot script snapshot in a short-lived forked child process
+	 * and write the resulting blob into a MAP_SHARED anonymous mapping.
+	 * This guarantees the postmaster process itself never spawns any V8
+	 * background threads before forking PostgreSQL backends.
+	 */
+	size_t max_shared_blob = 64 * 1024 * 1024;
+	void *shared_mem = mmap(nullptr, max_shared_blob,
+							PROT_READ | PROT_WRITE,
+							MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	if (shared_mem == MAP_FAILED)
+		return false;
+
+	pid_t pid = fork();
+	if (pid < 0)
+	{
+		munmap(shared_mem, max_shared_blob);
+		return false;
+	}
+
+	if (pid == 0)
+	{
+		plv8_init_v8_engine();
+		if (v8_platform)
+			v8_platform->EnsureBackendPlatform();
+		v8::ArrayBuffer::Allocator *alloc =
+			v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+		{
+			v8::Isolate::CreateParams create_params;
+			create_params.array_buffer_allocator = alloc;
+			create_params.external_references = plv8_external_references;
+			v8::SnapshotCreator creator(create_params);
+			v8::Isolate *iso = creator.GetIsolate();
+			{
+				v8::HandleScope hs(iso);
+				v8::Local<v8::Context> def_ctx = v8::Context::New(iso);
+				creator.SetDefaultContext(def_ctx);
+
+				v8::Local<v8::ObjectTemplate> global = GetGlobalObjectTemplate(iso);
+				v8::Local<v8::Context> ctx = v8::Context::New(iso, nullptr, global);
+				{
+					v8::Context::Scope cs(ctx);
+					v8::TryCatch tc(iso);
+					v8::Local<v8::String> src = v8::String::NewFromUtf8(
+						iso, script_src.data(), v8::NewStringType::kNormal,
+						(int) script_src.size()).ToLocalChecked();
+					v8::Local<v8::Script> compiled;
+					if (!v8::Script::Compile(ctx, src).ToLocal(&compiled) ||
+						compiled->Run(ctx).IsEmpty())
+					{
+						_exit(2);
+					}
+				}
+				creator.AddContext(ctx);
+			}
+			v8::StartupData blob = creator.CreateBlob(
+				v8::SnapshotCreator::FunctionCodeHandling::kKeep);
+			if (blob.data == nullptr || blob.raw_size <= 0 ||
+				sizeof(uint64) + (size_t) blob.raw_size > max_shared_blob)
+			{
+				_exit(3);
+			}
+			uint64 sz = (uint64) blob.raw_size;
+			memcpy(shared_mem, &sz, sizeof(uint64));
+			memcpy(static_cast<char *>(shared_mem) + sizeof(uint64),
+				   blob.data, (size_t) blob.raw_size);
+			delete[] blob.data;
+		}
+		delete alloc;
+		_exit(0);
+	}
+
+	int status = 0;
+	while (waitpid(pid, &status, 0) < 0)
+	{
+		if (errno != EINTR)
+			break;
+	}
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+	{
+		munmap(shared_mem, max_shared_blob);
+		elog(WARNING, "plv8: failed to build boot snapshot from \"%s\"", script_path);
+		return false;
+	}
+
+	uint64 blob_sz = 0;
+	memcpy(&blob_sz, shared_mem, sizeof(uint64));
+	if (blob_sz == 0 || sizeof(uint64) + blob_sz > max_shared_blob)
+	{
+		munmap(shared_mem, max_shared_blob);
+		return false;
+	}
+
+	mprotect(shared_mem, max_shared_blob, PROT_READ);
+	plv8_active_snapshot_blob.data =
+		static_cast<const char *>(shared_mem) + sizeof(uint64);
+	plv8_active_snapshot_blob.raw_size = static_cast<int>(blob_sz);
+	plv8_snapshot_is_mmap = true;
+	plv8_snapshot_mmap_addr = shared_mem;
+	plv8_snapshot_mmap_len = max_shared_blob;
+	snprintf(plv8_snapshot_source, sizeof(plv8_snapshot_source), "boot_script_prefork");
+	return true;
+}
 
 /*
  * We use vector instead of hash since the size of this array
@@ -190,17 +898,6 @@ static std::vector<plv8_context *> ContextVector;
 v8::Persistent<v8::Context> debug_message_context;
 
 void DispatchDebugMessages() {
-  // We are in some random thread. We should already have v8::Locker acquired
-  // (we requested this when registered this callback). We was called
-  // because new debug messages arrived; they may have already been processed,
-  // but we shouldn't worry about this.
-  //
-  // All we have to do is to set context and call ProcessDebugMessages.
-  //
-  // We should decide which V8 context to use here. This is important for
-  // "evaluate" command, because it must be executed some context.
-  // In our sample we have only one context, so there is nothing really to
-  // think about.
   v8::Context::Scope scope(debug_message_context);
 
   v8::Debug::ProcessDebugMessages();
@@ -209,9 +906,11 @@ void DispatchDebugMessages() {
 
 void OOMErrorHandler(const char* location, const v8::OOMDetails &) {
 	Isolate *isolate = Isolate::GetCurrent();
-	isolate->TerminateExecution();
-	// set it to kill the user context and isolate
-	current_context->is_dead = true;
+	if (isolate)
+		isolate->TerminateExecution();
+	plv8_isolate_oom_killed = true;
+	if (current_context)
+		current_context->is_dead = true;
 	elog(ERROR, "Out of memory error");
 }
 
@@ -220,6 +919,9 @@ void GCEpilogueCallback(Isolate* isolate, GCType type, GCCallbackFlags /* flags 
 	isolate->GetHeapStatistics(&heap_statistics);
 	if (type != GCType::kGCTypeIncrementalMarking
 		&& heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB) {
+		plv8_isolate_oom_killed = true;
+		if (current_context)
+			current_context->is_dead = true;
 		const char *error_message = "Out of memory";
 		Local<v8::String>	result = ToString(error_message, 13);
 		isolate->ThrowException(result);
@@ -236,18 +938,27 @@ void GCEpilogueCallback(Isolate* isolate, GCType type, GCCallbackFlags /* flags 
 size_t NearHeapLimitHandler(void* data, size_t current_heap_limit,
 								size_t initial_heap_limit) {
 	Isolate *isolate = Isolate::GetCurrent();
-	isolate->TerminateExecution();
+	HeapStatistics heap_statistics;
+	isolate->GetHeapStatistics(&heap_statistics);
+	if (heap_statistics.used_heap_size() > plv8_memory_limit * 1_MB) {
+		plv8_isolate_oom_killed = true;
+		if (current_context)
+			current_context->is_dead = true;
+		isolate->TerminateExecution();
+	}
 	// need to give back more space
 	// to make sure it can unwind the stack and process exceptions
 	return current_heap_limit + 1_MB;
 }
 
 void PromiseRejectCB(PromiseRejectMessage rejection) {
+	if (!current_context)
+		return;
 	auto event = rejection.GetEvent();
-	if (event == kPromiseRejectAfterResolved || event == kPromiseResolveAfterResolved)
+	if (event != v8::kPromiseRejectWithNoHandler && event != v8::kPromiseHandlerAddedAfterReject)
 		return;
 	auto	promise = rejection.GetPromise();
-	auto	isolate = promise->GetIsolate();
+	auto	isolate = Isolate::GetCurrent();
 
 	if (rejection.GetEvent() == v8::kPromiseHandlerAddedAfterReject) {
 		if (current_context->ignore_unhandled_promises) return;
@@ -286,6 +997,8 @@ void PromiseRejectCB(PromiseRejectMessage rejection) {
 }
 
 void HandleUnhandledPromiseRejections() {
+	if (!current_context)
+		return;
 	// Avoid recursive calls to HandleUnhandledPromiseRejections.
 	auto isolate = current_context->isolate;
 	if (current_context->ignore_unhandled_promises) return;
@@ -306,28 +1019,64 @@ void HandleUnhandledPromiseRejections() {
 }
 
 static void
-CreateIsolate(plv8_context *context) {
-	Isolate *isolate;
+EnsureSharedIsolate(void)
+{
+	plv8_init_v8_engine();
+	if (v8_platform)
+		v8_platform->EnsureBackendPlatform();
+
+	if (current_isolate != nullptr &&
+		!plv8_isolate_oom_killed &&
+		!current_isolate->IsDead())
+	{
+		return;
+	}
+
+	if (current_isolate != nullptr)
+	{
+		KillIsolateAndAllContexts();
+	}
+
+	if (!plv8_snapshot_is_mmap &&
+		plv8_snapshot_file != NULL && plv8_snapshot_file[0] != '\0')
+	{
+		LoadPlv8SnapshotFileInPreload(plv8_snapshot_file);
+	}
+
+	ScopedSignalBlockerForV8Workers sig_blocker;
+
 	Isolate::CreateParams params;
-	params.array_buffer_allocator = new ArrayAllocator(plv8_memory_limit * 1_MB);
-	//params.array_buffer_allocator =
-  //    v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+	current_allocator = new ArrayAllocator(plv8_memory_limit * 1_MB);
+	params.array_buffer_allocator = current_allocator;
+	params.external_references = plv8_external_references;
+	if (plv8_active_snapshot_blob.data != nullptr &&
+		plv8_active_snapshot_blob.raw_size > 0)
+	{
+		params.snapshot_blob = &plv8_active_snapshot_blob;
+	}
+
 	ResourceConstraints rc;
 	rc.ConfigureDefaults(plv8_memory_limit * 1_MB * 2, plv8_memory_limit * 1_MB * 2);
 	params.constraints = rc;
-	isolate = Isolate::New(params);
-	isolate->SetOOMErrorHandler(OOMErrorHandler);
-	isolate->AddGCEpilogueCallback(GCEpilogueCallback);
-	isolate->AddNearHeapLimitCallback(NearHeapLimitHandler, NULL);
-	isolate->SetPromiseRejectCallback(PromiseRejectCB);
-	context->isolate = isolate;
-	context->array_buffer_allocator = params.array_buffer_allocator;
+
+	current_isolate = Isolate::New(params);
+	plv8_isolate_oom_killed = false;
+	plv8_last_heap_size = 0;
+
+	current_isolate->SetOOMErrorHandler(OOMErrorHandler);
+	current_isolate->AddGCEpilogueCallback(GCEpilogueCallback);
+	current_isolate->AddNearHeapLimitCallback(NearHeapLimitHandler, NULL);
+	current_isolate->SetPromiseRejectCallback(PromiseRejectCB);
+	current_isolate->SetHostImportModuleDynamicallyCallback(plv8_HostImportModuleDynamicallyCallback);
+	current_isolate->SetHostInitializeImportMetaObjectCallback(plv8_HostInitializeImportMetaObjectCallback);
 }
 
 void
 _PG_init(void)
 {
 	HASHCTL    hash_ctl = { 0 };
+
+	refresh_main_pg_thread_after_fork();
 
 	hash_ctl.keysize = sizeof(Oid);
 	hash_ctl.entrysize = sizeof(plv8_proc_cache);
@@ -406,7 +1155,6 @@ _PG_init(void)
     }
 #undef DEBUGGER_PORT_VAR
 
-#ifdef EXECUTION_TIMEOUT
 #define EXECUTION_TIMEOUT_VAR "plv8.execution_timeout"
 	guc_value = plv8_find_option(EXECUTION_TIMEOUT_VAR);
 	if (guc_value != NULL) {
@@ -424,7 +1172,6 @@ _PG_init(void)
                                 NULL);
     }
 #undef EXECUTION_TIMEOUT_VAR
-#endif
 
 #define MEMORY_LIMIT_VAR "plv8.memory_limit"
     guc_value = plv8_find_option(MEMORY_LIMIT_VAR);
@@ -443,32 +1190,104 @@ _PG_init(void)
     }
 #undef MEMORY_LIMIT_VAR
 
+#define THREAD_POOL_SIZE_VAR "plv8.thread_pool_size"
+    guc_value = plv8_find_option(THREAD_POOL_SIZE_VAR);
+    if (guc_value != NULL) {
+        plv8_thread_pool_size = plv8_int_option(guc_value);
+    } else {
+        DefineCustomIntVariable(THREAD_POOL_SIZE_VAR,
+                                gettext_noop("Number of V8 background platform worker threads per backend (0 = hardware default)."),
+                                NULL,
+                                &plv8_thread_pool_size,
+                                0, 0, 64,
+                                PGC_SUSET, 0,
+                                NULL,
+                                NULL,
+                                NULL);
+    }
+#undef THREAD_POOL_SIZE_VAR
+
+    GucContext preload_guc_context = process_shared_preload_libraries_in_progress
+        ? PGC_POSTMASTER
+        : PGC_SUSET;
+
+#define BOOT_SCRIPT_FILE_VAR "plv8.boot_script_file"
+    guc_value = plv8_find_option(BOOT_SCRIPT_FILE_VAR);
+    if (guc_value != NULL) {
+        plv8_boot_script_file = plv8_string_option(guc_value);
+    } else {
+        DefineCustomStringVariable(BOOT_SCRIPT_FILE_VAR,
+                                   gettext_noop("JavaScript file compiled into a shared V8 startup snapshot during postmaster preload."),
+                                   NULL,
+                                   &plv8_boot_script_file,
+                                   NULL,
+                                   preload_guc_context, 0,
+                                   NULL,
+                                   NULL,
+                                   NULL);
+    }
+#undef BOOT_SCRIPT_FILE_VAR
+
+#define SNAPSHOT_FILE_VAR "plv8.snapshot_file"
+    guc_value = plv8_find_option(SNAPSHOT_FILE_VAR);
+    if (guc_value != NULL) {
+        plv8_snapshot_file = plv8_string_option(guc_value);
+    } else {
+        DefineCustomStringVariable(SNAPSHOT_FILE_VAR,
+                                   gettext_noop("Path to precompiled PL/v8 V8 startup snapshot file."),
+                                   NULL,
+                                   &plv8_snapshot_file,
+                                   NULL,
+                                   preload_guc_context, 0,
+                                   NULL,
+                                   NULL,
+                                   NULL);
+    }
+#undef SNAPSHOT_FILE_VAR
+
+#define WASM_CACHE_SIZE_VAR "plv8.wasm_cache_size"
+    guc_value = plv8_find_option(WASM_CACHE_SIZE_VAR);
+    if (guc_value != NULL) {
+        plv8_wasm_cache_size = plv8_int_option(guc_value);
+    } else {
+        DefineCustomIntVariable(WASM_CACHE_SIZE_VAR,
+                                gettext_noop("Maximum shared memory cache size (MB) for serialized WebAssembly native code."),
+                                NULL,
+                                &plv8_wasm_cache_size,
+                                64, 0, 2048,
+                                preload_guc_context, 0,
+                                NULL,
+                                NULL,
+                                NULL);
+    }
+#undef WASM_CACHE_SIZE_VAR
+
+	if (process_shared_preload_libraries_in_progress)
+	{
+		prev_shmem_request_hook = shmem_request_hook;
+		shmem_request_hook = plv8_shmem_request;
+		prev_shmem_startup_hook = shmem_startup_hook;
+		shmem_startup_hook = plv8_shmem_startup;
+
+		plv8_init_v8_engine();
+		if (plv8_snapshot_file != NULL && plv8_snapshot_file[0] != '\0')
+		{
+			LoadPlv8SnapshotFileInPreload(plv8_snapshot_file);
+		}
+		else if (plv8_boot_script_file != NULL && plv8_boot_script_file[0] != '\0')
+		{
+			BuildBootScriptSnapshotInPreload(plv8_boot_script_file);
+		}
+	}
+
 	RegisterXactCallback(plv8_xact_cb, NULL);
 
 	EmitWarningsOnPlaceholders("plv8");
 
-	if (plv8_icu_data == NULL) {
-		elog(DEBUG1, "no icu dir");
-		V8::InitializeICU();
-	} else {
-		elog(DEBUG1, "init icu data %s", plv8_icu_data);
-		V8::InitializeICU(plv8_icu_data);
+	if (!process_shared_preload_libraries_in_progress)
+	{
+		plv8_init_v8_engine();
 	}
-
-#if (V8_MAJOR_VERSION == 4 && V8_MINOR_VERSION >= 6) || V8_MAJOR_VERSION >= 5
-	V8::InitializeExternalStartupData("plv8");
-#endif
-	if (!v8_platform) {
-		v8_platform = platform::NewDefaultPlatform();
-	}
-
-	if (plv8_v8_flags != NULL) {
-		V8::SetFlagsFromString(plv8_v8_flags);
-	}
-
-	V8::InitializePlatform(v8_platform.get());
-
-	V8::Initialize();
 }
 
 static void
@@ -481,6 +1300,10 @@ plv8_xact_cb(XactEvent event, void *arg)
 		if (!env->recv.IsEmpty())
 		{
 			env->recv.Reset();
+		}
+		if (!env->context.IsEmpty())
+		{
+			env->context.Reset();
 		}
 		env = env->next;
 		/*
@@ -514,34 +1337,50 @@ plv8_new_exec_env(plv8_context *context)
 Datum
 plv8_call_handler(PG_FUNCTION_ARGS)
 {
-	plv8_context   *context = GetPlv8Context();
 	Oid		fn_oid = fcinfo->flinfo->fn_oid;
 	bool	is_trigger = CALLED_AS_TRIGGER(fcinfo);
 
 	try
 	{
+		plv8_context   *context = GetPlv8Context();
 		CurrentContextScope	context_scope(context);
 		Isolate::Scope	scope(context->isolate);
 		HandleScope	handle_scope(context->isolate);
 		plv8_proc	   *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
 
-		/*
-		 * The proc cached in fn_extra carries an execution environment that
-		 * was created for the context of whoever first called the function
-		 * through this FmgrInfo.  If the effective user has changed since
-		 * (a SECURITY DEFINER routine, SET ROLE) or that context is gone
-		 * (plv8_reset(), an isolate killed after running out of memory),
-		 * it refers to a different isolate than the one we just entered.
-		 * Running it there mixes isolates and crashes V8 (issue #606), so
-		 * rebuild it for the current context instead.  This is the same
-		 * thing that happens on the first call under a new user, when
-		 * plv8_get_proc() notices the user change and recompiles.
-		 */
-		if (proc && proc->xenv->context_id != context->id)
+		if (proc)
 		{
-			pfree(proc);
-			proc = NULL;
-			fcinfo->flinfo->fn_extra = NULL;
+			bool valid = (proc->xenv->context_id == context->id &&
+						  !proc->cache->function.IsEmpty());
+			if (valid)
+			{
+				PG_TRY();
+				{
+					if (proc->cache->tle_modules_fp != plv8_tle_modules_fingerprint())
+						valid = false;
+					if (valid && proc->cache->nhandlers > 0)
+					{
+						Oid stale_handler_oid = InvalidOid;
+						if (!plv8_cache_handlers_valid(proc->cache, NULL, &stale_handler_oid))
+						{
+							valid = false;
+							if (OidIsValid(stale_handler_oid))
+								plv8_cache_function_remove(stale_handler_oid);
+						}
+					}
+				}
+				PG_CATCH();
+				{
+					throw pg_error();
+				}
+				PG_END_TRY();
+			}
+			if (!valid)
+			{
+				pfree(proc);
+				proc = NULL;
+				fcinfo->flinfo->fn_extra = NULL;
+			}
 		}
 
 		if (!proc)
@@ -552,6 +1391,15 @@ plv8_call_handler(PG_FUNCTION_ARGS)
 		}
 
 		plv8_proc_cache *cache = proc->cache;
+		struct PassUserTypesScope {
+			bool prev;
+			explicit PassUserTypesScope(bool val) : prev(plv8_pass_user_types_as_bytes) {
+				plv8_pass_user_types_as_bytes = val;
+			}
+			~PassUserTypesScope() {
+				plv8_pass_user_types_as_bytes = prev;
+			}
+		} user_types_scope(cache->nhandlers > 0);
 
 		if (is_trigger)
 			return CallTrigger(fcinfo, proc->xenv);
@@ -562,39 +1410,55 @@ plv8_call_handler(PG_FUNCTION_ARGS)
 			return CallFunction(fcinfo, proc->xenv,
 						cache->nargs, proc->argtypes, &proc->rettype);
 	}
-	catch (js_error& e)	{ e.rethrow(); }
-	catch (pg_error& e)	{ e.rethrow(); }
+	catch (js_error& e)
+	{
+		if (current_context == nullptr &&
+			(plv8_isolate_oom_killed ||
+			 (current_allocator && current_allocator->hasOOM())))
+		{
+			KillIsolateAndAllContexts();
+		}
+		e.rethrow();
+	}
+	catch (pg_error& e)
+	{
+		if (current_context == nullptr &&
+			(plv8_isolate_oom_killed ||
+			 (current_allocator && current_allocator->hasOOM())))
+		{
+			KillIsolateAndAllContexts();
+		}
+		e.rethrow();
+	}
 
 	return (Datum) 0;	// keep compiler quiet
 }
 
 
-static void killPlv8Context(plv8_context *ctx) {
+static void
+DisposePlv8ContextHandles(plv8_context *ctx)
+{
 	HASH_SEQ_STATUS		status;
 	plv8_proc_cache*	cache;
 
-	// need to search and reset all the user functions which were created in the old context
-	hash_seq_init(&status, plv8_proc_cache_hash);
-	cache = (plv8_proc_cache *) hash_seq_search(&status);
-	while (cache != nullptr) {
-		if (cache->user_id == ctx->user_id) {
-			if (cache->prosrc)
-			{
-				pfree(cache->prosrc);
-				cache->prosrc = NULL;
-			}
-			cache->function.Reset();
-		}
+	if (plv8_proc_cache_hash)
+	{
+		hash_seq_init(&status, plv8_proc_cache_hash);
 		cache = (plv8_proc_cache *) hash_seq_search(&status);
+		while (cache != nullptr) {
+			if (cache->user_id == ctx->user_id) {
+				if (cache->prosrc)
+				{
+					pfree(cache->prosrc);
+					cache->prosrc = NULL;
+				}
+				cache->function.Reset();
+				cache->nhandlers = 0;
+			}
+			cache = (plv8_proc_cache *) hash_seq_search(&status);
+		}
 	}
 
-	/*
-	 * Execution environments created for this context hold global handles
-	 * in the isolate we are about to dispose of.  Release them now, or
-	 * plv8_xact_cb would try to at the end of the transaction, on a dead
-	 * isolate.  The call handler will notice the context id mismatch and
-	 * rebuild any of them that is still referenced from a fn_extra.
-	 */
 	for (plv8_exec_env *env = exec_env_head; env != NULL; env = env->next)
 	{
 		if (env->context_id == ctx->id)
@@ -604,8 +1468,86 @@ static void killPlv8Context(plv8_context *ctx) {
 		}
 	}
 
-	ctx->isolate->Dispose();
-	delete ctx->array_buffer_allocator;
+	for (auto &tuple : ctx->unhandled_promises)
+	{
+		std::get<0>(tuple).Reset();
+		std::get<1>(tuple).Reset();
+		std::get<2>(tuple).Reset();
+	}
+	ctx->unhandled_promises.clear();
+	ctx->unhandled_promises.~vector();
+
+	for (auto &kv : ctx->tle_module_map)
+		kv.second.Reset();
+	ctx->tle_module_map.clear();
+	ctx->tle_module_id_to_spec.clear();
+	ctx->tle_module_map.~unordered_map();
+	ctx->tle_module_id_to_spec.~unordered_map();
+
+	ctx->context.Reset();
+	ctx->compile_context.Reset();
+	ctx->recv_templ.Reset();
+	ctx->plan_template.Reset();
+	ctx->cursor_template.Reset();
+	ctx->window_template.Reset();
+	ctx->microtask_queue = nullptr;
+}
+
+static void
+KillIsolateAndAllContexts(void)
+{
+	for (size_t i = 0; i < ContextVector.size(); i++)
+	{
+		plv8_context *ctx = ContextVector[i];
+		if (ctx != nullptr)
+		{
+			if (current_context == ctx)
+				current_context = nullptr;
+			DisposePlv8ContextHandles(ctx);
+			pfree(ctx);
+		}
+	}
+	ContextVector.clear();
+
+	if (plv8_proc_cache_hash)
+	{
+		HASH_SEQ_STATUS status;
+		plv8_proc_cache *cache;
+		hash_seq_init(&status, plv8_proc_cache_hash);
+		while ((cache = (plv8_proc_cache *) hash_seq_search(&status)) != nullptr)
+		{
+			if (cache->prosrc)
+			{
+				pfree(cache->prosrc);
+				cache->prosrc = NULL;
+			}
+			cache->function.Reset();
+			cache->nhandlers = 0;
+		}
+	}
+
+	for (plv8_exec_env *env = exec_env_head; env != NULL; env = env->next)
+	{
+		env->recv.Reset();
+		env->context.Reset();
+	}
+
+	if (current_isolate != nullptr)
+	{
+		while (current_isolate->IsInUse())
+			current_isolate->Exit();
+		current_isolate->Dispose();
+		current_isolate = nullptr;
+	}
+
+	if (current_allocator != nullptr)
+	{
+		delete current_allocator;
+		current_allocator = nullptr;
+	}
+
+	plv8_isolate_oom_killed = false;
+	plv8_last_heap_size = 0;
 }
 
 Datum
@@ -618,9 +1560,11 @@ plv8_reset(PG_FUNCTION_ARGS)
 	{
 		if (ContextVector[i]->user_id == user_id)
 		{
-			plv8_context * context = ContextVector[i];
+			plv8_context *context = ContextVector[i];
 			ContextVector.erase(ContextVector.begin() + i);
-			killPlv8Context(context);
+			if (current_context == context)
+				current_context = nullptr;
+			DisposePlv8ContextHandles(context);
 			pfree(context);
 			break;
 		}
@@ -631,73 +1575,487 @@ plv8_reset(PG_FUNCTION_ARGS)
 Datum
 plv8_info(PG_FUNCTION_ARGS)
 {
-	unsigned long		i;
-	unsigned long 		size = ContextVector.size();
-	char 				**infos = nullptr;
-	size_t 				*lengths = nullptr;
-	size_t 				total_length = 3; // length of "[]\0"
+	PLV8_ASSERT_MAIN_PG_THREAD();
 
-	MemoryContext execution_context, old_context;
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to call plv8_info")));
 
-	if (size == 0)
+	if (ContextVector.empty())
 	{
-		PG_RETURN_NULL();
-	}
-
-  execution_context = AllocSetContextCreate(CurrentMemoryContext,
-                                          "plv8_info Context",
-                                          ALLOCSET_SMALL_SIZES);
-
-	old_context = MemoryContextSwitchTo(execution_context);
-
-	infos = (char **) palloc(sizeof(char *) * size);
-	lengths = (size_t *) palloc(sizeof(size_t) * size);
-
-	for (i = 0; i < size; i++)
-	{
-		Isolate 	   	   *isolate = ContextVector[i]->isolate;
-		Isolate::Scope		scope(isolate);
-		HandleScope			handle_scope(isolate);
-		Local<Context>		context = ContextVector[i]->localContext();
-		Context::Scope		context_scope(context);
-		JSONObject 			JSON;
-		Local<v8::Value>	result;
-		Local<v8::Object>   obj = v8::Object::New(isolate);
-
-		char 			   *username = GetUserNameFromId(ContextVector[i]->user_id, false);
-
-		obj->Set(context, v8::String::NewFromUtf8Literal(isolate, "user"),
-           v8::String::NewFromUtf8(isolate, username).ToLocalChecked()).Check();
-		GetMemoryInfo(obj);
-
-		result = JSON.Stringify(obj);
-		CString str(result);
-
-		infos[i] = pstrdup(str.str());
-		lengths[i] = strlen(infos[i]);
-		total_length += lengths[i] + 1; // add 1 byte for ','
-	}
-
-	char *out = (char *) palloc0(total_length);
-	out[0] = '[';
-	size_t current = 0;
-	for (i = 0; i < size; i++)
-	{
-		++current;
-		strcpy(out + current, infos[i]);
-		current += lengths[i];
-		if (i != size - 1)
+		try
 		{
-			out[current] = ',';
+			(void) GetPlv8Context();
+		}
+		catch (js_error& e)	{ e.rethrow(); }
+		catch (pg_error& e)	{ e.rethrow(); }
+	}
+
+	uint64 wasm_bytes = 0, wasm_entries = 0, wasm_hits = 0, wasm_misses = 0, wasm_stores = 0;
+	bool wasm_cache_enabled = (plv8_shared_state != nullptr && plv8_wasm_cache_size > 0);
+	if (wasm_cache_enabled)
+	{
+		wasm_bytes = pg_atomic_read_u64(&plv8_shared_state->bytes_used);
+		wasm_entries = pg_atomic_read_u64(&plv8_shared_state->entries_count);
+		wasm_hits = pg_atomic_read_u64(&plv8_shared_state->hits);
+		wasm_misses = pg_atomic_read_u64(&plv8_shared_state->misses);
+		wasm_stores = pg_atomic_read_u64(&plv8_shared_state->stores);
+	}
+
+	bool all_same_isolate = true;
+	for (size_t i = 0; i < ContextVector.size(); i++)
+	{
+		if (ContextVector[i]->isolate != current_isolate)
+			all_same_isolate = false;
+	}
+
+	size_t total_heap = 0, used_heap = 0, ext_mem = 0;
+	if (current_isolate != nullptr)
+	{
+		HeapStatistics v8_heap_stats;
+		current_isolate->GetHeapStatistics(&v8_heap_stats);
+		total_heap = v8_heap_stats.total_heap_size();
+		used_heap = v8_heap_stats.used_heap_size();
+		ext_mem = v8_heap_stats.external_memory();
+	}
+
+	bool snap_loaded = (plv8_active_snapshot_blob.data != nullptr &&
+						plv8_active_snapshot_blob.raw_size > 0);
+
+	StringInfoData roles_buf;
+	initStringInfo(&roles_buf);
+	appendStringInfoChar(&roles_buf, '[');
+	for (size_t i = 0; i < ContextVector.size(); i++)
+	{
+		if (i > 0)
+			appendStringInfoChar(&roles_buf, ',');
+		char *username = GetUserNameFromId(ContextVector[i]->user_id, false);
+		appendStringInfo(&roles_buf,
+						 "{\"user\":\"%s\",\"total_heap_size\":%zu,\"used_heap_size\":%zu,\"external_memory\":%zu}",
+						 username ? username : "unknown",
+						 total_heap, used_heap, ext_mem);
+	}
+	appendStringInfoChar(&roles_buf, ']');
+
+	StringInfoData buf;
+	initStringInfo(&buf);
+	appendStringInfo(
+		&buf,
+		"{\"backend_pid\":%d,"
+		"\"single_isolate\":%s,"
+		"\"isolate_shared\":%s,"
+		"\"active_role_contexts\":%zu,"
+		"\"contexts\":%zu,"
+		"\"roles\":%s,"
+		"\"total_heap_size\":%zu,"
+		"\"used_heap_size\":%zu,"
+		"\"external_memory\":%zu,"
+		"\"thread_pool_size\":%d,"
+		"\"active_worker_threads\":%d,"
+		"\"snapshot_active\":%s,"
+		"\"snapshot_source\":\"%s\","
+		"\"snapshot_blob_bytes\":%d,"
+		"\"snapshot_fn_count\":%zu,"
+		"\"snapshot_functions_restored\":%llu,"
+		"\"snapshot\":{\"loaded\":%s,\"bytes\":%d,\"functions_count\":%zu,\"functions_restored\":%llu,\"source\":\"%s\"},"
+		"\"wasm_cache\":{\"enabled\":%s,\"entries\":%llu,\"bytes_used\":%llu,\"hits\":%llu,\"misses\":%llu,\"stores\":%llu}}",
+		(int) getpid(),
+		all_same_isolate ? "true" : "false",
+		all_same_isolate ? "true" : "false",
+		ContextVector.size(),
+		ContextVector.size(),
+		roles_buf.data,
+		total_heap,
+		used_heap,
+		ext_mem,
+		plv8_thread_pool_size,
+		v8_platform ? v8_platform->ActiveWorkerCount() : 0,
+		snap_loaded ? "true" : "false",
+		plv8_snapshot_source,
+		plv8_active_snapshot_blob.raw_size,
+		plv8_snapshot_slots.size(),
+		(unsigned long long) plv8_snapshot_functions_restored,
+		snap_loaded ? "true" : "false",
+		plv8_active_snapshot_blob.raw_size,
+		plv8_snapshot_slots.size(),
+		(unsigned long long) plv8_snapshot_functions_restored,
+		plv8_snapshot_source,
+		wasm_cache_enabled ? "true" : "false",
+		(unsigned long long) wasm_entries,
+		(unsigned long long) wasm_bytes,
+		(unsigned long long) wasm_hits,
+		(unsigned long long) wasm_misses,
+		(unsigned long long) wasm_stores);
+
+	pfree(roles_buf.data);
+	Datum res = DirectFunctionCall1(jsonb_in, CStringGetDatum(buf.data));
+	pfree(buf.data);
+	PG_RETURN_DATUM(res);
+}
+
+Datum
+plv8_save_snapshot(PG_FUNCTION_ARGS)
+{
+	PLV8_ASSERT_MAIN_PG_THREAD();
+
+	if (!superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to call plv8_save_snapshot")));
+
+	if (PG_ARGISNULL(0))
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("output_path must not be null")));
+
+	char *out_path = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	std::vector<Oid> target_oids;
+
+	if (PG_NARGS() >= 2 && !PG_ARGISNULL(1))
+	{
+		ArrayType *arr = PG_GETARG_ARRAYTYPE_P(1);
+		Datum *elems = nullptr;
+		bool *nulls = nullptr;
+		int nelems = 0;
+		deconstruct_array(arr, REGPROCEDUREOID, sizeof(Oid), true, TYPALIGN_INT,
+						  &elems, &nulls, &nelems);
+		for (int i = 0; i < nelems; i++)
+		{
+			if (!nulls[i])
+			{
+				Oid fn_oid = DatumGetObjectId(elems[i]);
+				if (OidIsValid(fn_oid))
+					target_oids.push_back(fn_oid);
+			}
 		}
 	}
 
-	out[current] = ']';
-	out[current + 1] = '\0';
+	NameData plv8_lang_name = {"plv8"};
+	HeapTuple langTup = SearchSysCache1(LANGNAME, NameGetDatum(&plv8_lang_name));
+	if (!HeapTupleIsValid(langTup))
+		ereport(ERROR, (errmsg("language \"plv8\" does not exist")));
+	Oid plv8_lang_oid = ((Form_pg_language) GETSTRUCT(langTup))->oid;
+	ReleaseSysCache(langTup);
 
-	MemoryContextSwitchTo(old_context);
+	plv8_init_v8_engine();
 
-	return CStringGetTextDatum(out);
+	struct BypassSnapshotScope
+	{
+		bool prev;
+		BypassSnapshotScope() : prev(plv8_bypass_snapshot_restore)
+		{
+			plv8_bypass_snapshot_restore = true;
+		}
+		~BypassSnapshotScope()
+		{
+			plv8_bypass_snapshot_restore = prev;
+		}
+	} bypass_scope;
+
+	struct PendingSnapFn
+	{
+		Plv8SnapshotSlot slot;
+		std::string proname;
+		std::string wrapped_src;
+	};
+	std::vector<PendingSnapFn> pending_fns;
+	int prewarmed_wasm_fns = 0;
+
+	for (size_t idx = 0; idx < target_oids.size(); idx++)
+	{
+		Oid fn_oid = target_oids[idx];
+		HeapTuple procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fn_oid));
+		if (!HeapTupleIsValid(procTup))
+			ereport(ERROR, (errmsg("cache lookup failed for function %u", fn_oid)));
+
+		Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
+		Oid prolang = procStruct->prolang;
+		if (!plv8_is_js_language(prolang))
+		{
+			ReleaseSysCache(procTup);
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("function %u is not a PL/v8 or PL/<any> JS function", fn_oid)));
+		}
+
+		bool isnull = false;
+		Datum prosrc_datum = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_prosrc, &isnull);
+		if (isnull)
+		{
+			ReleaseSysCache(procTup);
+			ereport(ERROR, (errmsg("null prosrc for function %u", fn_oid)));
+		}
+
+		char proname[NAMEDATALEN];
+		strlcpy(proname, NameStr(procStruct->proname), NAMEDATALEN);
+		TransactionId fn_xmin = HeapTupleHeaderGetXmin(procTup->t_data);
+		ItemPointerData fn_tid = procTup->t_self;
+		bool is_trigger = (procStruct->prorettype == TRIGGEROID);
+
+		Oid *argtypes = nullptr;
+		char **argnames = nullptr;
+		char *argmodes = nullptr;
+		int nargs = get_func_arg_info(procTup, &argtypes, &argnames, &argmodes);
+		char *prosrc_cstr = TextDatumGetCString(prosrc_datum);
+		ReleaseSysCache(procTup);
+
+		int inargs = 0;
+		for (int i = 0; i < nargs; i++)
+		{
+			char argmode = argmodes ? argmodes[i] : PROARGMODE_IN;
+			if (argmode == PROARGMODE_IN ||
+				argmode == PROARGMODE_INOUT ||
+				argmode == PROARGMODE_VARIADIC)
+			{
+				if (argnames)
+					argnames[inargs] = argnames[i];
+				inargs++;
+			}
+		}
+
+		PendingSnapFn item;
+		memset(&item.slot, 0, sizeof(item.slot));
+		item.slot.fn_oid = fn_oid;
+		item.slot.fn_xmin = fn_xmin;
+		item.slot.fn_tid = fn_tid;
+		item.proname = proname;
+
+		if (prolang != plv8_lang_oid)
+		{
+			pfree(prosrc_cstr);
+			prosrc_cstr = nullptr;
+			try
+			{
+				plv8_context *ctx = GetPlv8Context();
+				CurrentContextScope context_scope(ctx);
+				Isolate::Scope scope(ctx->isolate);
+				HandleScope handle_scope(ctx->isolate);
+				if (plv8_proc_cache_hash != NULL)
+					plv8_cache_function_remove(fn_oid);
+				plv8_proc *compiled_proc = Compile(fn_oid, NULL, false, is_trigger);
+				if (compiled_proc && compiled_proc->cache && compiled_proc->cache->prosrc)
+				{
+					prosrc_cstr = pstrdup(compiled_proc->cache->prosrc);
+					item.slot.nhandlers = compiled_proc->cache->nhandlers;
+					if (item.slot.nhandlers > 0)
+					{
+						memcpy(item.slot.handlers, compiled_proc->cache->handlers,
+							   sizeof(plv8_handler_dep) * item.slot.nhandlers);
+					}
+					prewarmed_wasm_fns++;
+				}
+			}
+			catch (js_error& e)	{ e.rethrow(); }
+			catch (pg_error& e)	{ e.rethrow(); }
+
+			if (prosrc_cstr == nullptr)
+				ereport(ERROR, (errmsg("failed to transpile function %u for snapshot", fn_oid)));
+		}
+
+		StringInfoData src;
+		initStringInfo(&src);
+		appendStringInfo(&src, "(function (");
+		if (is_trigger)
+		{
+			appendStringInfo(&src,
+				"NEW, OLD, TG_NAME, TG_WHEN, TG_LEVEL, TG_OP, "
+				"TG_RELID, TG_TABLE_NAME, TG_TABLE_SCHEMA, TG_ARGV");
+		}
+		else
+		{
+			for (int i = 0; i < inargs; i++)
+			{
+				if (i > 0)
+					appendStringInfoChar(&src, ',');
+				if (argnames && argnames[i])
+					appendStringInfoString(&src, argnames[i]);
+				else
+					appendStringInfo(&src, "$%d", i + 1);
+			}
+		}
+		appendStringInfo(&src, "){\n%s\n})", prosrc_cstr);
+		pfree(prosrc_cstr);
+
+		item.wrapped_src.assign(src.data, src.len);
+		pfree(src.data);
+		pending_fns.push_back(std::move(item));
+	}
+
+	std::vector<Plv8SnapshotSlot> compiled_slots;
+	v8::StartupData blob = { nullptr, 0 };
+
+	{
+		ScopedSignalBlockerForV8Workers sig_blocker;
+		v8::ArrayBuffer::Allocator *snap_allocator =
+			v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+		{
+			v8::Isolate::CreateParams create_params;
+			create_params.array_buffer_allocator = snap_allocator;
+			create_params.external_references = plv8_external_references;
+			v8::SnapshotCreator creator(create_params);
+			v8::Isolate *snap_isolate = creator.GetIsolate();
+			snap_isolate->SetHostImportModuleDynamicallyCallback(plv8_HostImportModuleDynamicallyCallback);
+			snap_isolate->SetHostInitializeImportMetaObjectCallback(plv8_HostInitializeImportMetaObjectCallback);
+			{
+				v8::HandleScope handle_scope(snap_isolate);
+				v8::Local<v8::Context> default_ctx = v8::Context::New(snap_isolate);
+				creator.SetDefaultContext(default_ctx);
+
+				v8::Local<v8::ObjectTemplate> global = GetGlobalObjectTemplate(snap_isolate);
+				v8::Local<v8::Context> context = v8::Context::New(snap_isolate, nullptr, global);
+				{
+					v8::Context::Scope context_scope(context);
+
+					if (plv8_boot_script_file != NULL && plv8_boot_script_file[0] != '\0')
+					{
+						int bfd = open(plv8_boot_script_file, O_RDONLY);
+						if (bfd >= 0)
+						{
+							struct stat bst;
+							if (fstat(bfd, &bst) == 0 && bst.st_size > 0)
+							{
+								std::string bsrc((size_t) bst.st_size, '\0');
+								if (read(bfd, &bsrc[0], (size_t) bst.st_size) == bst.st_size)
+								{
+									v8::TryCatch tc(snap_isolate);
+									v8::Local<v8::String> s = v8::String::NewFromUtf8(
+										snap_isolate, bsrc.data(),
+										v8::NewStringType::kNormal,
+										(int) bsrc.size()).ToLocalChecked();
+									v8::Local<v8::Script> sc;
+									if (v8::Script::Compile(context, s).ToLocal(&sc))
+									{
+										v8::Local<v8::Value> unused_res;
+										if (!sc->Run(context).ToLocal(&unused_res)) {}
+									}
+								}
+							}
+							close(bfd);
+						}
+					}
+
+					for (size_t idx = 0; idx < pending_fns.size(); idx++)
+					{
+						const PendingSnapFn &item = pending_fns[idx];
+						v8::TryCatch tc(snap_isolate);
+						v8::Local<v8::String> fn_name = v8::String::NewFromUtf8(
+							snap_isolate, item.proname.c_str()).ToLocalChecked();
+						v8::Local<v8::String> fn_source = v8::String::NewFromUtf8(
+							snap_isolate, item.wrapped_src.data(),
+							v8::NewStringType::kNormal,
+							(int) item.wrapped_src.size()).ToLocalChecked();
+
+						v8::ScriptOrigin origin(fn_name);
+						v8::Local<v8::Script> script;
+						v8::Local<v8::Value> fn_val;
+						if (!v8::Script::Compile(context, fn_source, &origin).ToLocal(&script) ||
+							!script->Run(context).ToLocal(&fn_val) ||
+							!fn_val->IsFunction())
+						{
+							ereport(ERROR,
+									(errmsg("failed to compile function \"%s\" (%u) into V8 snapshot",
+											item.proname.c_str(), item.slot.fn_oid)));
+						}
+
+						char prop_buf[64];
+						snprintf(prop_buf, sizeof(prop_buf), "__plv8_snap_fn_%zu",
+								 compiled_slots.size());
+						v8::Local<v8::String> prop_name = v8::String::NewFromUtf8(
+							snap_isolate, prop_buf,
+							v8::NewStringType::kInternalized).ToLocalChecked();
+						context->Global()->DefineOwnProperty(
+							context, prop_name, fn_val,
+							static_cast<v8::PropertyAttribute>(v8::DontEnum)).Check();
+
+						compiled_slots.push_back(item.slot);
+					}
+				}
+				creator.AddContext(context);
+			}
+			blob = creator.CreateBlob(
+				v8::SnapshotCreator::FunctionCodeHandling::kKeep);
+		}
+		delete snap_allocator;
+	}
+
+	if (blob.data == nullptr || blob.raw_size <= 0)
+		ereport(ERROR, (errmsg("v8::SnapshotCreator::CreateBlob() failed")));
+
+	std::string tmp_path = std::string(out_path) + ".tmp";
+	int fd = open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0)
+	{
+		delete[] blob.data;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not open snapshot output file \"%s\": %m",
+						tmp_path.c_str())));
+	}
+
+	Plv8SnapshotHeader hdr;
+	memset(&hdr, 0, sizeof(hdr));
+	memcpy(hdr.magic, PLV8_SNAPSHOT_MAGIC, 8);
+	hdr.version = PLV8_SNAPSHOT_VERSION;
+	hdr.num_functions = static_cast<uint32>(compiled_slots.size());
+	hdr.blob_size = static_cast<uint64>(blob.raw_size);
+
+	bool write_ok = true;
+	if (write(fd, &hdr, sizeof(hdr)) != (ssize_t) sizeof(hdr))
+		write_ok = false;
+
+	if (write_ok && !compiled_slots.empty())
+	{
+		size_t slots_bytes = compiled_slots.size() * sizeof(Plv8SnapshotSlot);
+		if (write(fd, compiled_slots.data(), slots_bytes) != (ssize_t) slots_bytes)
+			write_ok = false;
+	}
+
+	if (write_ok)
+	{
+		const char *p = blob.data;
+		size_t rem = (size_t) blob.raw_size;
+		while (rem > 0)
+		{
+			ssize_t w = write(fd, p, rem);
+			if (w <= 0)
+			{
+				write_ok = false;
+				break;
+			}
+			p += w;
+			rem -= (size_t) w;
+		}
+	}
+
+	int raw_size = blob.raw_size;
+	delete[] blob.data;
+	close(fd);
+
+	if (!write_ok || rename(tmp_path.c_str(), out_path) != 0)
+	{
+		unlink(tmp_path.c_str());
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("failed to write snapshot file \"%s\"", out_path)));
+	}
+
+	StringInfoData buf;
+	initStringInfo(&buf);
+	appendStringInfo(&buf,
+					 "{\"status\":\"ok\",\"path\":\"%s\",\"bytes\":%d,\"bytes_written\":%zu,\"functions_compiled\":%zu,\"snapshotted_js_functions\":%zu,\"prewarmed_wasm_functions\":%d,\"v8_version\":\"%s\"}",
+					 out_path,
+					 raw_size,
+					 sizeof(hdr) + compiled_slots.size() * sizeof(Plv8SnapshotSlot) + (size_t) raw_size,
+					 compiled_slots.size(),
+					 compiled_slots.size(),
+					 prewarmed_wasm_fns,
+					 v8::V8::GetVersion());
+
+	Datum jsonb_res = DirectFunctionCall1(jsonb_in, CStringGetDatum(buf.data));
+	pfree(buf.data);
+	pfree(out_path);
+	PG_RETURN_DATUM(jsonb_res);
 }
 
 Datum
@@ -713,7 +2071,10 @@ plv8_inline_handler(PG_FUNCTION_ARGS)
 		CurrentContextScope	context_scope(context);
 		Isolate::Scope		scope(context->isolate);
 		HandleScope			handle_scope(context->isolate);
-		char			   *source_text = codeblock->source_text;
+		char			   *source_text = plv8_transpile_src(
+										codeblock->source_text,
+										codeblock->langOid,
+										NULL, NULL, NULL);
 
 		Local<Function>	function = CompileFunction(context,
 										NULL, 0, NULL,
@@ -721,76 +2082,101 @@ plv8_inline_handler(PG_FUNCTION_ARGS)
 		plv8_exec_env	   *xenv = CreateExecEnv(function, context);
 		return CallFunction(fcinfo, xenv, 0, NULL, NULL);
 	}
-	catch (js_error& e)	{ e.rethrow(); }
-	catch (pg_error& e)	{ e.rethrow(); }
+	catch (js_error& e)
+	{
+		if (current_context == nullptr &&
+			(plv8_isolate_oom_killed ||
+			 (current_allocator && current_allocator->hasOOM())))
+		{
+			KillIsolateAndAllContexts();
+		}
+		e.rethrow();
+	}
+	catch (pg_error& e)
+	{
+		if (current_context == nullptr &&
+			(plv8_isolate_oom_killed ||
+			 (current_allocator && current_allocator->hasOOM())))
+		{
+			KillIsolateAndAllContexts();
+		}
+		e.rethrow();
+	}
 
 	return (Datum) 0;	// keep compiler quiet
 }
 
-#ifdef EXECUTION_TIMEOUT
-/*
- * Breakout -- break out of a Call, with a thread
- *
- * This function breaks out of a javascript execution context.
- */
-#ifdef _MSC_VER // windows
-DWORD WINAPI
-Breakout (LPVOID lpParam)
+static TimeoutId plv8_timeout_id = USER_TIMEOUT;
+static bool plv8_timeout_registered = false;
+static volatile sig_atomic_t plv8_in_js_execution = 0;
+static volatile sig_atomic_t plv8_timeout_expired = 0;
+static TimestampTz plv8_deadline_tz = 0;
+
+static void
+plv8_timeout_handler(void)
 {
-	Isolate *isolate = (Isolate *) lpParam;
-	Sleep(plv8_execution_timeout * 1000);
-	isolate->TerminateExecution();
+	if (!plv8_in_js_execution || current_isolate == nullptr)
+		return;
 
-	return 0;
-}
-#else // posix
-void *
-Breakout (void *d)
-{
-	auto *isolate = (Isolate *) d;
-	sleep(plv8_execution_timeout);
-	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	isolate->TerminateExecution();
+	if (InterruptPending || QueryCancelPending || ProcDiePending)
+	{
+		if (current_context != nullptr)
+			current_context->interrupted = true;
+		current_isolate->TerminateExecution();
+		disable_timeout(plv8_timeout_id, false);
+		return;
+	}
 
-	return NULL;
-}
-#endif
-#endif
-void *int_handler = NULL;
-void *term_handler = NULL;
-void *abt_handler = NULL;
-
-/*
- * signal handler
- *
- * This function kills the execution of the v8 process if a signal is called
- */
-void
-signal_handler (int sig) {
-	elog(DEBUG1, "cancelling execution");
-	auto running_context = GetPlv8Context();
-	running_context->interrupted = true;
-	running_context->isolate->TerminateExecution();
-
-	// call the old handler if it exists
-	switch(sig) {
-		case SIGINT:
-			if (int_handler != NULL) {
-				((void (*)(int)) int_handler)(sig);
-			}
-			break;
-		case SIGTERM:
-			if (term_handler != NULL) {
-				((void (*)(int)) term_handler)(sig);
-			}
-			break;
-		case SIGABRT:
-			if (abt_handler != NULL) {
-				((void (*)(int)) abt_handler)(sig);
-			}
-			break;
+	if (plv8_deadline_tz > 0 && GetCurrentTimestamp() >= plv8_deadline_tz)
+	{
+		plv8_timeout_expired = 1;
+		current_isolate->TerminateExecution();
+		disable_timeout(plv8_timeout_id, false);
 	}
 }
+
+static void
+plv8_ensure_timeout_registered(void)
+{
+	if (!plv8_timeout_registered)
+	{
+		plv8_timeout_id = RegisterTimeout(USER_TIMEOUT, plv8_timeout_handler);
+		plv8_timeout_registered = true;
+	}
+}
+
+class Plv8ExecutionTimeoutGuard
+{
+private:
+	bool outermost_;
+
+public:
+	Plv8ExecutionTimeoutGuard()
+	{
+		outermost_ = (plv8_in_js_execution == 0);
+		if (outermost_)
+		{
+			plv8_ensure_timeout_registered();
+			plv8_timeout_expired = 0;
+			int timeout_sec = plv8_execution_timeout > 0 ? plv8_execution_timeout : 300;
+			plv8_deadline_tz = TimestampTzPlusMilliseconds(
+				GetCurrentTimestamp(), (int64) timeout_sec * 1000LL);
+			plv8_in_js_execution = 1;
+			enable_timeout_every(plv8_timeout_id,
+								 TimestampTzPlusMilliseconds(GetCurrentTimestamp(), 25),
+								 25);
+		}
+	}
+
+	~Plv8ExecutionTimeoutGuard()
+	{
+		if (outermost_)
+		{
+			plv8_in_js_execution = 0;
+			disable_timeout(plv8_timeout_id, false);
+		}
+	}
+};
 
 /*
  * DoCall -- Call a JS function with SPI support.
@@ -801,7 +2187,7 @@ static Local<v8::Value>
 DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 	int nargs, Handle<v8::Value> args[], bool nonatomic)
 {
-	Isolate 	   *isolate = ctx->GetIsolate();
+	Isolate 	   *isolate = Isolate::GetCurrent();
 	TryCatch		try_catch(isolate);
 
 	if (isolate->IsExecutionTerminating() || current_context->interrupted) {
@@ -813,71 +2199,61 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 	if (SPI_connect_ext(nonatomic ? SPI_OPT_NONATOMIC : 0) != SPI_OK_CONNECT)
 		throw js_error("could not connect to SPI manager");
 
-	// set up the signal handlers
-	if (int_handler == NULL) {
-		int_handler = (void *) signal(SIGINT, signal_handler);
+	MaybeLocal<v8::Value> result;
+	{
+		Plv8ExecutionTimeoutGuard timeout_guard;
+		result = fn->Call(ctx, receiver, nargs, args);
+		if (!result.IsEmpty() && current_context && current_context->microtask_queue)
+		{
+			current_context->microtask_queue->PerformCheckpoint(isolate);
+		}
 	}
-
-	if (term_handler == NULL) {
-		term_handler = (void *) signal(SIGTERM, signal_handler);
-	}
-
-	if (abt_handler == NULL) {
-		abt_handler = (void *) signal(SIGABRT, signal_handler);
-	}
-
-#ifdef EXECUTION_TIMEOUT
-	bool timeout = false;
-#ifdef _MSC_VER // windows
-	HANDLE  hThread;
-	DWORD dwThreadId;
-	hThread = CreateThread(NULL, 0, Breakout, isolate, 0, &dwThreadId);
-#else
-	pthread_t breakout_thread;
-	// set up the thread to break out the execution if needed
-	pthread_create(&breakout_thread, NULL, Breakout, isolate);
-#endif
-#endif
-
-	try {
-	MaybeLocal<v8::Value> result = fn->Call(ctx, receiver, nargs, args);
 
 	int	status = SPI_finish();
-
-#ifdef EXECUTION_TIMEOUT
-#ifdef _MSC_VER
-	if (TerminateThread(hThread, NULL) == 0) {
-		timeout = true;
-	}
-#else
-	void *thread_result;
-	pthread_cancel(breakout_thread);
-	pthread_join(breakout_thread, &thread_result);
-	if (thread_result == NULL) {
-		timeout = true;
-	}
-#endif
-#endif
-
-	// reset signal handlers
-	signal(SIGINT, (void (*)(int)) int_handler);
-	signal(SIGTERM, (void (*)(int)) term_handler);
-	signal(SIGABRT, (void (*)(int)) abt_handler);
 
 	HandleUnhandledPromiseRejections();
 
 	if (result.IsEmpty()) {
-		if (isolate->IsExecutionTerminating() || current_context->interrupted) {
+		bool was_interrupted = (current_context && current_context->interrupted) ||
+							   QueryCancelPending || ProcDiePending;
+		bool was_timeout = (plv8_timeout_expired != 0);
+
+		if (isolate->IsExecutionTerminating() || was_interrupted || was_timeout) {
 			isolate->CancelTerminateExecution();
-			if (current_context->interrupted) {
+			if (current_context)
 				current_context->interrupted = false;
+			plv8_timeout_expired = 0;
+
+			if (was_interrupted) {
+				PG_TRY();
+				{
+					CHECK_FOR_INTERRUPTS();
+				}
+				PG_CATCH();
+				{
+					throw pg_error();
+				}
+				PG_END_TRY();
 				throw js_error("Signal caught: interrupted");
 			}
-#ifdef EXECUTION_TIMEOUT
-			if (timeout) {
+			if (was_timeout) {
 				throw js_error("execution timeout exceeded");
 			}
-#endif
+			if (current_context)
+				current_context->is_dead = true;
+			plv8_isolate_oom_killed = true;
+			throw js_error("Out of memory error");
+		}
+		if (plv8_isolate_oom_killed ||
+			(current_allocator && current_allocator->hasOOM()))
+		{
+			if (current_context)
+				current_context->is_dead = true;
+			plv8_isolate_oom_killed = true;
+			if (try_catch.HasCaught())
+			{
+				throw js_error(try_catch);
+			}
 			throw js_error("Out of memory error");
 		}
 		throw js_error(try_catch);
@@ -887,11 +2263,6 @@ DoCall(Local<Context> ctx, Handle<Function> fn, Handle<Object> receiver,
 		throw js_error(FormatSPIStatus(status));
 
 	return result.ToLocalChecked();
-	} catch (int err) {
-		elog(NOTICE, "Error caught");
-	}
-
-	return Local<v8::Value>::New(isolate, Null(isolate));
 }
 
 static Datum
@@ -901,20 +2272,6 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	Local<Context>		context = xenv->localContext();
 	Context::Scope		context_scope(context);
 	Handle<v8::Value>	args[FUNC_MAX_ARGS];
-	Oid fn_oid = fcinfo->flinfo->fn_oid;
-
- HeapTuple proctuple =
-      SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
-
-  Oid retoid;
-  Form_pg_proc pg_proc_entry = (Form_pg_proc)GETSTRUCT(proctuple);
-
-  if (fcinfo && IsPolymorphicType(pg_proc_entry->prorettype)) {
-    retoid = get_fn_expr_rettype(fcinfo->flinfo);
-  } else {
-    retoid = pg_proc_entry->prorettype;
-  }
-  ReleaseSysCache(proctuple);
 
 	bool nonatomic = fcinfo->context &&
 		IsA(fcinfo->context, CallContext) &&
@@ -944,31 +2301,42 @@ CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	}
 
 	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
-	Local<Function>		fn =
-		Local<Function>::Cast(recv->GetInternalField(0));
+	Local<Function>		fn = recv->GetInternalField(0).As<Function>();
 	
 	Local<v8::Value> result =
 		DoCall(context, fn, recv, nargs, args, nonatomic);
 
+	Oid retoid = rettype ? rettype->typid : VOIDOID;
 	if (retoid == RECORDOID)
-  {
-    Oid calltype;
-    TupleDesc tupdesc;
-    get_call_result_type(fcinfo, &calltype, &tupdesc);
-    if (tupdesc == NULL) {
-      return ToDatum(result, &fcinfo->isnull, rettype);
-    }
-    plv8_type type;
-    plv8_fill_type(&type, calltype);
-    return ToRecordDatum(result, &fcinfo->isnull, &type, tupdesc);
-  }
-  else
-  {
-    if (rettype)
-      return ToDatum(result, &fcinfo->isnull, rettype);
-    else
-      PG_RETURN_VOID( );
-  }
+	{
+		Oid calltype;
+		TupleDesc tupdesc;
+		plv8_type type;
+
+		PG_TRY();
+		{
+			get_call_result_type(fcinfo, &calltype, &tupdesc);
+			if (tupdesc != NULL)
+				plv8_fill_type(&type, calltype);
+		}
+		PG_CATCH();
+		{
+			throw pg_error();
+		}
+		PG_END_TRY();
+
+		if (tupdesc == NULL)
+			return ToDatum(result, &fcinfo->isnull, rettype);
+
+		return ToRecordDatum(result, &fcinfo->isnull, &type, tupdesc);
+	}
+	else
+	{
+		if (rettype)
+			return ToDatum(result, &fcinfo->isnull, rettype);
+		else
+			PG_RETURN_VOID();
+	}
 }
 
 static Tuplestorestate *
@@ -1061,8 +2429,7 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 	}
 
 	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
-	Local<Function>		fn =
-		Local<Function>::Cast(recv->GetInternalField(0));
+	Local<Function>		fn = recv->GetInternalField(0).As<Function>();
 
 	Handle<v8::Value> result = DoCall(context, fn, recv, nargs, args, nonatomic);
 
@@ -1195,8 +2562,7 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 
 	TryCatch			try_catch(xenv->isolate);
 	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
-	Local<Function>		fn =
-		Local<Function>::Cast(recv->GetInternalField(0));
+	Local<Function>		fn = recv->GetInternalField(0).As<Function>();
 	Handle<v8::Value> newtup =
 		DoCall(context, fn, recv, lengthof(args), args, nonatomic);
 
@@ -1230,14 +2596,11 @@ CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv)
 Datum
 plv8_call_validator(PG_FUNCTION_ARGS)
 {
-	plv8_context   *context = GetPlv8Context();
 	Oid				fn_oid = PG_GETARG_OID(0);
 	HeapTuple		tuple;
 	Form_pg_proc	proc;
 	char			functyptype;
 	bool			is_trigger = false;
-	CurrentContextScope	context_scope(context);
-	Isolate::Scope  scope(context->isolate);
 
 	if (!CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, fn_oid))
 		PG_RETURN_VOID();
@@ -1251,29 +2614,48 @@ plv8_call_validator(PG_FUNCTION_ARGS)
 	functyptype = get_typtype(proc->prorettype);
 
 	/* Disallow pseudotype result */
-	/* except for TRIGGER, RECORD, INTERNAL, VOID or polymorphic types */
+	/* except for TRIGGER, RECORD, INTERNAL, VOID, LANGUAGE_HANDLER or polymorphic types */
 	if (functyptype == TYPTYPE_PSEUDO)
 	{
-    if (proc->prorettype == TRIGGEROID)
+		if (proc->prorettype == TRIGGEROID)
 			is_trigger = true;
 		else if (proc->prorettype != RECORDOID &&
 			proc->prorettype != VOIDOID &&
 			proc->prorettype != INTERNALOID &&
+			proc->prorettype != LANGUAGE_HANDLEROID &&
 			!IsPolymorphicType(proc->prorettype))
+		{
+			Oid prorettype = proc->prorettype;
+			ReleaseSysCache(tuple);
 			ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("PL/v8 functions cannot return type %s",
-						format_type_be(proc->prorettype))));
+						format_type_be(prorettype))));
+		}
 	}
 
 	ReleaseSysCache(tuple);
 
+	/*
+	 * Invalidate any cached entry for this function or any downstream
+	 * functions whose language handler chain includes this function.
+	 */
+	plv8_cache_function_remove(fn_oid);
+
+	if (!check_function_bodies)
+		PG_RETURN_VOID();
+
 	try
 	{
+		plv8_context   *context = GetPlv8Context();
+		CurrentContextScope	context_scope(context);
+		Isolate::Scope  scope(context->isolate);
+		HandleScope		handle_scope(context->isolate);
+
 		/* Don't use validator's fcinfo */
-		plv8_proc	   *proc = Compile(fn_oid, NULL,
-									   true, is_trigger);
-		(void) CreateExecEnv(proc->cache->function, context);
+		plv8_proc	   *compiled = Compile(fn_oid, NULL,
+										   true, is_trigger);
+		(void) CreateExecEnv(compiled->cache->function, context);
 		/* the result of a validator is ignored */
 		PG_RETURN_VOID();
 	}
@@ -1283,8 +2665,356 @@ plv8_call_validator(PG_FUNCTION_ARGS)
 	return (Datum) 0;	// keep compiler quiet
 }
 
+static void
+plv8_cache_function_remove(Oid fn_oid)
+{
+	HASH_SEQ_STATUS		status;
+	plv8_proc_cache	   *cache;
+
+	if (!plv8_proc_cache_hash || !OidIsValid(fn_oid))
+		return;
+
+	hash_seq_init(&status, plv8_proc_cache_hash);
+	while ((cache = (plv8_proc_cache *) hash_seq_search(&status)) != nullptr)
+	{
+		bool remove = (cache->fn_oid == fn_oid);
+
+		if (!remove)
+		{
+			for (int i = 0; i < cache->nhandlers; i++)
+			{
+				if (cache->handlers[i].fn_oid == fn_oid)
+				{
+					remove = true;
+					break;
+				}
+			}
+		}
+
+		if (remove)
+		{
+			if (cache->prosrc)
+			{
+				pfree(cache->prosrc);
+				cache->prosrc = NULL;
+			}
+			cache->function.Reset();
+			cache->nhandlers = 0;
+		}
+	}
+}
+
+static bool
+plv8_cache_handlers_valid(plv8_proc_cache *cache, HeapTuple proctuple, Oid *stale_handler_oid)
+{
+	if (stale_handler_oid != NULL)
+		*stale_handler_oid = InvalidOid;
+
+	if (cache == NULL)
+		return false;
+
+	if (cache->nhandlers == 0)
+		return true;
+
+	Oid lang_oid = InvalidOid;
+	if (proctuple != NULL)
+	{
+		Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(proctuple);
+		lang_oid = procStruct->prolang;
+	}
+	else
+	{
+		HeapTuple fnTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(cache->fn_oid));
+		if (!HeapTupleIsValid(fnTup))
+			return false;
+		if (cache->fn_xmin != HeapTupleHeaderGetXmin(fnTup->t_data) ||
+			!ItemPointerEquals(&cache->fn_tid, &fnTup->t_self))
+		{
+			ReleaseSysCache(fnTup);
+			return false;
+		}
+		Form_pg_proc fnStruct = (Form_pg_proc) GETSTRUCT(fnTup);
+		lang_oid = fnStruct->prolang;
+		ReleaseSysCache(fnTup);
+	}
+
+	NameData plv8_lang_name = {"plv8"};
+	HeapTuple plv8Tup = SearchSysCache1(LANGNAME, NameGetDatum(&plv8_lang_name));
+	if (!HeapTupleIsValid(plv8Tup))
+		return false;
+	Oid plv8_lang_oid = ((Form_pg_language) GETSTRUCT(plv8Tup))->oid;
+	ReleaseSysCache(plv8Tup);
+
+	for (int i = 0; i < cache->nhandlers; i++)
+	{
+		if (!OidIsValid(lang_oid) || lang_oid == plv8_lang_oid)
+			return false;
+
+		HeapTuple langTup = SearchSysCache1(LANGOID, ObjectIdGetDatum(lang_oid));
+		if (!HeapTupleIsValid(langTup))
+			return false;
+		Form_pg_language langStruct = (Form_pg_language) GETSTRUCT(langTup);
+		Oid handler_oid = langStruct->lanplcallfoid;
+		ReleaseSysCache(langTup);
+
+		if (handler_oid != cache->handlers[i].fn_oid)
+		{
+			if (stale_handler_oid != NULL)
+				*stale_handler_oid = cache->handlers[i].fn_oid;
+			return false;
+		}
+
+		HeapTuple handlerTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(handler_oid));
+		if (!HeapTupleIsValid(handlerTup))
+		{
+			if (stale_handler_oid != NULL)
+				*stale_handler_oid = handler_oid;
+			return false;
+		}
+
+		bool match = (cache->handlers[i].fn_xmin == HeapTupleHeaderGetXmin(handlerTup->t_data) &&
+					  ItemPointerEquals(&cache->handlers[i].fn_tid, &handlerTup->t_self));
+		Form_pg_proc handlerStruct = (Form_pg_proc) GETSTRUCT(handlerTup);
+		lang_oid = handlerStruct->prolang;
+		ReleaseSysCache(handlerTup);
+
+		if (!match)
+		{
+			if (stale_handler_oid != NULL)
+				*stale_handler_oid = handler_oid;
+			return false;
+		}
+	}
+
+	return (lang_oid == plv8_lang_oid);
+}
+
+static bool
+plv8_is_js_language(Oid lang_oid)
+{
+	if (!OidIsValid(lang_oid))
+		return false;
+
+	NameData plv8_lang_name = {"plv8"};
+	HeapTuple tuple = SearchSysCache1(LANGNAME, NameGetDatum(&plv8_lang_name));
+	if (!HeapTupleIsValid(tuple))
+		return false;
+	Oid plv8_lang_oid = ((Form_pg_language) GETSTRUCT(tuple))->oid;
+	ReleaseSysCache(tuple);
+
+	Oid cur_lang_oid = lang_oid;
+	for (int depth = 0; depth < PLV8_MAX_LANG_HANDLER_DEPTH; depth++)
+	{
+		if (cur_lang_oid == plv8_lang_oid)
+			return true;
+
+		tuple = SearchSysCache1(LANGOID, ObjectIdGetDatum(cur_lang_oid));
+		if (!HeapTupleIsValid(tuple))
+			return false;
+		Form_pg_language langStruct = (Form_pg_language) GETSTRUCT(tuple);
+		Oid handler_oid = langStruct->lanplcallfoid;
+		ReleaseSysCache(tuple);
+
+		if (!OidIsValid(handler_oid))
+			return false;
+
+		tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(handler_oid));
+		if (!HeapTupleIsValid(tuple))
+			return false;
+		Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(tuple);
+		cur_lang_oid = procStruct->prolang;
+		ReleaseSysCache(tuple);
+
+		if (!OidIsValid(cur_lang_oid))
+			return false;
+	}
+
+	return false;
+}
+
+/*
+ * Transpile source code from custom language to JS if needed.
+ *
+ * When lang_oid is not plv8, looks up the language's call handler chain,
+ * records the catalog tuple identities in deps/ndeps, executes the handler
+ * function in V8 with the raw source string as arguments[0], and returns a
+ * palloc'd C string in CurrentMemoryContext containing the transpiled JS code.
+ */
+static char *
+plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *ndeps, plv8_proc *proc)
+{
+	Oid				plv8_lang_oid = InvalidOid;
+	Oid				lang_handler_oid = InvalidOid;
+	char		   *result_cstr = NULL;
+
+	if (ndeps != NULL)
+		*ndeps = 0;
+
+	PG_TRY();
+	{
+		NameData plv8_lang_name = {"plv8"};
+		HeapTuple plv8Tup = SearchSysCache1(LANGNAME, NameGetDatum(&plv8_lang_name));
+		if (HeapTupleIsValid(plv8Tup))
+		{
+			plv8_lang_oid = ((Form_pg_language) GETSTRUCT(plv8Tup))->oid;
+			ReleaseSysCache(plv8Tup);
+		}
+
+		if (OidIsValid(plv8_lang_oid) && lang_oid == plv8_lang_oid)
+		{
+			result_cstr = pstrdup(src);
+		}
+		else
+		{
+			Oid cur_lang_oid = lang_oid;
+			int depth = 0;
+
+			while (!OidIsValid(plv8_lang_oid) || cur_lang_oid != plv8_lang_oid)
+			{
+				if (depth >= PLV8_MAX_LANG_HANDLER_DEPTH)
+					ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("language handler chain depth limit (%d) exceeded",
+								PLV8_MAX_LANG_HANDLER_DEPTH)));
+
+				HeapTuple langTup = SearchSysCache1(LANGOID, ObjectIdGetDatum(cur_lang_oid));
+				if (!HeapTupleIsValid(langTup))
+					elog(ERROR, "cache lookup failed for language %u", cur_lang_oid);
+				Form_pg_language langStruct = (Form_pg_language) GETSTRUCT(langTup);
+				Oid handler_oid = langStruct->lanplcallfoid;
+				ReleaseSysCache(langTup);
+
+				if (!OidIsValid(handler_oid))
+					elog(ERROR, "javascript language handler function is not found for language %u", lang_oid);
+
+				if (depth == 0)
+					lang_handler_oid = handler_oid;
+
+				HeapTuple procTup = SearchSysCache1(PROCOID, ObjectIdGetDatum(handler_oid));
+				if (!HeapTupleIsValid(procTup))
+					elog(ERROR, "cache lookup failed for function %u", handler_oid);
+				TransactionId handler_xmin = HeapTupleHeaderGetXmin(procTup->t_data);
+				ItemPointerData handler_tid = procTup->t_self;
+				Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
+				cur_lang_oid = procStruct->prolang;
+				ReleaseSysCache(procTup);
+
+				if (deps != NULL && ndeps != NULL)
+				{
+					deps[depth].fn_oid = handler_oid;
+					deps[depth].fn_xmin = handler_xmin;
+					deps[depth].fn_tid = handler_tid;
+					(*ndeps) = depth + 1;
+				}
+				depth++;
+			}
+		}
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	if (result_cstr != NULL)
+		return result_cstr;
+
+	Isolate *isolate = current_context->isolate;
+	Isolate::Scope iscope(isolate);
+	HandleScope handle_scope(isolate);
+	Local<Context> context = current_context->localContext();
+	Context::Scope context_scope(context);
+	HandlerExecutionScope handler_scope(context);
+
+	Local<Function> fn = find_js_function(lang_handler_oid);
+	if (fn.IsEmpty())
+	{
+		PG_TRY();
+		{
+			elog(ERROR, "javascript language handler function %u is not found", lang_handler_oid);
+		}
+		PG_CATCH();
+		{
+			throw pg_error();
+		}
+		PG_END_TRY();
+	}
+
+	plv8_exec_env *xenv = CreateExecEnv(fn, current_context);
+	Local<Object> recv = Local<Object>::New(xenv->isolate, xenv->recv);
+	Local<v8::Value> args[2];
+	args[0] = ToString(src);
+	int call_argc = 1;
+	if (proc != NULL && proc->cache != NULL)
+	{
+		plv8_proc_cache *cache = proc->cache;
+		Local<Object> meta = Object::New(isolate);
+		meta->Set(context, ToString("fn_oid"), Uint32::NewFromUnsigned(isolate, cache->fn_oid)).Check();
+		meta->Set(context, ToString("proname"), ToString(cache->proname)).Check();
+		meta->Set(context, ToString("rettype_oid"), Uint32::NewFromUnsigned(isolate, proc->rettype.typid)).Check();
+		char ret_cat_str[2] = { proc->rettype.category, '\0' };
+		meta->Set(context, ToString("rettype_category"), ToString(ret_cat_str)).Check();
+		int32 ret_internal_len = (proc->rettype.len > (int16) VARHDRSZ)
+			? (int32) (proc->rettype.len - VARHDRSZ)
+			: (int32) proc->rettype.len;
+		meta->Set(context, ToString("rettype_len"), Int32::New(isolate, ret_internal_len)).Check();
+
+		Local<Array> arg_oids = Array::New(isolate, cache->nargs);
+		Local<Array> arg_cats = Array::New(isolate, cache->nargs);
+		Local<Array> arg_lens = Array::New(isolate, cache->nargs);
+		for (int a = 0; a < cache->nargs; a++)
+		{
+			arg_oids->Set(context, a, Uint32::NewFromUnsigned(isolate, proc->argtypes[a].typid)).Check();
+			char cat_str[2] = { proc->argtypes[a].category, '\0' };
+			arg_cats->Set(context, a, ToString(cat_str)).Check();
+			int32 a_len = (proc->argtypes[a].len > (int16) VARHDRSZ)
+				? (int32) (proc->argtypes[a].len - VARHDRSZ)
+				: (int32) proc->argtypes[a].len;
+			arg_lens->Set(context, a, Int32::New(isolate, a_len)).Check();
+		}
+		meta->Set(context, ToString("argtype_oids"), arg_oids).Check();
+		meta->Set(context, ToString("argtype_categories"), arg_cats).Check();
+		meta->Set(context, ToString("argtype_lens"), arg_lens).Check();
+		args[1] = meta;
+		call_argc = 2;
+	}
+
+	Local<v8::Value> transpiled = DoCall(context, fn, recv, call_argc, args, false);
+	if (transpiled.IsEmpty() || transpiled->IsNull() || transpiled->IsUndefined())
+		throw js_error("language handler returned null or undefined source code");
+	if (!transpiled->IsString())
+	{
+		PG_TRY();
+		{
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("language handler function %u did not return a string",
+						lang_handler_oid)));
+		}
+		PG_CATCH();
+		{
+			throw pg_error();
+		}
+		PG_END_TRY();
+	}
+
+	CString str(transpiled);
+	PG_TRY();
+	{
+		result_cstr = pstrdup(str.str());
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	return result_cstr;
+}
+
 static plv8_proc *
-plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnames) throw()
+plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate,
+			  char ***argnames, Oid *prolang_out, char **raw_prosrc_out) throw()
 {
 	HeapTuple			procTup;
 	plv8_proc_cache	   *cache;
@@ -1293,14 +3023,20 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 	Datum				prosrc;
 	Oid				   *argtypes;
 	char			   *argmodes;
-	MemoryContext		oldcontext;
+
+	if (prolang_out != NULL)
+		*prolang_out = InvalidOid;
+	if (raw_prosrc_out != NULL)
+		*raw_prosrc_out = NULL;
 
 	procTup = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
 	if (!HeapTupleIsValid(procTup))
 		elog(ERROR, "cache lookup failed for function %u", fn_oid);
 
 	cache = (plv8_proc_cache *)
-		hash_search(plv8_proc_cache_hash,&fn_oid, HASH_ENTER, &found);
+		hash_search(plv8_proc_cache_hash, &fn_oid, HASH_ENTER, &found);
+
+	uint64 cur_tle_fp = plv8_tle_modules_fingerprint();
 
 	if (found)
 	{
@@ -1315,7 +3051,19 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 		uptodate = (!cache->function.IsEmpty() &&
 			cache->fn_xmin == HeapTupleHeaderGetXmin(procTup->t_data) &&
 			ItemPointerEquals(&cache->fn_tid, &procTup->t_self) &&
-			cache->user_id == current_context->user_id);
+			cache->user_id == current_context->user_id &&
+			cache->tle_modules_fp == cur_tle_fp);
+
+		if (uptodate && cache->nhandlers > 0)
+		{
+			Oid stale_handler_oid = InvalidOid;
+			if (!plv8_cache_handlers_valid(cache, procTup, &stale_handler_oid))
+			{
+				uptodate = false;
+				if (OidIsValid(stale_handler_oid))
+					plv8_cache_function_remove(stale_handler_oid);
+			}
+		}
 
 		if (!uptodate)
 		{
@@ -1325,6 +3073,7 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 				cache->prosrc = NULL;
 			}
 			cache->function.Reset();
+			cache->nhandlers = 0;
 		}
 		else
 		{
@@ -1335,6 +3084,7 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 	{
 		new(&cache->function) Persistent<Function>();
 		cache->prosrc = NULL;
+		cache->nhandlers = 0;
 	}
 
 	if (cache->function.IsEmpty())
@@ -1345,7 +3095,10 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 
 		prosrc = SysCacheGetAttr(PROCOID, procTup, Anum_pg_proc_prosrc, &isnull);
 		if (isnull)
+		{
+			ReleaseSysCache(procTup);
 			elog(ERROR, "null prosrc");
+		}
 
 		cache->retset = procStruct->proretset;
 		cache->rettype = procStruct->prorettype;
@@ -1354,6 +3107,9 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 		cache->fn_xmin = HeapTupleHeaderGetXmin(procTup->t_data);
 		cache->fn_tid = procTup->t_self;
 		cache->user_id = current_context->user_id;
+		cache->tle_modules_fp = cur_tle_fp;
+		if (prolang_out != NULL)
+			*prolang_out = procStruct->prolang;
 
 		int nargs = get_func_arg_info(procTup, &argtypes, argnames, &argmodes);
 
@@ -1369,16 +3125,19 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, char ***argnam
 				if (get_typtype(argtypes[i]) == TYPTYPE_PSEUDO &&
 						argtypes[i] != INTERNALOID &&
 						!IsPolymorphicType(argtypes[i]))
+				{
+					Oid bad_argtype = argtypes[i];
+					ReleaseSysCache(procTup);
 					ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("PL/v8 functions cannot accept type %s",
-								format_type_be(argtypes[i]))));
+								format_type_be(bad_argtype))));
+				}
 			}
 		}
 
-		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-		cache->prosrc = TextDatumGetCString(prosrc);
-		MemoryContextSwitchTo(oldcontext);
+		if (raw_prosrc_out != NULL)
+			*raw_prosrc_out = TextDatumGetCString(prosrc);
 
 		ReleaseSysCache(procTup);
 
@@ -1493,6 +3252,116 @@ CreateExecEnv(Handle<Function> function, plv8_context *context)
 	return xenv;
 }
 
+static __attribute__((noinline)) bool
+plv8_check_snapshot_handlers_valid(plv8_proc_cache *cache)
+{
+	bool valid_handlers = false;
+	PG_TRY();
+	{
+		valid_handlers = plv8_cache_handlers_valid(cache, NULL, NULL);
+	}
+	PG_CATCH();
+	{
+		cache->nhandlers = 0;
+		throw pg_error();
+	}
+	PG_END_TRY();
+	return valid_handlers;
+}
+
+static __attribute__((noinline)) void
+plv8_replace_snapshot_prosrc(plv8_proc_cache *cache, const char *raw_prosrc)
+{
+	PG_TRY();
+	{
+		if (cache->prosrc)
+		{
+			pfree(cache->prosrc);
+			cache->prosrc = NULL;
+		}
+		if (raw_prosrc != NULL)
+		{
+			MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+			cache->prosrc = pstrdup(raw_prosrc);
+			MemoryContextSwitchTo(oldcontext);
+		}
+	}
+	PG_CATCH();
+	{
+		cache->function.Reset();
+		cache->nhandlers = 0;
+		throw pg_error();
+	}
+	PG_END_TRY();
+}
+
+static __attribute__((noinline)) bool
+plv8_try_restore_function_from_snapshot(plv8_proc_cache *cache,
+										plv8_context *global_context,
+										const char *raw_prosrc)
+{
+	if (plv8_bypass_snapshot_restore ||
+		plv8_active_snapshot_blob.data == nullptr ||
+		plv8_active_snapshot_blob.raw_size <= 0 ||
+		plv8_snapshot_slots.empty())
+	{
+		return false;
+	}
+
+	for (size_t idx = 0; idx < plv8_snapshot_slots.size(); idx++)
+	{
+		const Plv8SnapshotSlot &slot = plv8_snapshot_slots[idx];
+		if (slot.fn_oid != cache->fn_oid)
+			continue;
+
+		if (!TransactionIdEquals(slot.fn_xmin, cache->fn_xmin) ||
+			!ItemPointerEquals(const_cast<ItemPointer>(&slot.fn_tid), &cache->fn_tid))
+		{
+			return false;
+		}
+
+		if (slot.nhandlers > 0)
+		{
+			cache->nhandlers = slot.nhandlers;
+			memcpy(cache->handlers, slot.handlers,
+				   sizeof(plv8_handler_dep) * slot.nhandlers);
+			if (!plv8_check_snapshot_handlers_valid(cache))
+			{
+				cache->nhandlers = 0;
+				return false;
+			}
+		}
+
+		{
+			Isolate *isolate = global_context->isolate;
+			Isolate::Scope scope(isolate);
+			HandleScope handle_scope(isolate);
+			Local<Context> context = Local<Context>::New(isolate, global_context->context);
+			Context::Scope context_scope(context);
+
+			char prop_buf[64];
+			snprintf(prop_buf, sizeof(prop_buf), "__plv8_snap_fn_%zu", idx);
+			Local<v8::String> prop_name = v8::String::NewFromUtf8(
+				isolate, prop_buf, v8::NewStringType::kInternalized).ToLocalChecked();
+			Local<v8::Value> fn_val;
+			if (!context->Global()->Get(context, prop_name).ToLocal(&fn_val) ||
+				fn_val.IsEmpty() || !fn_val->IsFunction())
+			{
+				cache->nhandlers = 0;
+				return false;
+			}
+
+			cache->function.Reset(isolate, Local<Function>::Cast(fn_val));
+		}
+
+		plv8_replace_snapshot_prosrc(cache, raw_prosrc);
+		plv8_snapshot_functions_restored++;
+		return true;
+	}
+
+	return false;
+}
+
 /*
  * fcinfo should be passed if this is an actual function call context, where
  * we can resolve polymorphic types and use function's memory context.
@@ -1501,11 +3370,13 @@ static plv8_proc *
 Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger)
 {
 	plv8_proc  *proc;
-	char	  **argnames;
+	char	  **argnames = NULL;
+	Oid			prolang = InvalidOid;
+	char	   *raw_prosrc = NULL;
 
 	PG_TRY();
 	{
-		proc = plv8_get_proc(fn_oid, fcinfo, validate, &argnames);
+		proc = plv8_get_proc(fn_oid, fcinfo, validate, &argnames, &prolang, &raw_prosrc);
 	}
 	PG_CATCH();
 	{
@@ -1517,6 +3388,15 @@ Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger)
 
 	if (cache->function.IsEmpty())
 	{
+		if (plv8_try_restore_function_from_snapshot(cache, current_context, raw_prosrc))
+		{
+			return proc;
+		}
+
+		plv8_handler_dep	deps[PLV8_MAX_LANG_HANDLER_DEPTH];
+		int					ndeps = 0;
+		char			   *transpiled = plv8_transpile_src(raw_prosrc, prolang, deps, &ndeps, proc);
+
 		/*
 		 * Compile into current_context, which the caller has already set
 		 * up (and whose startup procedure, if any, has already run): the
@@ -1529,14 +3409,36 @@ Compile(Oid fn_oid, FunctionCallInfo fcinfo, bool validate, bool is_trigger)
 		 */
 		Isolate::Scope	scope(current_context->isolate);
 		HandleScope		handle_scope(current_context->isolate);
-		cache->function.Reset(current_context->isolate, CompileFunction(
+		Local<Function>	fn = CompileFunction(
 						current_context,
 						cache->proname,
 						cache->nargs,
 						(const char **) argnames,
-						cache->prosrc,
+						transpiled,
 						is_trigger,
-						cache->retset));
+						cache->retset);
+
+		if (cache->prosrc)
+		{
+			pfree(cache->prosrc);
+			cache->prosrc = NULL;
+		}
+		cache->function.Reset(current_context->isolate, fn);
+		PG_TRY();
+		{
+			MemoryContext oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+			cache->prosrc = pstrdup(transpiled);
+			MemoryContextSwitchTo(oldcontext);
+		}
+		PG_CATCH();
+		{
+			cache->function.Reset();
+			throw pg_error();
+		}
+		PG_END_TRY();
+		cache->nhandlers = ndeps;
+		if (ndeps > 0)
+			memcpy(cache->handlers, deps, sizeof(plv8_handler_dep) * ndeps);
 	}
 
 	return proc;
@@ -1554,17 +3456,17 @@ CompileFunction(
 {
 	Isolate					   *isolate = Isolate::GetCurrent();
 	EscapableHandleScope		handle_scope(isolate);
-	StringInfoData	src;
+	Local<Context> context = Local<Context>::New(isolate, global_context->context);
+	Context::Scope	context_scope(context);
+	StringInfoData	sig_buf;
 
-	initStringInfo(&src);
-
-	appendStringInfo(&src, "(function (");
+	initStringInfo(&sig_buf);
 	if (is_trigger)
 	{
 		if (proarglen != 0)
 			throw js_error("trigger function cannot have arguments");
 		// trigger function has special arguments.
-		appendStringInfo(&src,
+		appendStringInfo(&sig_buf,
 			"NEW, OLD, TG_NAME, TG_WHEN, TG_LEVEL, TG_OP, "
 			"TG_RELID, TG_TABLE_NAME, TG_TABLE_SCHEMA, TG_ARGV");
 	}
@@ -1573,15 +3475,44 @@ CompileFunction(
 		for (int i = 0; i < proarglen; i++)
 		{
 			if (i > 0)
-				appendStringInfoChar(&src, ',');
+				appendStringInfoChar(&sig_buf, ',');
 			if (proargs && proargs[i])
-				appendStringInfoString(&src, proargs[i]);
+				appendStringInfoString(&sig_buf, proargs[i]);
 			else
-				appendStringInfo(&src, "$%d", i + 1);	// unnamed argument to $N
+				appendStringInfo(&sig_buf, "$%d", i + 1);	// unnamed argument to $N
 		}
 	}
 
-	appendStringInfo(&src, "){\n%s\n})", prosrc);
+	std::string hoisted_imports;
+	std::string body_rest;
+	if (plv8_extract_hoisted_imports(prosrc, &hoisted_imports, &body_rest))
+	{
+		StringInfoData mod_src;
+		initStringInfo(&mod_src);
+		appendStringInfo(&mod_src, "%s\nexport default (function (%s){\n%s\n});",
+						 hoisted_imports.c_str(), sig_buf.data, body_rest.c_str());
+		pfree(sig_buf.data);
+
+		plv8_sync_tle_module_cache(global_context);
+		Local<Object> ns = plv8_compile_and_eval_anon_module(context, proname, mod_src.data);
+		pfree(mod_src.data);
+
+		TryCatch try_catch(isolate);
+		Local<v8::Value> def_val;
+		if (!ns->Get(context, v8::String::NewFromUtf8Literal(isolate, "default")).ToLocal(&def_val) ||
+			def_val.IsEmpty() || !def_val->IsFunction())
+		{
+			if (try_catch.HasCaught())
+				throw js_error(try_catch);
+			throw js_error("ES module function wrapper did not export a default Function");
+		}
+		return handle_scope.Escape(Local<Function>::Cast(def_val));
+	}
+
+	StringInfoData	src;
+	initStringInfo(&src);
+	appendStringInfo(&src, "(function (%s){\n%s\n})", sig_buf.data, prosrc);
+	pfree(sig_buf.data);
 
 	Handle<v8::Value> name;
 	if (proname)
@@ -1591,32 +3522,8 @@ CompileFunction(
 	Local<v8::String> source = ToString(src.data, src.len);
 	pfree(src.data);
 
-	Local<Context> context = Local<Context>::New(isolate, global_context->context);
-	Context::Scope	context_scope(context);
 	TryCatch		try_catch(isolate);
-	v8::ScriptOrigin origin(isolate, name);
-
-	// set up the signal handlers
-	if (int_handler == NULL) {
-		int_handler = (void *) signal(SIGINT, signal_handler);
-	}
-
-	if (term_handler == NULL) {
-		term_handler = (void *) signal(SIGTERM, signal_handler);
-	}
-
-#ifdef EXECUTION_TIMEOUT
-	bool timeout = false;
-#ifdef _MSC_VER // windows
-	HANDLE  hThread;
-	DWORD dwThreadId;
-	hThread = CreateThread(NULL, 0, Breakout, isolate, 0, &dwThreadId);
-#else
-	pthread_t breakout_thread;
-	// set up the thread to break out the execution if needed
-	pthread_create(&breakout_thread, NULL, Breakout, isolate);
-#endif
-#endif
+	v8::ScriptOrigin origin(name);
 
 	v8::Local<v8::Script> script;
 	v8::Local<v8::Value> result;
@@ -1624,44 +3531,58 @@ CompileFunction(
 		isolate->CancelTerminateExecution();
 		current_context->interrupted = false;
 	}
-	if (Script::Compile(isolate->GetCurrentContext(), source, &origin).ToLocal(&script)) {
-		if (!script.IsEmpty()) {
-			if (!script->Run(isolate->GetCurrentContext()).ToLocal(&result))
-				throw js_error(try_catch);
+	{
+		Plv8ExecutionTimeoutGuard timeout_guard;
+		if (Script::Compile(isolate->GetCurrentContext(), source, &origin).ToLocal(&script)) {
+			if (!script.IsEmpty()) {
+				if (!script->Run(isolate->GetCurrentContext()).ToLocal(&result)) {}
+			}
 		}
 	}
-
-#ifdef EXECUTION_TIMEOUT
-#ifdef _MSC_VER
-	if (TerminateThread(hThread, NULL) == 0) {
-		timeout = true;
-	}
-#else
-	void *thread_result;
-	pthread_cancel(breakout_thread);
-	pthread_join(breakout_thread, &thread_result);
-	if (thread_result == NULL) {
-		timeout = true;
-	}
-#endif
-#endif
-	signal(SIGINT, (void (*)(int)) int_handler);
-	signal(SIGTERM, (void (*)(int)) term_handler);
 
 	HandleUnhandledPromiseRejections();
 
 	if (result.IsEmpty()) {
-		if (isolate->IsExecutionTerminating()  || current_context->interrupted) {
+		bool was_interrupted = (current_context && current_context->interrupted) ||
+							   QueryCancelPending || ProcDiePending;
+		bool was_timeout = (plv8_timeout_expired != 0);
+
+		if (isolate->IsExecutionTerminating() || was_interrupted || was_timeout) {
 			isolate->CancelTerminateExecution();
-			if (current_context->interrupted) {
+			if (current_context)
 				current_context->interrupted = false;
+			plv8_timeout_expired = 0;
+
+			if (was_interrupted) {
+				PG_TRY();
+				{
+					CHECK_FOR_INTERRUPTS();
+				}
+				PG_CATCH();
+				{
+					throw pg_error();
+				}
+				PG_END_TRY();
 				throw js_error("Signal caught: interrupted");
 			}
-#ifdef EXECUTION_TIMEOUT
-			if (timeout) {
+			if (was_timeout) {
 				throw js_error("compiler timeout exceeded");
 			}
-#endif
+			if (current_context)
+				current_context->is_dead = true;
+			plv8_isolate_oom_killed = true;
+			throw js_error("Script is out of memory");
+		}
+		if (plv8_isolate_oom_killed ||
+			(current_allocator && current_allocator->hasOOM()))
+		{
+			if (current_context)
+				current_context->is_dead = true;
+			plv8_isolate_oom_killed = true;
+			if (try_catch.HasCaught())
+			{
+				throw js_error(try_catch);
+			}
 			throw js_error("Script is out of memory");
 		}
 		throw js_error(try_catch);
@@ -1675,54 +3596,34 @@ find_js_function(Oid fn_oid)
 {
 	HeapTuple		tuple;
 	Form_pg_proc	proc;
-	Oid				prolang;
-	NameData		langnames[] = { {"plv8"} };
-	int				langno;
-	int				langlen = sizeof(langnames) / sizeof(NameData);
+	Oid				prolang = InvalidOid;
 	Local<Function> func;
 	Isolate			*isolate = Isolate::GetCurrent();
+	bool			is_js_lang = false;
 
-	tuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
-	if (!HeapTupleIsValid(tuple))
-		elog(ERROR, "cache lookup failed for function %u", fn_oid);
-	proc = (Form_pg_proc) GETSTRUCT(tuple);
-	prolang = proc->prolang;
-	ReleaseSysCache(tuple);
-
-	/* Should not happen? */
-	if (!OidIsValid(prolang))
-		return func;
-
-	/* See if the function language is a compatible one */
-	for (langno = 0; langno < langlen; langno++)
+	PG_TRY();
 	{
-		tuple = SearchSysCache(LANGNAME, NameGetDatum(&langnames[langno]), 0, 0, 0);
-		if (HeapTupleIsValid(tuple))
-		{
-			Form_pg_database datForm = (Form_pg_database) GETSTRUCT(tuple);
-			Oid langtupoid = datForm->oid;
+		tuple = SearchSysCache(PROCOID, ObjectIdGetDatum(fn_oid), 0, 0, 0);
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for function %u", fn_oid);
+		proc = (Form_pg_proc) GETSTRUCT(tuple);
+		prolang = proc->prolang;
+		ReleaseSysCache(tuple);
 
-			ReleaseSysCache(tuple);
-			if (langtupoid == prolang)
-				break;
-		}
+		is_js_lang = plv8_is_js_language(prolang);
 	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
 
 	/* Not found or non-JS function */
-	if (langno >= langlen)
+	if (!is_js_lang)
 		return func;
 
-	try
-	{
-		plv8_proc		   *proc = Compile(fn_oid, NULL,
-										   true, false);
-
-		TryCatch			try_catch(isolate);
-
-		func = Local<Function>::New(isolate, proc->cache->function);
-	}
-	catch (js_error& e) { e.rethrow(); }
-	catch (pg_error& e) { e.rethrow(); }
+	plv8_proc *compiled_proc = Compile(fn_oid, NULL, true, false);
+	func = Local<Function>::New(isolate, compiled_proc->cache->function);
 
 	return func;
 }
@@ -1787,42 +3688,79 @@ GetPlv8Context() {
 	unsigned int		i;
 	plv8_context		*my_context = nullptr;
 
+	if (plv8_isolate_oom_killed ||
+		(current_isolate && current_isolate->IsDead()) ||
+		(current_allocator && current_allocator->hasOOM()))
+	{
+		KillIsolateAndAllContexts();
+	}
+
 	for (i = 0; i < ContextVector.size(); i++)
 	{
+		if (ContextVector[i]->is_dead)
+		{
+			KillIsolateAndAllContexts();
+			my_context = nullptr;
+			break;
+		}
 		if (ContextVector[i]->user_id == user_id)
 		{
 			my_context = ContextVector[i];
 			break;
 		}
 	}
-	if (my_context && (my_context->is_dead || (my_context->isolate && my_context->isolate->IsDead()))) {
-		// the isolate is dead because of OOM, kill it and dispose
-		char *username = GetUserNameFromId(my_context->user_id, false);
-		elog(LOG_SERVER_ONLY, "Disposing of a dead isolate for: %s", username);
-		ContextVector.erase(ContextVector.begin() + i);
-		if (my_context->isolate && my_context->isolate->IsInUse()) {
-			my_context->isolate->Exit();
-		}
-		killPlv8Context(my_context);
-		pfree(my_context);
-		my_context = nullptr;
-	}
+
 	if (!my_context)
 	{
-		my_context = (plv8_context *) MemoryContextAllocZero(TopMemoryContext,
-														 sizeof(plv8_context));
-		my_context->is_dead = false;
-		my_context->interrupted = false;
-		my_context->ignore_unhandled_promises = false;
-		CreateIsolate(my_context);
-		Isolate 			   *isolate = my_context->isolate;
+		EnsureSharedIsolate();
+		Isolate 			   *isolate = current_isolate;
 		Isolate::Scope			scope(isolate);
 		HandleScope				handle_scope(isolate);
 
-		Local<ObjectTemplate>	global = Local<ObjectTemplate>::New(isolate, GetGlobalObjectTemplate(isolate));
+		my_context = (plv8_context *) MemoryContextAllocZero(TopMemoryContext,
+														 sizeof(plv8_context));
+		my_context->isolate = isolate;
+		my_context->is_dead = false;
+		my_context->interrupted = false;
+		my_context->ignore_unhandled_promises = false;
+		new(&my_context->unhandled_promises) std::vector<std::tuple<v8::Global<v8::Promise>, v8::Global<v8::Message>, v8::Global<v8::Value>>>();
+		new(&my_context->tle_module_map) std::unordered_map<std::string, v8::Global<v8::Module>>();
+		new(&my_context->tle_module_id_to_spec) std::unordered_map<int, std::string>();
+		my_context->tle_modules_fp = 0;
+		my_context->microtask_queue =
+			v8::MicrotaskQueue::New(isolate, v8::MicrotasksPolicy::kAuto);
+
+		Local<Context> role_ctx;
+		if (plv8_active_snapshot_blob.data != nullptr &&
+			plv8_active_snapshot_blob.raw_size > 0)
+		{
+			MaybeLocal<Context> snap_ctx = Context::FromSnapshot(
+				isolate, 0, v8::DeserializeInternalFieldsCallback(),
+				nullptr, MaybeLocal<v8::Value>(), my_context->microtask_queue);
+			if (!snap_ctx.IsEmpty())
+				role_ctx = snap_ctx.ToLocalChecked();
+		}
+		if (role_ctx.IsEmpty())
+		{
+			Local<ObjectTemplate> global = Local<ObjectTemplate>::New(
+				isolate, GetGlobalObjectTemplate(isolate));
+			role_ctx = Context::New(
+				isolate, NULL, global, MaybeLocal<v8::Value>(),
+				v8::DeserializeInternalFieldsCallback(),
+				my_context->microtask_queue);
+		}
+
+		{
+			Context::Scope role_cs(role_ctx);
+			char sec_buf[64];
+			snprintf(sec_buf, sizeof(sec_buf), "plv8_role_%u", (unsigned int) user_id);
+			Local<v8::String> sec_tok = v8::String::NewFromUtf8(
+				isolate, sec_buf, NewStringType::kInternalized).ToLocalChecked();
+			role_ctx->SetSecurityToken(sec_tok);
+		}
 
 		new(&my_context->context) Persistent<Context>();
-		my_context->context.Reset(isolate, Context::New(isolate, NULL, global));
+		my_context->context.Reset(isolate, role_ctx);
 		my_context->user_id = user_id;
 		my_context->id = next_context_id++;
 
@@ -1879,6 +3817,8 @@ GetPlv8Context() {
 		if (plv8_start_proc != NULL)
 		{
 			Local<Function>		func;
+			Oid					funcoid = InvalidOid;
+			bool				has_priv = false;
 
 			CurrentContextScope	current_scope(my_context);
 			HandleScope			handle_scope(isolate);
@@ -1895,42 +3835,63 @@ GetPlv8Context() {
 			char perm[16];
 			strcpy(perm, "EXECUTE");
 			arg = charToText(perm);
-
 			PG_TRY();
-					{
-						Oid funcoid = DatumGetObjectId(DirectFunctionCall1(regprocin, CStringGetDatum(plv8_start_proc)));
-						MemSet(&flinfo, 0, sizeof(flinfo));
-						fake_fcinfo->flinfo = &flinfo;
-						flinfo.fn_oid = InvalidOid;
-						flinfo.fn_mcxt = CurrentMemoryContext;
-						fake_fcinfo->nargs = 2;
-						fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
-						fake_fcinfo->args[1].value = PointerGetDatum(arg);
-						Datum ret = has_function_privilege_id(fake_fcinfo);
+			{
+				funcoid = DatumGetObjectId(DirectFunctionCall1(regprocin, CStringGetDatum(plv8_start_proc)));
+				MemSet(&flinfo, 0, sizeof(flinfo));
+				fake_fcinfo->flinfo = &flinfo;
+				flinfo.fn_oid = InvalidOid;
+				flinfo.fn_mcxt = CurrentMemoryContext;
+				fake_fcinfo->nargs = 2;
+				fake_fcinfo->args[0].value = ObjectIdGetDatum(funcoid);
+				fake_fcinfo->args[1].value = PointerGetDatum(arg);
+				Datum ret = has_function_privilege_id(fake_fcinfo);
 
-						if (ret == 0) {
-							elog(WARNING, "failed to find js function %s", plv8_start_proc);
-						} else {
-							if (DatumGetBool(ret)) {
-								func = find_js_function(funcoid);
-							} else {
-								elog(WARNING, "no permission to execute js function %s", plv8_start_proc);
-							}
-						}
+				if (ret == 0) {
+					elog(WARNING, "failed to find js function %s", plv8_start_proc);
+				} else {
+					if (DatumGetBool(ret)) {
+						has_priv = true;
+					} else {
+						elog(WARNING, "no permission to execute js function %s", plv8_start_proc);
 					}
-				PG_CATCH();
-					{
-						ErrorData	   *edata;
+				}
+			}
+			PG_CATCH();
+			{
+				ErrorData	   *edata;
 
-						MemoryContextSwitchTo(ctx);
-						edata = CopyErrorData();
-						elog(WARNING, "failed to find js function %s", edata->message);
-						FlushErrorState();
-						FreeErrorData(edata);
-					}
+				MemoryContextSwitchTo(ctx);
+				edata = CopyErrorData();
+				elog(WARNING, "failed to find js function %s", edata->message);
+				FlushErrorState();
+				FreeErrorData(edata);
+			}
 			PG_END_TRY();
 
 			pfree(arg);
+
+			if (has_priv)
+			{
+				try
+				{
+					func = find_js_function(funcoid);
+				}
+				catch (js_error& e)
+				{
+					e.log(WARNING);
+				}
+				catch (pg_error& e)
+				{
+					ErrorData *edata;
+
+					MemoryContextSwitchTo(ctx);
+					edata = CopyErrorData();
+					elog(WARNING, "failed to find js function %s", edata->message);
+					FlushErrorState();
+					FreeErrorData(edata);
+				}
+			}
 
 			if (!func.IsEmpty())
 			{
@@ -1947,49 +3908,45 @@ GetPlv8Context() {
 static Local<ObjectTemplate>
 GetGlobalObjectTemplate(Isolate *isolate)
 {
-	Persistent<ObjectTemplate>	global;
+	EscapableHandleScope	handle_scope(isolate);
+	Local<ObjectTemplate>	templ = ObjectTemplate::New(isolate);
 
-	if (global.IsEmpty())
-	{
-		HandleScope				handle_scope(isolate);
+	// ERROR levels for elog
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG5", NewStringType::kInternalized),
+			   Int32::New(isolate, DEBUG5));
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG4", NewStringType::kInternalized),
+			   Int32::New(isolate, DEBUG4));
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG3", NewStringType::kInternalized),
+			   Int32::New(isolate, DEBUG3));
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG2", NewStringType::kInternalized),
+			   Int32::New(isolate, DEBUG2));
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG1", NewStringType::kInternalized),
+			   Int32::New(isolate, DEBUG1));
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG", NewStringType::kInternalized),
+			   Int32::New(isolate, DEBUG5));
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "LOG", NewStringType::kInternalized),
+			   Int32::New(isolate, LOG));
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "INFO", NewStringType::kInternalized),
+			   Int32::New(isolate, INFO));
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "NOTICE", NewStringType::kInternalized),
+			   Int32::New(isolate, NOTICE));
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "WARNING", NewStringType::kInternalized),
+			   Int32::New(isolate, WARNING));
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "ERROR", NewStringType::kInternalized),
+			   Int32::New(isolate, ERROR));
 
-		Local<ObjectTemplate> templ = ObjectTemplate::New(isolate);
-		// ERROR levels for elog
-		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG5", NewStringType::kInternalized),
-				   Int32::New(isolate, DEBUG5));
-		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG4", NewStringType::kInternalized),
-				   Int32::New(isolate, DEBUG4));
-		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG3", NewStringType::kInternalized),
-				   Int32::New(isolate, DEBUG3));
-		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG2", NewStringType::kInternalized),
-				   Int32::New(isolate, DEBUG2));
-		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG1", NewStringType::kInternalized),
-				   Int32::New(isolate, DEBUG1));
-		templ->Set(v8::String::NewFromUtf8Literal(isolate, "DEBUG", NewStringType::kInternalized),
-				   Int32::New(isolate, DEBUG5));
-		templ->Set(v8::String::NewFromUtf8Literal(isolate, "LOG", NewStringType::kInternalized),
-				   Int32::New(isolate, LOG));
-		templ->Set(v8::String::NewFromUtf8Literal(isolate, "INFO", NewStringType::kInternalized),
-				   Int32::New(isolate, INFO));
-		templ->Set(v8::String::NewFromUtf8Literal(isolate, "NOTICE", NewStringType::kInternalized),
-				   Int32::New(isolate, NOTICE));
-		templ->Set(v8::String::NewFromUtf8Literal(isolate, "WARNING", NewStringType::kInternalized),
-				   Int32::New(isolate, WARNING));
-		templ->Set(v8::String::NewFromUtf8Literal(isolate, "ERROR", NewStringType::kInternalized),
-				   Int32::New(isolate, ERROR));
-		global.Reset(isolate, templ);
+	Local<ObjectTemplate> plv8 = ObjectTemplate::New(isolate);
 
-		Local<ObjectTemplate> plv8 = ObjectTemplate::New(isolate);
+	SetupPlv8Functions(plv8);
+	SetupGlobalFunctions(templ);
+	plv8->Set(v8::String::NewFromUtf8Literal(isolate, "version", NewStringType::kInternalized),
+			  v8::String::NewFromUtf8Literal(isolate, PLV8_VERSION));
+	plv8->Set(v8::String::NewFromUtf8Literal(isolate, "v8_version", NewStringType::kInternalized),
+			  v8::String::NewFromUtf8Literal(isolate, V8_VERSION_STRING));
 
-		SetupPlv8Functions(plv8);
-		plv8->Set(v8::String::NewFromUtf8Literal(isolate, "version", NewStringType::kInternalized),
-				  v8::String::NewFromUtf8Literal(isolate, PLV8_VERSION));
-		plv8->Set(v8::String::NewFromUtf8Literal(isolate, "v8_version", NewStringType::kInternalized),
-				  v8::String::NewFromUtf8Literal(isolate, V8_VERSION_STRING));
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "plv8", NewStringType::kInternalized), plv8);
 
-		templ->Set(v8::String::NewFromUtf8Literal(isolate, "plv8", NewStringType::kInternalized), plv8);
-	}
-	return Local<ObjectTemplate>::New(isolate, global);
+	return handle_scope.Escape(templ);
 }
 
 /*
@@ -2297,7 +4254,7 @@ js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Messa
 			int		lineno = message->GetLineNumber(context).FromMaybe(1);
 			Local<v8::String>	sourceLine;
 			/* leaves sourceLine empty on failure, printed as "?" */
-			(void) message->GetSourceLine(context).ToLocal(&sourceLine);
+			if (!message->GetSourceLine(context).ToLocal(&sourceLine)) {}
 			CString		source(sourceLine);
 			// TODO: Get stack trace?
 			//Handle<StackTrace> stackTrace(message->GetStackTrace());
@@ -2372,3 +4329,1286 @@ pg_error::rethrow() throw()
 	PG_RE_THROW();
 	exit(0);	// keep compiler quiet
 }
+
+/* =========================================================================
+ * pg_tle Module Loader & V8 CodeCache Support
+ * ========================================================================= */
+
+static const char PLV8_BYTECODE_MAGIC[8] = {'P', 'L', 'V', '8', 'B', 'C', '0', '1'};
+
+static uint64
+plv8_fnv1a64(uint64 h, const void *data, size_t len)
+{
+	const unsigned char *p = (const unsigned char *) data;
+	for (size_t i = 0; i < len; i++)
+	{
+		h ^= (uint64) p[i];
+		h *= 1099511628211ULL;
+	}
+	return h;
+}
+
+uint64
+plv8_tle_modules_fingerprint(void)
+{
+	Oid				nspoid;
+	Oid				relid;
+	Relation		rel;
+	TupleDesc		tupdesc;
+	TableScanDesc	scan;
+	HeapTuple		tuple;
+	uint64			fp = 14695981039346656037ULL;
+
+	if (!IsTransactionState())
+		return 0;
+
+	nspoid = get_namespace_oid("pgtle", true);
+	if (!OidIsValid(nspoid))
+		return 0;
+
+	relid = get_relname_relid("modules", nspoid);
+	if (!OidIsValid(relid))
+		return 0;
+
+	rel = table_open(relid, AccessShareLock);
+	tupdesc = RelationGetDescr(rel);
+	scan = table_beginscan_catalog(rel, 0, NULL);
+
+	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+	{
+		uint64		row_hash = 14695981039346656037ULL;
+		ItemPointerData tid = tuple->t_self;
+		TransactionId xmin = HeapTupleHeaderGetRawXmin(tuple->t_data);
+		CommandId	cid = HeapTupleHeaderGetRawCommandId(tuple->t_data);
+
+		CHECK_FOR_INTERRUPTS();
+
+		row_hash = plv8_fnv1a64(row_hash, &tid, sizeof(tid));
+		row_hash = plv8_fnv1a64(row_hash, &xmin, sizeof(xmin));
+		row_hash = plv8_fnv1a64(row_hash, &cid, sizeof(cid));
+
+		for (int attnum = 1; attnum <= 6 && attnum <= tupdesc->natts; attnum++)
+		{
+			bool	isnull = false;
+			Datum	d = heap_getattr(tuple, attnum, tupdesc, &isnull);
+			row_hash = plv8_fnv1a64(row_hash, &isnull, sizeof(isnull));
+			if (!isnull)
+			{
+				Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+				if (attr->attlen == -1)
+				{
+					struct varlena *v = PG_DETOAST_DATUM_PACKED(d);
+					row_hash = plv8_fnv1a64(row_hash, VARDATA_ANY(v), VARSIZE_ANY_EXHDR(v));
+					if ((Pointer) v != DatumGetPointer(d))
+						pfree(v);
+				}
+				else if (attr->attbyval)
+				{
+					row_hash = plv8_fnv1a64(row_hash, &d, sizeof(Datum));
+				}
+			}
+		}
+
+		fp ^= row_hash;
+	}
+
+	table_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	return fp;
+}
+
+static void
+plv8_sync_tle_module_cache(plv8_context *ctx)
+{
+	uint64 cur_fp;
+
+	if (!ctx)
+		return;
+
+	cur_fp = plv8_tle_modules_fingerprint();
+	if (ctx->tle_modules_fp != cur_fp)
+	{
+		for (auto &kv : ctx->tle_module_map)
+			kv.second.Reset();
+		ctx->tle_module_map.clear();
+		ctx->tle_module_id_to_spec.clear();
+		ctx->tle_modules_fp = cur_fp;
+	}
+}
+
+static bool
+plv8_extract_hoisted_imports(const char *src, std::string *imports_out, std::string *body_out)
+{
+	const char *p = src;
+	bool at_line_start = true;
+	int brace_depth = 0;
+	bool found_esm = false;
+
+	imports_out->clear();
+	body_out->clear();
+
+	while (*p)
+	{
+		if (at_line_start)
+		{
+			const char *ws = p;
+			while (*ws == ' ' || *ws == '\t' || *ws == '\r')
+				ws++;
+
+			if (brace_depth == 0 && strncmp(ws, "import", 6) == 0 &&
+				(ws[6] == ' ' || ws[6] == '\t' || ws[6] == '{' || ws[6] == '*' || ws[6] == '"' || ws[6] == '\''))
+			{
+				const char *stmt_start = ws;
+				const char *cur = ws + 6;
+				char in_quote = 0;
+
+				while (*cur)
+				{
+					if (in_quote)
+					{
+						if (*cur == '\\' && cur[1])
+							cur += 2;
+						else if (*cur == in_quote)
+						{
+							in_quote = 0;
+							cur++;
+						}
+						else
+							cur++;
+					}
+					else
+					{
+						if (*cur == '\'' || *cur == '"' || *cur == '`')
+						{
+							in_quote = *cur;
+							cur++;
+						}
+						else if (*cur == ';')
+						{
+							cur++;
+							break;
+						}
+						else if (*cur == '\n')
+						{
+							const char *back = cur - 1;
+							while (back > stmt_start && (*back == ' ' || *back == '\t' || *back == '\r'))
+								back--;
+							if (*back == '\'' || *back == '"')
+							{
+								cur++;
+								break;
+							}
+							cur++;
+						}
+						else
+							cur++;
+					}
+				}
+
+				imports_out->append(stmt_start, cur - stmt_start);
+				imports_out->push_back('\n');
+				found_esm = true;
+				p = cur;
+				at_line_start = true;
+				continue;
+			}
+			else if (brace_depth == 0 && strncmp(ws, "export", 6) == 0 &&
+					 (ws[6] == ' ' || ws[6] == '\t'))
+			{
+				const char *after_export = ws + 6;
+				while (*after_export == ' ' || *after_export == '\t')
+					after_export++;
+				if (strncmp(after_export, "default", 7) == 0 &&
+					(after_export[7] == ' ' || after_export[7] == '\t'))
+				{
+					body_out->append("return ");
+					found_esm = true;
+					p = after_export + 7;
+					at_line_start = false;
+					continue;
+				}
+				else if (strncmp(after_export, "function", 8) == 0 ||
+						 strncmp(after_export, "const", 5) == 0 ||
+						 strncmp(after_export, "let", 3) == 0 ||
+						 strncmp(after_export, "var", 3) == 0 ||
+						 strncmp(after_export, "class", 5) == 0)
+				{
+					found_esm = true;
+					p = after_export;
+					at_line_start = false;
+					continue;
+				}
+			}
+		}
+
+		if (*p == '/' && p[1] == '/')
+		{
+			while (*p && *p != '\n')
+				body_out->push_back(*p++);
+			if (*p == '\n')
+			{
+				body_out->push_back(*p++);
+				at_line_start = true;
+			}
+			continue;
+		}
+		if (*p == '/' && p[1] == '*')
+		{
+			body_out->push_back(*p++);
+			body_out->push_back(*p++);
+			while (*p && !(*p == '*' && p[1] == '/'))
+				body_out->push_back(*p++);
+			if (*p)
+			{
+				body_out->push_back(*p++);
+				body_out->push_back(*p++);
+			}
+			continue;
+		}
+		if (*p == '\'' || *p == '"' || *p == '`')
+		{
+			char q = *p;
+			body_out->push_back(*p++);
+			while (*p && *p != q)
+			{
+				if (*p == '\\' && p[1])
+					body_out->push_back(*p++);
+				body_out->push_back(*p++);
+			}
+			if (*p == q)
+				body_out->push_back(*p++);
+			at_line_start = false;
+			continue;
+		}
+
+		if (*p == '{')
+			brace_depth++;
+		else if (*p == '}' && brace_depth > 0)
+			brace_depth--;
+
+		if (*p == '\n')
+			at_line_start = true;
+		else if (*p != ' ' && *p != '\t' && *p != '\r')
+			at_line_start = false;
+
+		body_out->push_back(*p++);
+	}
+
+	return found_esm;
+}
+
+static std::string
+plv8_normalize_tle_specifier(const std::string &raw_spec,
+							 const std::string &base_spec,
+							 bool *escaped_root_out = nullptr)
+{
+	if (escaped_root_out != nullptr)
+		*escaped_root_out = false;
+
+	std::string spec = raw_spec;
+
+	if (spec.rfind("pgtle:", 0) == 0)
+		spec = spec.substr(6);
+	else if (spec.rfind("tle:", 0) == 0)
+		spec = spec.substr(4);
+
+	while (spec.rfind("/", 0) == 0)
+		spec = spec.substr(1);
+
+	if (spec.rfind("./", 0) == 0 || spec.rfind("../", 0) == 0 || spec == "..")
+	{
+		std::string base_dir;
+		std::string base_ver;
+		std::string clean_base = base_spec;
+
+		if (clean_base.rfind("pgtle:", 0) == 0)
+			clean_base = clean_base.substr(6);
+		else if (clean_base.rfind("tle:", 0) == 0)
+			clean_base = clean_base.substr(4);
+		while (clean_base.rfind("/", 0) == 0)
+			clean_base = clean_base.substr(1);
+
+		size_t slash_pos = clean_base.find('/');
+		size_t at_pos = std::string::npos;
+		for (size_t i = 1; i < clean_base.size(); i++)
+		{
+			if (clean_base[i] == '@' && (slash_pos == std::string::npos || i > slash_pos))
+			{
+				at_pos = i;
+				break;
+			}
+		}
+		if (at_pos != std::string::npos)
+		{
+			base_ver = clean_base.substr(at_pos);
+			clean_base = clean_base.substr(0, at_pos);
+		}
+
+		size_t last_slash = clean_base.rfind('/');
+		if (last_slash != std::string::npos)
+			base_dir = clean_base.substr(0, last_slash);
+
+		std::string combined = base_dir.empty() ? spec : (base_dir + "/" + spec);
+		std::vector<std::string> parts;
+		size_t start = 0;
+		while (start <= combined.size())
+		{
+			size_t end = combined.find('/', start);
+			std::string seg = (end == std::string::npos)
+				? combined.substr(start)
+				: combined.substr(start, end - start);
+			if (seg == "" || seg == ".")
+			{
+			}
+			else if (seg == "..")
+			{
+				if (parts.empty())
+				{
+					if (escaped_root_out != nullptr)
+						*escaped_root_out = true;
+					return "";
+				}
+				parts.pop_back();
+			}
+			else
+			{
+				parts.push_back(seg);
+			}
+			if (end == std::string::npos)
+				break;
+			start = end + 1;
+		}
+
+		std::string joined;
+		for (size_t i = 0; i < parts.size(); i++)
+		{
+			if (i > 0)
+				joined += "/";
+			joined += parts[i];
+		}
+		spec = joined + base_ver;
+	}
+
+	return spec;
+}
+
+static int
+plv8_compare_semver(const std::string &a, const std::string &b)
+{
+	size_t ia = 0, ib = 0;
+
+	while (ia < a.size() || ib < b.size())
+	{
+		if (ia < a.size() && ib < b.size() &&
+			a[ia] >= '0' && a[ia] <= '9' &&
+			b[ib] >= '0' && b[ib] <= '9')
+		{
+			unsigned long long va = 0, vb = 0;
+			while (ia < a.size() && a[ia] >= '0' && a[ia] <= '9')
+			{
+				va = va * 10ULL + (unsigned long long)(a[ia] - '0');
+				ia++;
+			}
+			while (ib < b.size() && b[ib] >= '0' && b[ib] <= '9')
+			{
+				vb = vb * 10ULL + (unsigned long long)(b[ib] - '0');
+				ib++;
+			}
+			if (va != vb)
+				return (va > vb) ? 1 : -1;
+		}
+		else
+		{
+			unsigned char ca = (ia < a.size()) ? (unsigned char) a[ia] : 0;
+			unsigned char cb = (ib < b.size()) ? (unsigned char) b[ib] : 0;
+			if (ca != cb)
+				return (ca > cb) ? 1 : -1;
+			if (ia < a.size())
+				ia++;
+			if (ib < b.size())
+				ib++;
+		}
+		if (ia < a.size() && a[ia] == '.')
+			ia++;
+		if (ib < b.size() && b[ib] == '.')
+			ib++;
+	}
+	return 0;
+}
+
+static void
+plv8_split_tle_spec(const std::string &spec, std::string &name_out, std::string &ver_out)
+{
+	std::string clean = spec;
+	if (clean.rfind("pgtle:", 0) == 0)
+		clean = clean.substr(6);
+	else if (clean.rfind("tle:", 0) == 0)
+		clean = clean.substr(4);
+
+	size_t slash_pos = clean.find('/');
+	size_t at_pos = std::string::npos;
+	for (size_t i = 1; i < clean.size(); i++)
+	{
+		if (clean[i] == '@' && (slash_pos == std::string::npos || i > slash_pos))
+		{
+			at_pos = i;
+			break;
+		}
+	}
+	if (at_pos != std::string::npos)
+	{
+		name_out = clean.substr(0, at_pos);
+		ver_out = clean.substr(at_pos + 1);
+	}
+	else
+	{
+		name_out = clean;
+		ver_out.clear();
+	}
+}
+
+static bool
+plv8_fetch_tle_module(const std::string &normalized_spec,
+					  const std::string &base_spec,
+					  std::string &resolved_name,
+					  std::string &resolved_version,
+					  std::string &source_out,
+					  std::vector<uint8_t> &bytecode_out,
+					  bool &is_trusted_out,
+					  std::string &err_msg)
+{
+	std::string target_name;
+	std::string target_version;
+	plv8_split_tle_spec(normalized_spec, target_name, target_version);
+	bool has_explicit_version = !target_version.empty();
+
+	std::string imp_name;
+	std::string imp_version;
+	if (!base_spec.empty())
+		plv8_split_tle_spec(base_spec, imp_name, imp_version);
+
+	if (!IsTransactionState())
+	{
+		err_msg = "cannot load pgtle module outside a transaction";
+		return false;
+	}
+
+	Oid nspoid = get_namespace_oid("pgtle", true);
+	if (!OidIsValid(nspoid))
+	{
+		err_msg = "schema \"pgtle\" does not exist (is pg_tle installed?)";
+		return false;
+	}
+
+	Oid relid = get_relname_relid("modules", nspoid);
+	if (!OidIsValid(relid))
+	{
+		err_msg = "table \"pgtle.modules\" does not exist";
+		return false;
+	}
+
+	bool found = false;
+	bool caller_is_super = false;
+	bool imp_has_requires = false;
+	std::string imp_best_ver;
+	std::vector<std::string> imp_requires;
+
+	PG_TRY();
+	{
+		caller_is_super = superuser();
+		Relation rel = table_open(relid, AccessShareLock);
+		TupleDesc tupdesc = RelationGetDescr(rel);
+		TableScanDesc scan = table_beginscan_catalog(rel, 0, NULL);
+		HeapTuple tuple;
+
+		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+		{
+			bool isnull_name = false, isnull_ver = false, isnull_src = false;
+			bool isnull_bc = false, isnull_trusted = false;
+
+			CHECK_FOR_INTERRUPTS();
+
+			Datum d_name = heap_getattr(tuple, 1, tupdesc, &isnull_name);
+			Datum d_ver = heap_getattr(tuple, 2, tupdesc, &isnull_ver);
+			if (isnull_name || isnull_ver)
+				continue;
+
+			char *c_name = TextDatumGetCString(d_name);
+			char *c_ver = TextDatumGetCString(d_ver);
+			std::string row_name(c_name);
+			std::string row_ver(c_ver);
+			pfree(c_name);
+			pfree(c_ver);
+
+			if (!imp_name.empty() && tupdesc->natts >= 6 && row_name == imp_name &&
+				(imp_version.empty() || row_ver == imp_version))
+			{
+				if (imp_best_ver.empty() ||
+					(!imp_version.empty()) ||
+					plv8_compare_semver(row_ver, imp_best_ver) > 0)
+				{
+					imp_best_ver = row_ver;
+					imp_requires.clear();
+					bool isnull_req = false;
+					Datum d_req = heap_getattr(tuple, 5, tupdesc, &isnull_req);
+					if (!isnull_req)
+					{
+						imp_has_requires = true;
+						ArrayType *arr = DatumGetArrayTypeP(d_req);
+						Datum *elems = nullptr;
+						bool *nulls = nullptr;
+						int nelems = 0;
+						deconstruct_array(arr, TEXTOID, -1, false, TYPALIGN_INT,
+										  &elems, &nulls, &nelems);
+						for (int i = 0; i < nelems; i++)
+						{
+							if (!nulls[i])
+							{
+								char *req_c = TextDatumGetCString(elems[i]);
+								imp_requires.emplace_back(req_c);
+								pfree(req_c);
+							}
+						}
+						if (elems)
+							pfree(elems);
+						if (nulls)
+							pfree(nulls);
+						if ((Pointer) arr != DatumGetPointer(d_req))
+							pfree(arr);
+					}
+					else
+					{
+						imp_has_requires = false;
+					}
+				}
+			}
+
+			if (row_name != target_name)
+				continue;
+			if (has_explicit_version && row_ver != target_version)
+				continue;
+
+			if (!found || (!has_explicit_version && plv8_compare_semver(row_ver, resolved_version) > 0))
+			{
+				Datum d_src = heap_getattr(tuple, 3, tupdesc, &isnull_src);
+				Datum d_bc = heap_getattr(tuple, 4, tupdesc, &isnull_bc);
+				Datum d_trusted = (tupdesc->natts >= 6)
+					? heap_getattr(tuple, 6, tupdesc, &isnull_trusted)
+					: heap_getattr(tuple, 5, tupdesc, &isnull_trusted);
+
+				resolved_name = row_name;
+				resolved_version = row_ver;
+
+				if (!isnull_src)
+				{
+					char *c_src = TextDatumGetCString(d_src);
+					source_out.assign(c_src);
+					pfree(c_src);
+				}
+				else
+					source_out.clear();
+
+				bytecode_out.clear();
+				if (!isnull_bc)
+				{
+					bytea *bc = DatumGetByteaPP(d_bc);
+					const uint8_t *bc_ptr = (const uint8_t *) VARDATA_ANY(bc);
+					size_t bc_len = VARSIZE_ANY_EXHDR(bc);
+					bytecode_out.assign(bc_ptr, bc_ptr + bc_len);
+					if ((Pointer) bc != DatumGetPointer(d_bc))
+						pfree(bc);
+				}
+
+				is_trusted_out = isnull_trusted ? true : DatumGetBool(d_trusted);
+				found = true;
+				if (has_explicit_version && imp_name.empty())
+					break;
+			}
+		}
+
+		table_endscan(scan);
+		table_close(rel, AccessShareLock);
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		err_msg = "failed to scan pgtle.modules catalog";
+		return false;
+	}
+	PG_END_TRY();
+
+	if (!found)
+	{
+		if (has_explicit_version)
+			err_msg = "module \"" + target_name + "@" + target_version + "\" not found in pgtle.modules";
+		else
+			err_msg = "module \"" + target_name + "\" not found in pgtle.modules";
+		return false;
+	}
+
+	if (!is_trusted_out && !caller_is_super)
+	{
+		err_msg = "permission denied for untrusted module \"" + resolved_name + "@" + resolved_version + "\"";
+		return false;
+	}
+
+	if (imp_has_requires)
+	{
+		bool allowed = false;
+		for (size_t i = 0; i < imp_requires.size(); i++)
+		{
+			std::string req_n, req_v;
+			plv8_split_tle_spec(imp_requires[i], req_n, req_v);
+			if (req_n == resolved_name && (req_v.empty() || req_v == resolved_version))
+			{
+				allowed = true;
+				break;
+			}
+		}
+		if (!allowed)
+		{
+			err_msg = "pg_tle module \"" + resolved_name + "\" is not listed in requires of \"" + imp_name + "\"";
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static MaybeLocal<Module>
+plv8_load_tle_module(Local<Context> context, const std::string &raw_spec, const std::string &base_spec)
+{
+	Isolate *isolate = Isolate::GetCurrent();
+	bool escaped_root = false;
+	std::string norm_spec = plv8_normalize_tle_specifier(raw_spec, base_spec, &escaped_root);
+	if (escaped_root)
+	{
+		std::string msg = "relative module specifier \"" + raw_spec + "\" traverses above root";
+		isolate->ThrowException(Exception::Error(ToString(msg.c_str())));
+		return MaybeLocal<Module>();
+	}
+
+	if (current_context && base_spec.empty())
+	{
+		plv8_sync_tle_module_cache(current_context);
+		auto it = current_context->tle_module_map.find(norm_spec);
+		if (it != current_context->tle_module_map.end() && !it->second.IsEmpty())
+		{
+			return it->second.Get(isolate);
+		}
+	}
+
+	std::string resolved_name, resolved_ver, source_code, err_msg;
+	std::vector<uint8_t> bytecode;
+	bool is_trusted = true;
+
+	if (!plv8_fetch_tle_module(norm_spec, base_spec, resolved_name, resolved_ver,
+							   source_code, bytecode, is_trusted, err_msg))
+	{
+		isolate->ThrowException(Exception::Error(ToString(err_msg.c_str())));
+		return MaybeLocal<Module>();
+	}
+
+	std::string canonical_key = resolved_name + "@" + resolved_ver;
+	if (current_context)
+	{
+		auto it = current_context->tle_module_map.find(canonical_key);
+		if (it != current_context->tle_module_map.end() && !it->second.IsEmpty())
+		{
+			Local<Module> cached_mod = it->second.Get(isolate);
+			current_context->tle_module_map[norm_spec].Reset(isolate, cached_mod);
+			return cached_mod;
+		}
+	}
+
+	std::string origin_url = "pgtle:" + canonical_key;
+	Local<v8::String> resource_name = ToString(origin_url.c_str());
+	ScriptOrigin origin(resource_name,
+						0,
+						0,
+						false,
+						-1,
+						Local<Value>(),
+						false,
+						false,
+						true /* is_module */);
+
+	std::string actual_source = source_code;
+	ScriptCompiler::CachedData *cached_data = nullptr;
+	ScriptCompiler::CompileOptions compile_options = ScriptCompiler::kNoCompileOptions;
+
+	if (bytecode.size() >= 16 &&
+		memcmp(bytecode.data(), PLV8_BYTECODE_MAGIC, 8) == 0)
+	{
+		uint32_t src_len = 0, cache_len = 0;
+		memcpy(&src_len, bytecode.data() + 8, sizeof(uint32_t));
+		memcpy(&cache_len, bytecode.data() + 12, sizeof(uint32_t));
+		if (16ULL + src_len + cache_len == bytecode.size() && cache_len > 0)
+		{
+			actual_source.assign((const char *) (bytecode.data() + 16), src_len);
+			uint8_t *cd_buf = new uint8_t[cache_len];
+			memcpy(cd_buf, bytecode.data() + 16 + src_len, cache_len);
+			cached_data = new ScriptCompiler::CachedData(
+				cd_buf, (int) cache_len, ScriptCompiler::CachedData::BufferOwned);
+			compile_options = ScriptCompiler::kConsumeCodeCache;
+		}
+	}
+	else if (bytecode.size() >= 8 &&
+			 bytecode[0] == 0x00 && bytecode[1] == 0x61 &&
+			 bytecode[2] == 0x73 && bytecode[3] == 0x6d &&
+			 bytecode[4] == 0x01 && bytecode[5] == 0x00 &&
+			 bytecode[6] == 0x00 && bytecode[7] == 0x00)
+	{
+		std::ostringstream wasm_js;
+		wasm_js << "const __wasm_bytes = new Uint8Array([";
+		for (size_t i = 0; i < bytecode.size(); i++)
+		{
+			if (i > 0)
+				wasm_js << ",";
+			wasm_js << (unsigned int) bytecode[i];
+		}
+		wasm_js << "]);\n";
+		wasm_js << "const __cache_key = " << "\"pgtle:" << canonical_key << ":" << bytecode.size() << "\";\n";
+		wasm_js << "const __mod = (typeof plv8.compile_wasm_cached === 'function') "
+				<< "? plv8.compile_wasm_cached(__cache_key, __wasm_bytes) "
+				<< ": new WebAssembly.Module(__wasm_bytes);\n";
+		wasm_js << "let __inst = null;\n";
+		wasm_js << "const __imports = {\n"
+				<< "  env: {\n"
+				<< "    abort: function() { throw new Error('WASM execution aborted'); },\n"
+				<< "    plv8_elog_notice: function(ptr, len) {\n"
+				<< "      const b = new Uint8Array(__inst.exports.memory.buffer, ptr >>> 0, len >>> 0);\n"
+				<< "      let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);\n"
+				<< "      plv8.elog(NOTICE, s);\n"
+				<< "    },\n"
+				<< "    plv8_elog_error: function(ptr, len) {\n"
+				<< "      const b = new Uint8Array(__inst.exports.memory.buffer, ptr >>> 0, len >>> 0);\n"
+				<< "      let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);\n"
+				<< "      throw new Error(s);\n"
+				<< "    }\n"
+				<< "  }\n"
+				<< "};\n";
+		wasm_js << "__inst = new WebAssembly.Instance(__mod, __imports);\n";
+		wasm_js << "export const module = __mod;\n";
+		wasm_js << "export const instance = __inst;\n";
+		wasm_js << "export const exports = __inst.exports;\n";
+
+		bool exported_memory = false;
+		size_t pos = 8;
+		auto read_uleb128 = [&](size_t &p, uint32_t &out) -> bool {
+			out = 0;
+			unsigned shift = 0;
+			while (p < bytecode.size() && shift < 35)
+			{
+				uint8_t byte = bytecode[p++];
+				out |= (uint32_t)(byte & 0x7f) << shift;
+				if ((byte & 0x80) == 0)
+					return true;
+				shift += 7;
+			}
+			return false;
+		};
+		auto is_valid_js_ident = [](const std::string &s) -> bool {
+			if (s.empty() || s == "default" || s == "module" ||
+				s == "instance" || s == "exports")
+				return false;
+			char c0 = s[0];
+			if (!((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') ||
+				  c0 == '_' || c0 == '$'))
+				return false;
+			for (size_t i = 1; i < s.size(); i++)
+			{
+				char c = s[i];
+				if (!((c >= 'a' && c <= 'z') ||
+					  (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+					  c == '_' || c == '$'))
+					return false;
+			}
+			return true;
+		};
+
+		while (pos < bytecode.size())
+		{
+			uint8_t sec_id = bytecode[pos++];
+			uint32_t sec_len = 0;
+			if (!read_uleb128(pos, sec_len) || pos + sec_len > bytecode.size())
+				break;
+			size_t sec_end = pos + sec_len;
+			if (sec_id == 7)
+			{
+				uint32_t count = 0;
+				if (read_uleb128(pos, count))
+				{
+					for (uint32_t i = 0; i < count && pos < sec_end; i++)
+					{
+						uint32_t name_len = 0;
+						if (!read_uleb128(pos, name_len) || pos + name_len > sec_end)
+							break;
+						std::string exp_name((const char *) (bytecode.data() + pos), name_len);
+						pos += name_len;
+						if (pos >= sec_end)
+							break;
+						pos++;
+						uint32_t exp_idx = 0;
+						if (!read_uleb128(pos, exp_idx))
+							break;
+						if (is_valid_js_ident(exp_name))
+						{
+							if (exp_name == "memory")
+								exported_memory = true;
+							wasm_js << "export const " << exp_name
+									<< " = __inst.exports[\"" << exp_name << "\"];\n";
+						}
+					}
+				}
+				break;
+			}
+			pos = sec_end;
+		}
+		if (!exported_memory)
+			wasm_js << "export const memory = __inst.exports.memory;\n";
+		wasm_js << "export default __inst.exports;\n";
+		actual_source = wasm_js.str();
+	}
+	else if (!bytecode.empty())
+	{
+		uint8_t *cd_buf = new uint8_t[bytecode.size()];
+		memcpy(cd_buf, bytecode.data(), bytecode.size());
+		cached_data = new ScriptCompiler::CachedData(
+			cd_buf, (int) bytecode.size(), ScriptCompiler::CachedData::BufferOwned);
+		compile_options = ScriptCompiler::kConsumeCodeCache;
+	}
+	else
+	{
+		if (actual_source.find("export ") == std::string::npos &&
+			actual_source.find("export{") == std::string::npos &&
+			actual_source.find("export\t") == std::string::npos &&
+			(actual_source.find("exports") != std::string::npos ||
+			 actual_source.find("require(") != std::string::npos))
+		{
+			std::string cjs_imports, cjs_body;
+			plv8_extract_hoisted_imports(actual_source.c_str(), &cjs_imports, &cjs_body);
+			actual_source = cjs_imports +
+				"\nconst module = { exports: {} };\nconst exports = module.exports;\n" +
+				"const require = (spec) => plv8.require(spec, \"" + canonical_key + "\");\n" +
+				cjs_body +
+				"\nexport default module.exports;\n";
+		}
+	}
+
+	Local<v8::String> source_str = ToString(actual_source.data(), actual_source.size());
+	ScriptCompiler::Source script_source(source_str, origin, cached_data);
+
+	MaybeLocal<Module> maybe_mod = ScriptCompiler::CompileModule(
+		isolate, &script_source, compile_options);
+
+	if (maybe_mod.IsEmpty() && compile_options == ScriptCompiler::kConsumeCodeCache)
+	{
+		ScriptCompiler::Source fallback_source(source_str, origin);
+		maybe_mod = ScriptCompiler::CompileModule(isolate, &fallback_source);
+	}
+
+	Local<Module> mod;
+	if (!maybe_mod.ToLocal(&mod))
+		return MaybeLocal<Module>();
+
+	if (current_context)
+	{
+		current_context->tle_module_map[canonical_key].Reset(isolate, mod);
+		current_context->tle_module_map[norm_spec].Reset(isolate, mod);
+		current_context->tle_module_id_to_spec[mod->GetIdentityHash()] = canonical_key;
+	}
+
+	return mod;
+}
+
+MaybeLocal<Module>
+plv8_ResolveModuleCallback(Local<Context> context,
+						   Local<v8::String> specifier,
+						   Local<FixedArray> import_attributes,
+						   Local<Module> referrer)
+{
+	Isolate *isolate = Isolate::GetCurrent();
+	v8::String::Utf8Value spec_utf8(isolate, specifier);
+	std::string raw_spec(*spec_utf8 ? *spec_utf8 : "");
+
+	std::string base_spec;
+	if (!referrer.IsEmpty() && current_context)
+	{
+		auto it = current_context->tle_module_id_to_spec.find(referrer->GetIdentityHash());
+		if (it != current_context->tle_module_id_to_spec.end())
+			base_spec = it->second;
+	}
+
+	return plv8_load_tle_module(context, raw_spec, base_spec);
+}
+
+MaybeLocal<Promise>
+plv8_HostImportModuleDynamicallyCallback(Local<Context> context,
+										 Local<Data> host_defined_options,
+										 Local<Value> resource_name,
+										 Local<v8::String> specifier,
+										 Local<FixedArray> import_attributes)
+{
+	Isolate *isolate = Isolate::GetCurrent();
+	Local<Promise::Resolver> resolver;
+	if (!Promise::Resolver::New(context).ToLocal(&resolver))
+		return MaybeLocal<Promise>();
+
+	TryCatch try_catch(isolate);
+	v8::String::Utf8Value spec_utf8(isolate, specifier);
+	std::string raw_spec(*spec_utf8 ? *spec_utf8 : "");
+
+	std::string base_spec;
+	if (!resource_name.IsEmpty() && resource_name->IsString())
+	{
+		v8::String::Utf8Value res_utf8(isolate, resource_name);
+		if (*res_utf8)
+		{
+			if (strncmp(*res_utf8, "pgtle:", 6) == 0)
+				base_spec = *res_utf8 + 6;
+			else if (strncmp(*res_utf8, "tle:", 4) == 0)
+				base_spec = *res_utf8 + 4;
+		}
+	}
+
+	MaybeLocal<Module> maybe_mod = plv8_load_tle_module(context, raw_spec, base_spec);
+	Local<Module> mod;
+	if (!maybe_mod.ToLocal(&mod))
+	{
+		Local<Value> exc = try_catch.HasCaught()
+			? try_catch.Exception()
+			: Exception::Error(ToString("failed to load module"));
+		resolver->Reject(context, exc).FromMaybe(false);
+		return resolver->GetPromise();
+	}
+
+	if (mod->GetStatus() == Module::kUninstantiated)
+	{
+		Maybe<bool> inst = mod->InstantiateModule(context, plv8_ResolveModuleCallback);
+		if (inst.IsNothing() || !inst.FromJust())
+		{
+			Local<Value> exc = try_catch.HasCaught()
+				? try_catch.Exception()
+				: Exception::Error(ToString("failed to instantiate module"));
+			resolver->Reject(context, exc).FromMaybe(false);
+			return resolver->GetPromise();
+		}
+	}
+
+	if (mod->GetStatus() == Module::kInstantiated)
+	{
+		bool prev_ignore = current_context ? current_context->ignore_unhandled_promises : false;
+		if (current_context)
+			current_context->ignore_unhandled_promises = true;
+		MaybeLocal<Value> eval_res = mod->Evaluate(context);
+		if (current_context)
+			current_context->ignore_unhandled_promises = prev_ignore;
+
+		Local<Value> val;
+		if (!eval_res.ToLocal(&val))
+		{
+			Local<Value> exc = try_catch.HasCaught()
+				? try_catch.Exception()
+				: Exception::Error(ToString("failed to evaluate module"));
+			resolver->Reject(context, exc).FromMaybe(false);
+			return resolver->GetPromise();
+		}
+		if (val->IsPromise())
+		{
+			Local<Promise> prom = val.As<Promise>();
+			if (prom->State() == Promise::kRejected)
+			{
+				resolver->Reject(context, prom->Result()).FromMaybe(false);
+				return resolver->GetPromise();
+			}
+		}
+	}
+
+	if (mod->GetStatus() == Module::kErrored)
+	{
+		resolver->Reject(context, mod->GetException()).FromMaybe(false);
+		return resolver->GetPromise();
+	}
+
+	resolver->Resolve(context, mod->GetModuleNamespace()).FromMaybe(false);
+	return resolver->GetPromise();
+}
+
+void
+plv8_HostInitializeImportMetaObjectCallback(Local<Context> context,
+											Local<Module> module,
+											Local<Object> meta)
+{
+	std::string url = "pgtle:anonymous";
+
+	if (current_context)
+	{
+		auto it = current_context->tle_module_id_to_spec.find(module->GetIdentityHash());
+		if (it != current_context->tle_module_id_to_spec.end())
+			url = "pgtle:" + it->second;
+	}
+
+	meta->CreateDataProperty(
+		context,
+		ToString("url"),
+		ToString(url.c_str())).FromMaybe(false);
+}
+
+static Local<Object>
+plv8_compile_and_eval_anon_module(Local<Context> context,
+								  const char *name,
+								  const char *mod_src)
+{
+	Isolate *isolate = Isolate::GetCurrent();
+	EscapableHandleScope handle_scope(isolate);
+	TryCatch try_catch(isolate);
+
+	Local<v8::String> sname = ToString(name ? name : "pgtle:anonymous");
+	Local<v8::String> source = ToString(mod_src);
+	ScriptOrigin origin(sname,
+						0,
+						0,
+						false,
+						-1,
+						Local<Value>(),
+						false,
+						false,
+						true /* is_module */);
+	ScriptCompiler::Source script_source(source, origin);
+
+	MaybeLocal<Module> maybe_mod = ScriptCompiler::CompileModule(isolate, &script_source);
+	Local<Module> mod;
+	if (!maybe_mod.ToLocal(&mod))
+		throw js_error(try_catch);
+
+	Maybe<bool> inst = mod->InstantiateModule(context, plv8_ResolveModuleCallback);
+	if (inst.IsNothing() || !inst.FromJust())
+		throw js_error(try_catch);
+
+	bool prev_ignore = current_context ? current_context->ignore_unhandled_promises : false;
+	if (current_context)
+		current_context->ignore_unhandled_promises = true;
+	MaybeLocal<Value> eval_res = mod->Evaluate(context);
+	if (current_context)
+		current_context->ignore_unhandled_promises = prev_ignore;
+
+	Local<Value> val;
+	if (!eval_res.ToLocal(&val))
+		throw js_error(try_catch);
+
+	if (val->IsPromise())
+	{
+		Local<Promise> prom = val.As<Promise>();
+		if (prom->State() == Promise::kRejected)
+		{
+			isolate->ThrowException(prom->Result());
+			throw js_error(try_catch);
+		}
+	}
+
+	Local<Value> ns_val = mod->GetModuleNamespace();
+	return handle_scope.Escape(ns_val.As<Object>());
+}
+
+void
+plv8_Require(const FunctionCallbackInfo<Value> &args)
+{
+	Isolate *isolate = args.GetIsolate();
+	HandleScope handle_scope(isolate);
+	Local<Context> context = isolate->GetCurrentContext();
+
+	if (args.Length() < 1 || !args[0]->IsString())
+	{
+		isolate->ThrowException(Exception::TypeError(ToString("require() expects a module name string")));
+		return;
+	}
+
+	v8::String::Utf8Value spec_utf8(isolate, args[0]);
+	std::string raw_spec(*spec_utf8 ? *spec_utf8 : "");
+
+	std::string base_spec;
+	if (args.Length() >= 2 && args[1]->IsString())
+	{
+		v8::String::Utf8Value base_utf8(isolate, args[1]);
+		if (*base_utf8)
+			base_spec.assign(*base_utf8);
+	}
+	else if (raw_spec.rfind("./", 0) == 0 || raw_spec.rfind("../", 0) == 0)
+	{
+		Local<StackTrace> st = StackTrace::CurrentStackTrace(isolate, 4, StackTrace::kScriptName);
+		if (!st.IsEmpty())
+		{
+			for (int i = 0; i < st->GetFrameCount(); i++)
+			{
+				Local<StackFrame> frame = st->GetFrame(isolate, i);
+				if (!frame.IsEmpty() && !frame->GetScriptName().IsEmpty())
+				{
+					v8::String::Utf8Value sname(isolate, frame->GetScriptName());
+					if (*sname && (strncmp(*sname, "pgtle:", 6) == 0 || strncmp(*sname, "tle:", 4) == 0))
+					{
+						base_spec.assign(*sname);
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	TryCatch try_catch(isolate);
+	MaybeLocal<Module> maybe_mod = plv8_load_tle_module(context, raw_spec, base_spec);
+	Local<Module> mod;
+	if (!maybe_mod.ToLocal(&mod))
+	{
+		try_catch.ReThrow();
+		return;
+	}
+
+	if (mod->GetStatus() == Module::kUninstantiated)
+	{
+		Maybe<bool> inst = mod->InstantiateModule(context, plv8_ResolveModuleCallback);
+		if (inst.IsNothing() || !inst.FromJust())
+		{
+			try_catch.ReThrow();
+			return;
+		}
+	}
+
+	if (mod->GetStatus() == Module::kInstantiated)
+	{
+		bool prev_ignore = current_context ? current_context->ignore_unhandled_promises : false;
+		if (current_context)
+			current_context->ignore_unhandled_promises = true;
+		MaybeLocal<Value> eval_res = mod->Evaluate(context);
+		if (current_context)
+			current_context->ignore_unhandled_promises = prev_ignore;
+
+		Local<Value> val;
+		if (!eval_res.ToLocal(&val))
+		{
+			try_catch.ReThrow();
+			return;
+		}
+		if (val->IsPromise())
+		{
+			Local<Promise> prom = val.As<Promise>();
+			if (prom->State() == Promise::kRejected)
+			{
+				isolate->ThrowException(prom->Result());
+				return;
+			}
+		}
+	}
+
+	if (mod->GetStatus() == Module::kErrored)
+	{
+		isolate->ThrowException(mod->GetException());
+		return;
+	}
+
+	Local<Value> ns_val = mod->GetModuleNamespace();
+	if (ns_val->IsModuleNamespaceObject() || ns_val->IsObject())
+	{
+		Local<Object> ns_obj = ns_val.As<Object>();
+		Local<Array> keys;
+		if (ns_obj->GetOwnPropertyNames(context).ToLocal(&keys) && keys->Length() == 1)
+		{
+			Local<Value> k0;
+			if (keys->Get(context, 0).ToLocal(&k0) && k0->IsString())
+			{
+				v8::String::Utf8Value k_utf8(isolate, k0);
+				if (*k_utf8 && strcmp(*k_utf8, "default") == 0)
+				{
+					Local<Value> def_val;
+					if (ns_obj->Get(context, k0).ToLocal(&def_val))
+					{
+						args.GetReturnValue().Set(def_val);
+						return;
+					}
+				}
+			}
+		}
+	}
+
+	args.GetReturnValue().Set(ns_val);
+}
+
+void
+plv8_CompileBytecode(const FunctionCallbackInfo<Value> &args)
+{
+	Isolate *isolate = args.GetIsolate();
+	HandleScope handle_scope(isolate);
+
+	if (args.Length() < 1 || !args[0]->IsString())
+	{
+		isolate->ThrowException(Exception::TypeError(
+			ToString("plv8.compile_bytecode(source[, module_name]) expects a source string")));
+		return;
+	}
+
+	Local<v8::String> source_str = args[0].As<v8::String>();
+	v8::String::Utf8Value src_utf8(isolate, source_str);
+	const char *src_bytes = *src_utf8 ? *src_utf8 : "";
+	uint32_t src_len = (uint32_t) src_utf8.length();
+
+	std::string origin_url = "pgtle:bytecode";
+	if (args.Length() >= 2 && args[1]->IsString())
+	{
+		v8::String::Utf8Value name_utf8(isolate, args[1]);
+		if (*name_utf8 && (*name_utf8)[0] != '\0')
+		{
+			std::string n(*name_utf8);
+			origin_url = (n.rfind("pgtle:", 0) == 0) ? n : ("pgtle:" + n);
+		}
+	}
+
+	ScriptOrigin origin(ToString(origin_url.c_str()),
+						0,
+						0,
+						false,
+						-1,
+						Local<Value>(),
+						false,
+						false,
+						true /* is_module */);
+	ScriptCompiler::Source script_source(source_str, origin);
+
+	TryCatch try_catch(isolate);
+	MaybeLocal<Module> maybe_mod = ScriptCompiler::CompileModule(isolate, &script_source);
+	Local<Module> mod;
+	if (!maybe_mod.ToLocal(&mod))
+	{
+		try_catch.ReThrow();
+		return;
+	}
+
+	ScriptCompiler::CachedData *cd = ScriptCompiler::CreateCodeCache(mod->GetUnboundModuleScript());
+	if (!cd || !cd->data || cd->length <= 0)
+	{
+		if (cd)
+			delete cd;
+		isolate->ThrowException(Exception::Error(ToString("V8 CreateCodeCache returned empty data")));
+		return;
+	}
+
+	uint32_t cache_len = (uint32_t) cd->length;
+	size_t total_len = 16 + (size_t) src_len + (size_t) cache_len;
+
+	std::unique_ptr<v8::BackingStore> bs = v8::ArrayBuffer::NewBackingStore(isolate, total_len);
+	uint8_t *dst = static_cast<uint8_t *>(bs->Data());
+
+	memcpy(dst, PLV8_BYTECODE_MAGIC, 8);
+	memcpy(dst + 8, &src_len, sizeof(uint32_t));
+	memcpy(dst + 12, &cache_len, sizeof(uint32_t));
+	if (src_len > 0)
+		memcpy(dst + 16, src_bytes, src_len);
+	memcpy(dst + 16 + src_len, cd->data, cache_len);
+
+	delete cd;
+
+	Local<ArrayBuffer> ab = v8::ArrayBuffer::New(isolate, std::move(bs));
+	Local<Uint8Array> u8 = v8::Uint8Array::New(ab, 0, total_len);
+	args.GetReturnValue().Set(u8);
+}
+

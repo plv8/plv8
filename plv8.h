@@ -10,13 +10,16 @@
 
 #include "plv8_config.h"
 #include <v8.h>
+#include <v8-wasm.h>
 #ifdef ENABLE_DEBUGGER_SUPPORT
 #include <v8-debug.h>
 #endif  // ENABLE_DEBUGGER_SUPPORT
 #include <v8-version-string.h>
+#include <unordered_map>
 #include <vector>
 
 extern "C" {
+#define String PG_Node_String
 #include "postgres.h"
 
 #include "access/htup.h"
@@ -24,6 +27,7 @@ extern "C" {
 #include "mb/pg_wchar.h"
 #include "utils/tuplestore.h"
 #include "windowapi.h"
+#undef String
 }
 #include <string>
 
@@ -116,6 +120,7 @@ typedef struct plv8_context
 {
 	v8::Isolate				   	   	   *isolate;
 	v8::ArrayBuffer::Allocator	   	   *array_buffer_allocator;
+	v8::MicrotaskQueue				   *microtask_queue;
 	v8::Persistent<v8::Context>			context;
 	v8::Persistent<v8::ObjectTemplate>	recv_templ;
 	v8::Persistent<v8::Context>			compile_context;
@@ -129,6 +134,9 @@ typedef struct plv8_context
 	uint64						id;			/* unique for the life of the backend */
 	std::vector<std::tuple<v8::Global<v8::Promise>, v8::Global<v8::Message>, v8::Global<v8::Value>>> unhandled_promises;
 	bool 						ignore_unhandled_promises;
+	std::unordered_map<std::string, v8::Global<v8::Module>> tle_module_map;
+	std::unordered_map<int, std::string> tle_module_id_to_spec;
+	uint64						tle_modules_fp;
 } plv8_context;
 
 /*
@@ -216,17 +224,18 @@ public:
 		m_winobj = PG_WINDOW_OBJECT();
 		if (WindowObjectIsValid(m_winobj))
 		{
+			v8::Isolate *isolate = v8::Isolate::GetCurrent();
 			m_plv8obj = v8::Handle<v8::Object>::Cast(
 					context->Global()->Get(context, v8::String::NewFromUtf8Literal(
-						context->GetIsolate(),
+						isolate,
 						"plv8",
 						v8::NewStringType::kInternalized)).ToLocalChecked());
 			if (m_plv8obj.IsEmpty())
 				throw js_error("plv8 object not found");
 			/* Stash the current item, just in case of nested call */
-			m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO);
+			m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>();
 			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO,
-					v8::External::New(context->GetIsolate(), fcinfo));
+					v8::External::New(isolate, fcinfo, v8::kExternalPointerTypeTagDefault));
 		}
 	}
 	bool IsWindowCall() { return WindowObjectIsValid(m_winobj); }
@@ -256,25 +265,80 @@ public:
 	SRFSupport(v8::Handle<v8::Context> context,
 			   Converter *conv, Tuplestorestate *tupstore)
 	{
+	    v8::Isolate *isolate = v8::Isolate::GetCurrent();
 	    v8::Local<v8::Value> m_val;
 	    if (!context->Global()->Get(context, v8::String::NewFromUtf8Literal(
-                context->GetIsolate(),
+                isolate,
                 "plv8",
                 v8::NewStringType::kInternalized)).ToLocal(&m_val))
             throw js_error("plv8 object not found");
 	    m_plv8obj = v8::Handle<v8::Object>::Cast(m_val);
-		m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV);
-		m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE);
+		m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
+		m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE).As<v8::Value>();
 		m_plv8obj->SetInternalField(PLV8_INTNL_CONV,
-									v8::External::New(context->GetIsolate(), conv));
+									v8::External::New(isolate, conv, v8::kExternalPointerTypeTagDefault));
 		m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE,
-									v8::External::New(context->GetIsolate(), tupstore));
+									v8::External::New(isolate, tupstore, v8::kExternalPointerTypeTagDefault));
 	}
 	~SRFSupport()
 	{
 		/* Restore the previous items. */
 		m_plv8obj->SetInternalField(PLV8_INTNL_CONV, m_prev_conv);
 		m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, m_prev_tupstore);
+	}
+};
+
+#define PLV8_MAX_LANG_HANDLER_DEPTH 32
+
+typedef struct plv8_handler_dep
+{
+	Oid				fn_oid;
+	TransactionId	fn_xmin;
+	ItemPointerData	fn_tid;
+} plv8_handler_dep;
+
+/*
+ * Temporarily clear SRF and window function state on the global plv8 object
+ * while a language handler transpiler executes, so a handler cannot call
+ * plv8.return_next() or plv8.get_window_object() against an outer function's
+ * state.
+ */
+class HandlerExecutionScope
+{
+private:
+	v8::Local<v8::Object> m_plv8obj;
+	v8::Local<v8::Value> m_prev_conv;
+	v8::Local<v8::Value> m_prev_tupstore;
+	v8::Local<v8::Value> m_prev_fcinfo;
+
+public:
+	explicit HandlerExecutionScope(v8::Local<v8::Context> context)
+	{
+		v8::Isolate *isolate = v8::Isolate::GetCurrent();
+		v8::Local<v8::Value> val;
+		if (context->Global()->Get(context, v8::String::NewFromUtf8Literal(
+				isolate,
+				"plv8",
+				v8::NewStringType::kInternalized)).ToLocal(&val) &&
+			!val.IsEmpty() && val->IsObject())
+		{
+			m_plv8obj = v8::Local<v8::Object>::Cast(val);
+			m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
+			m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE).As<v8::Value>();
+			m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>();
+			m_plv8obj->SetInternalField(PLV8_INTNL_CONV, v8::Undefined(isolate));
+			m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, v8::Undefined(isolate));
+			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO, v8::Undefined(isolate));
+		}
+	}
+	~HandlerExecutionScope()
+	{
+		if (!m_plv8obj.IsEmpty())
+		{
+			m_plv8obj->SetInternalField(PLV8_INTNL_CONV, m_prev_conv);
+			m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, m_prev_tupstore);
+			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO, m_prev_fcinfo);
+		}
 	}
 };
 
@@ -322,6 +386,7 @@ extern v8::Handle<v8::Function> CreateYieldFunction(Converter *conv, Tuplestores
 extern void Subtransaction(const v8::FunctionCallbackInfo<v8::Value>& info) throw();
 
 extern void SetupPlv8Functions(v8::Handle<v8::ObjectTemplate> plv8);
+extern void SetupGlobalFunctions(v8::Handle<v8::ObjectTemplate> global);
 extern void SetupPrepFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupCursorFunctions(v8::Handle<v8::ObjectTemplate> templ);
 extern void SetupWindowFunctions(v8::Handle<v8::ObjectTemplate> templ);
@@ -330,8 +395,35 @@ extern void HandleUnhandledPromiseRejections();
 
 extern void GetMemoryInfo(v8::Local<v8::Object> obj);
 
+extern bool plv8_pass_user_types_as_bytes;
+extern bool plv8_wasm_cache_lookup(const char *key, std::vector<uint8_t> *out);
+extern bool plv8_wasm_cache_store(const char *key, const uint8_t *bytes, size_t len);
+extern uint64 plv8_tle_modules_fingerprint(void);
+extern void plv8_Require(const v8::FunctionCallbackInfo<v8::Value>& args);
+extern void plv8_CompileBytecode(const v8::FunctionCallbackInfo<v8::Value>& args);
+extern v8::MaybeLocal<v8::Module> plv8_ResolveModuleCallback(
+	v8::Local<v8::Context> context,
+	v8::Local<v8::String> specifier,
+	v8::Local<v8::FixedArray> import_attributes,
+	v8::Local<v8::Module> referrer);
+extern v8::MaybeLocal<v8::Promise> plv8_HostImportModuleDynamicallyCallback(
+	v8::Local<v8::Context> context,
+	v8::Local<v8::Data> host_defined_options,
+	v8::Local<v8::Value> resource_name,
+	v8::Local<v8::String> specifier,
+	v8::Local<v8::FixedArray> import_attributes);
+extern void plv8_HostInitializeImportMetaObjectCallback(
+	v8::Local<v8::Context> context,
+	v8::Local<v8::Module> module,
+	v8::Local<v8::Object> meta);
+
 extern struct config_generic *plv8_find_option(const char *name);
 char *plv8_string_option(struct config_generic * record);
 int plv8_int_option(struct config_generic * record);
+
+extern bool is_main_pg_thread(void);
+extern void plv8_assert_main_pg_thread(const char *api_name);
+#define PLV8_ASSERT_MAIN_PG_THREAD() plv8_assert_main_pg_thread(__func__)
+extern const intptr_t plv8_external_references[];
 
 #endif	// _PLV8_

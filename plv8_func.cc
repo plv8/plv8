@@ -7,9 +7,12 @@
  */
 #include "plv8.h"
 #include "plv8_param.h"
+#include <span>
 #include <string>
+#include <variant>
 
 extern "C" {
+#define String PG_Node_String
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
@@ -17,6 +20,7 @@ extern "C" {
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "nodes/memnodes.h"
+#undef String
 } // extern "C"
 
 using namespace v8;
@@ -50,6 +54,43 @@ static void plv8_QuoteIdent(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_Commit(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_Rollback(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_CompileWasmCached(const FunctionCallbackInfo<v8::Value>& args);
+
+const intptr_t plv8_external_references[] = {
+	reinterpret_cast<intptr_t>(plv8_FunctionInvoker),
+	reinterpret_cast<intptr_t>(plv8_Elog),
+	reinterpret_cast<intptr_t>(plv8_Execute),
+	reinterpret_cast<intptr_t>(plv8_Prepare),
+	reinterpret_cast<intptr_t>(plv8_PlanCursor),
+	reinterpret_cast<intptr_t>(plv8_PlanExecute),
+	reinterpret_cast<intptr_t>(plv8_PlanFree),
+	reinterpret_cast<intptr_t>(plv8_CursorFetch),
+	reinterpret_cast<intptr_t>(plv8_CursorMove),
+	reinterpret_cast<intptr_t>(plv8_CursorClose),
+	reinterpret_cast<intptr_t>(plv8_ReturnNext),
+	reinterpret_cast<intptr_t>(plv8_Subtransaction),
+	reinterpret_cast<intptr_t>(plv8_FindFunction),
+	reinterpret_cast<intptr_t>(plv8_GetWindowObject),
+	reinterpret_cast<intptr_t>(plv8_WinGetPartitionLocal),
+	reinterpret_cast<intptr_t>(plv8_WinSetPartitionLocal),
+	reinterpret_cast<intptr_t>(plv8_WinGetCurrentPosition),
+	reinterpret_cast<intptr_t>(plv8_WinGetPartitionRowCount),
+	reinterpret_cast<intptr_t>(plv8_WinSetMarkPosition),
+	reinterpret_cast<intptr_t>(plv8_WinRowsArePeers),
+	reinterpret_cast<intptr_t>(plv8_WinGetFuncArgInPartition),
+	reinterpret_cast<intptr_t>(plv8_WinGetFuncArgInFrame),
+	reinterpret_cast<intptr_t>(plv8_WinGetFuncArgCurrent),
+	reinterpret_cast<intptr_t>(plv8_QuoteLiteral),
+	reinterpret_cast<intptr_t>(plv8_QuoteNullable),
+	reinterpret_cast<intptr_t>(plv8_QuoteIdent),
+	reinterpret_cast<intptr_t>(plv8_MemoryUsage),
+	reinterpret_cast<intptr_t>(plv8_Commit),
+	reinterpret_cast<intptr_t>(plv8_Rollback),
+	reinterpret_cast<intptr_t>(plv8_CompileWasmCached),
+	reinterpret_cast<intptr_t>(plv8_Require),
+	reinterpret_cast<intptr_t>(plv8_CompileBytecode),
+	0
+};
 
 /*
  * Window function API allows to store partition-local memory, but
@@ -71,14 +112,15 @@ WrapCallback(FunctionCallback func)
 	Isolate* isolate = Isolate::GetCurrent();
 	return External::New(isolate,
 			reinterpret_cast<void *>(
-				reinterpret_cast<uintptr_t>(func)));
+				reinterpret_cast<uintptr_t>(func)),
+			v8::kExternalPointerTypeTagDefault);
 }
 
 static inline FunctionCallback
 UnwrapCallback(Handle<v8::Value> value)
 {
 	return reinterpret_cast<FunctionCallback>(
-			reinterpret_cast<uintptr_t>(External::Cast(*value)->Value()));
+			reinterpret_cast<uintptr_t>(External::Cast(*value)->Value(v8::kExternalPointerTypeTagDefault)));
 }
 
 static inline void
@@ -243,6 +285,91 @@ JSONObject::Stringify(Handle<v8::Value> val)
 	return value.ToLocalChecked();
 }
 
+static void
+plv8_CompileWasmCached(const FunctionCallbackInfo<v8::Value>& args)
+{
+	Isolate *isolate = args.GetIsolate();
+	Local<Context> context = isolate->GetCurrentContext();
+
+	if (args.Length() < 2 || !args[0]->IsString())
+		throw js_error("plv8.compile_wasm_cached(cache_key, wasm_bytes) requires a string key and byte buffer");
+
+	const uint8_t *wire_ptr = nullptr;
+	size_t wire_len = 0;
+
+	if (args[1]->IsArrayBufferView())
+	{
+		Local<ArrayBufferView> view = Local<ArrayBufferView>::Cast(args[1]);
+		wire_ptr = static_cast<const uint8_t *>(view->Buffer()->GetBackingStore()->Data()) + view->ByteOffset();
+		wire_len = view->ByteLength();
+	}
+	else if (args[1]->IsArrayBuffer())
+	{
+		Local<ArrayBuffer> ab = Local<ArrayBuffer>::Cast(args[1]);
+		wire_ptr = static_cast<const uint8_t *>(ab->GetBackingStore()->Data());
+		wire_len = ab->ByteLength();
+	}
+	else
+	{
+		throw js_error("plv8.compile_wasm_cached second argument must be an ArrayBuffer or ArrayBufferView");
+	}
+
+	if (wire_ptr == nullptr || wire_len == 0)
+		throw js_error("plv8.compile_wasm_cached received empty WebAssembly wire bytes");
+
+	v8::String::Utf8Value key_utf8(isolate, args[0]->ToString(context).ToLocalChecked());
+	if (*key_utf8 == nullptr || key_utf8.length() == 0)
+		throw js_error("plv8.compile_wasm_cached cache_key must be non-empty");
+
+	std::vector<uint8_t> cached_compiled_bytes;
+	if (plv8_wasm_cache_lookup(*key_utf8, &cached_compiled_bytes) &&
+		!cached_compiled_bytes.empty())
+	{
+		v8::WasmModuleCompilation compilation;
+		compilation.SetHasCompiledModuleBytes();
+		compilation.OnBytesReceived(wire_ptr, wire_len);
+
+		v8::Local<v8::WasmModuleObject> mod_obj;
+		bool deserialized_ok = false;
+
+		compilation.Finish(
+			isolate,
+			[&](v8::WasmStreaming::ModuleCachingInterface &caching) {
+				deserialized_ok = caching.SetCachedCompiledModuleBytes(
+					std::span<const uint8_t>(cached_compiled_bytes.data(),
+											 cached_compiled_bytes.size()));
+			},
+			[&](std::variant<v8::Local<v8::WasmModuleObject>, v8::Local<v8::Value>> res) {
+				if (std::holds_alternative<v8::Local<v8::WasmModuleObject>>(res))
+					mod_obj = std::get<v8::Local<v8::WasmModuleObject>>(res);
+			});
+
+		if (deserialized_ok && !mod_obj.IsEmpty())
+		{
+			args.GetReturnValue().Set(mod_obj);
+			return;
+		}
+	}
+
+	v8::MaybeLocal<v8::WasmModuleObject> maybe_mod =
+		v8::WasmModuleObject::Compile(
+			isolate, std::span<const uint8_t>(wire_ptr, wire_len));
+	if (maybe_mod.IsEmpty())
+	{
+		return;
+	}
+
+	v8::Local<v8::WasmModuleObject> mod_obj = maybe_mod.ToLocalChecked();
+	v8::CompiledWasmModule compiled = mod_obj->GetCompiledModule();
+	v8::OwnedBuffer serialized = compiled.Serialize();
+	if (serialized.buffer && serialized.size > 0)
+	{
+		plv8_wasm_cache_store(*key_utf8, serialized.buffer.get(), serialized.size);
+	}
+
+	args.GetReturnValue().Set(mod_obj);
+}
+
 void
 SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 {
@@ -262,8 +389,20 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	SetCallback(plv8, "memory_usage", plv8_MemoryUsage, attrFull);
 	SetCallback(plv8, "rollback", plv8_Rollback, attrFull);
 	SetCallback(plv8, "commit", plv8_Commit, attrFull);
+	SetCallback(plv8, "compile_wasm_cached", plv8_CompileWasmCached, attrFull);
+	SetCallback(plv8, "require", plv8_Require, attrFull);
+	SetCallback(plv8, "compile_bytecode", plv8_CompileBytecode, attrFull);
 
 	plv8->SetInternalFieldCount(PLV8_INTNL_MAX);
+}
+
+void
+SetupGlobalFunctions(Handle<ObjectTemplate> global)
+{
+	PropertyAttribute	attrFull =
+		PropertyAttribute(ReadOnly | DontEnum | DontDelete);
+
+	SetCallback(global, "require", plv8_Require, attrFull);
 }
 
 void
@@ -316,6 +455,7 @@ SetupWindowFunctions(Handle<ObjectTemplate> templ)
 static void
 plv8_FunctionInvoker(const FunctionCallbackInfo<v8::Value> &args) throw()
 {
+	PLV8_ASSERT_MAIN_PG_THREAD();
 	Isolate *		isolate = args.GetIsolate();
 	Handle<Context> context = isolate->GetCurrentContext();
 	HandleScope		handle_scope(isolate);
@@ -653,8 +793,8 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(isolate, current_context->plan_template);
 
 	Local<v8::Object> result = templ->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
-	result->SetInternalField(0, External::New(isolate, saved));
-	result->SetInternalField(1, External::New(isolate, parstate));
+	result->SetInternalField(0, External::New(isolate, saved, v8::kExternalPointerTypeTagDefault));
+	result->SetInternalField(1, External::New(isolate, parstate, v8::kExternalPointerTypeTagDefault));
 
 	args.GetReturnValue().Set(result);
 }
@@ -677,7 +817,7 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 	plv8_param_state   *parstate = NULL;
 
 	plan = static_cast<SPIPlanPtr>(
-			Handle<External>::Cast(self->GetInternalField(0))->Value());
+			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (plan == NULL) {
 		StringInfoData	buf;
@@ -702,7 +842,7 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 	 * If the plan has the variable param info, use it.
 	 */
 	parstate = static_cast<plv8_param_state *>(
-			Handle<External>::Cast(self->GetInternalField(1))->Value());
+			self->GetInternalField(1).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (parstate)
 		argcount = parstate->numParams;
@@ -785,7 +925,7 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 
 
 	plan = static_cast<SPIPlanPtr>(
-			Handle<External>::Cast(self->GetInternalField(0))->Value());
+			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 	/* XXX: Add plan validation */
 
 	if (args.Length() > 0)
@@ -801,7 +941,7 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 	 * If the plan has the variable param info, use it.
 	 */
 	parstate = static_cast<plv8_param_state *>(
-			Handle<External>::Cast(self->GetInternalField(1))->Value());
+			self->GetInternalField(1).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (parstate)
 		argcount = parstate->numParams;
@@ -876,19 +1016,19 @@ plv8_PlanFree(const FunctionCallbackInfo<v8::Value> &args)
 	int					status = 0;
 
 	plan = static_cast<SPIPlanPtr>(
-			Handle<External>::Cast(self->GetInternalField(0))->Value());
+			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (plan)
 		status = SPI_freeplan(plan);
 
-	self->SetInternalField(0, External::New(isolate, 0));
+	self->SetInternalField(0, External::New(isolate, 0, v8::kExternalPointerTypeTagDefault));
 
 	parstate = static_cast<plv8_param_state *>(
-			Handle<External>::Cast(self->GetInternalField(1))->Value());
+			self->GetInternalField(1).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (parstate)
 		pfree(parstate);
-	self->SetInternalField(1, External::New(isolate, 0));
+	self->SetInternalField(1, External::New(isolate, 0, v8::kExternalPointerTypeTagDefault));
 
 	args.GetReturnValue().Set(Int32::New(isolate, status));
 }
@@ -907,7 +1047,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 		throw js_error("cannot find cursor");
 	}
 
-	CString				cname(self->GetInternalField(0));
+	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
 	int					nfetch = 1;
 	bool				forward = true, wantarray = false;
@@ -973,7 +1113,7 @@ plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate*			isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
-	CString				cname(self->GetInternalField(0));
+	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
 	int					nmove = 1;
 	bool				forward = true;
@@ -1015,7 +1155,7 @@ static void
 plv8_CursorClose(const FunctionCallbackInfo<v8::Value> &args)
 {
 	Handle<v8::Object>	self = args.This();
-	CString				cname(self->GetInternalField(0));
+	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
 
 	if (!cursor)
@@ -1043,17 +1183,16 @@ static void
 plv8_ReturnNext(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Handle<v8::Object>	self = args.This();
-	Handle<v8::Value>	conv_value = self->GetInternalField(PLV8_INTNL_CONV);
+	Handle<v8::Value>	conv_value = self->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
 
 	if (!conv_value->IsExternal())
 		throw js_error("return_next called in context that cannot accept a set");
 
 	Converter *conv = static_cast<Converter *>(
-			Handle<External>::Cast(conv_value)->Value());
+			Handle<External>::Cast(conv_value)->Value(v8::kExternalPointerTypeTagDefault));
 
 	Tuplestorestate *tupstore = static_cast<Tuplestorestate *>(
-			Handle<External>::Cast(
-				self->GetInternalField(PLV8_INTNL_TUPSTORE))->Value());
+			self->GetInternalField(PLV8_INTNL_TUPSTORE).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	conv->ToDatum(args[0], tupstore);
 
@@ -1115,7 +1254,8 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 	char perm[16];
 	strcpy(perm, "EXECUTE");
 	arg = charToText(perm);
-	Oid funcoid;
+	Oid funcoid = InvalidOid;
+	bool has_priv = false;
 
 	PG_TRY();
 	{
@@ -1139,9 +1279,7 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 			elog(WARNING, "failed to find or no permission for js function %s", signature.str());
 		} else {
 			if (DatumGetBool(ret)) {
-				func = find_js_function(funcoid);
-				if (func.IsEmpty())
-					elog(ERROR, "javascript function is not found for \"%s\"", signature.str());
+				has_priv = true;
 			} else {
 				elog(WARNING, "no permission to execute js function %s", signature.str());
 			}
@@ -1152,6 +1290,23 @@ plv8_FindFunction(const FunctionCallbackInfo<v8::Value>& args)
 		throw pg_error();
 	}
 	PG_END_TRY();
+
+	if (has_priv)
+	{
+		func = find_js_function(funcoid);
+		if (func.IsEmpty())
+		{
+			PG_TRY();
+			{
+				elog(ERROR, "javascript function is not found for \"%s\"", signature.str());
+			}
+			PG_CATCH();
+			{
+				throw pg_error();
+			}
+			PG_END_TRY();
+		}
+	}
 
 	args.GetReturnValue().Set(func);
 }
@@ -1166,7 +1321,7 @@ plv8_GetWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 	Isolate*			isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
 	Handle<v8::Value>	fcinfo_value =
-			self->GetInternalField(PLV8_INTNL_FCINFO);
+			self->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>();
 
 	if (!fcinfo_value->IsExternal())
 		throw js_error("get_window_object called in wrong context");
@@ -1187,7 +1342,7 @@ plv8_MyWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 	Handle<v8::Object>	self = args.This();
 	/* fcinfo is embedded in the internal field.  See plv8_GetWindowObject() */
 	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
-			Handle<External>::Cast(self->GetInternalField(0))->Value());
+			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (fcinfo == NULL)
 		throw js_error("window function api called with wrong object");
@@ -1209,7 +1364,7 @@ plv8_MyArgType(const FunctionCallbackInfo<v8::Value>& args, int argno)
 {
 	Handle<v8::Object>	self = args.This();
 	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
-			Handle<External>::Cast(self->GetInternalField(0))->Value());
+			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
 	if (fcinfo == NULL)
 		throw js_error("window function api called with wrong object");
@@ -1644,7 +1799,7 @@ plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args)
 
 void GetMemoryInfo(v8::Local<v8::Object> obj) {
 	HeapStatistics  	v8_heap_stats;
-	Isolate 		   *isolate = obj->GetIsolate();
+	Isolate 		   *isolate = Isolate::GetCurrent();
 	Handle<Context> context = isolate->GetCurrentContext();
 
 	isolate->GetHeapStatistics(&v8_heap_stats);

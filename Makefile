@@ -4,9 +4,9 @@ PLV8_VERSION = 4.0.0-ALPHA
 CP := cp
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
-SHLIB_LINK += -std=c++17
+SHLIB_LINK += -std=c++20
 PG_CPPFLAGS := -fPIC -Wall -Wno-register -xc++
-PG_LDFLAGS := -std=c++17
+PG_LDFLAGS := -std=c++20
 
 SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc plv8_guc.cc
 OBJS = $(SRCS:.cc=.o)
@@ -15,10 +15,11 @@ EXTENSION = plv8
 PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql
 
 # Patches applied to the v8-cmake submodule when it is first checked out.
-# gcc14-stats-collector.patch: GCC 14 / libstdc++ 14 no longer provides
-# std::remove transitively, so the header must include <algorithm> itself
-# (fixed upstream in V8 11.6).
-PATCH_V8 := patches/v8-cmake/gcc14-stats-collector.patch
+# arm64-gcc-neon.patch: V8 15.4 Uint8ArrayFromHexWithNeon in simd.cc passes
+# uint8x16_t to vmovn_u16/vmovn_high_u16 and assigns vshlq_n_u64's uint64x2_t
+# result to uint8x16_t without vreinterpretq_* casts, which GCC on aarch64
+# rejects without -flax-vector-conversions.
+PATCH_V8 := patches/v8-cmake/arm64-gcc-neon.patch
 
 ifeq ($(OS),Windows_NT)
 	# noop for now
@@ -27,12 +28,11 @@ else
 	UNAME_S := $(shell uname -s)
 	ifeq ($(UNAME_S),Darwin)
 		CCFLAGS += -stdlib=libc++
-		SHLIB_LINK += -stdlib=libc++ -std=c++17 -lc++
+		SHLIB_LINK += -stdlib=libc++ -std=c++20 -lc++
 		NUMPROC := $(shell sysctl hw.ncpu | awk '{print $$2}')
-		PATCH_V8 += patches/v8-cmake/macos-build.patch
 	endif
 	ifeq ($(UNAME_S),Linux)
-		SHLIB_LINK += -lrt -std=c++17
+		SHLIB_LINK += -lrt -std=c++20
 		NUMPROC := $(shell grep -c ^processor /proc/cpuinfo)
 	endif
 endif
@@ -62,9 +62,9 @@ v8: deps/v8-cmake/build/libv8_libbase.a
 V8_CMAKE_ARGS ?=
 
 # enable direct jsonb conversion by default
-CCFLAGS += -DJSONB_DIRECT_CONVERSION
+CCFLAGS += -DJSONB_DIRECT_CONVERSION -DV8_CPPGC_MICROTASK_QUEUE
 
-CCFLAGS += -Ideps/v8-cmake/v8/include -std=c++17
+CCFLAGS += -Ideps/v8-cmake/v8/include -std=c++20
 
 ifdef EXECUTION_TIMEOUT
 	CCFLAGS += -DEXECUTION_TIMEOUT
@@ -78,7 +78,7 @@ DATA = $(PLV8_DATA)
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 plv8-errors scalar_args inline json startup_pre startup varparam json_conv \
 		  jsonb_conv window guc es6 arraybuffer composites currentresource startup_perms bytea find_function_perms \
-		  memory_limits reset show array_spread regression procedure security_definer
+		  memory_limits reset show array_spread regression procedure security_definer language_handler
 
 ifndef BIGINT_GRACEFUL
 	REGRESS += bigint
@@ -86,9 +86,9 @@ else
 	REGRESS += bigint_graceful
 endif
 
-SHLIB_LINK += -lv8_base_without_compiler -lv8_compiler -lv8_snapshot -lv8_inspector -lv8_libplatform -lv8_base_without_compiler -lv8_libsampler -lv8_torque_generated -lv8_libbase
+SHLIB_LINK += -lv8_base_without_compiler -lv8_compiler -lv8_initializers -lv8_snapshot -lv8_inspector -lv8_libplatform -lv8_base_without_compiler -lv8_initializers -lv8_libsampler -lv8_torque_generated -lv8_base_without_compiler -lv8_libbase
 
-OPTFLAGS = -std=c++17 -fno-rtti -O2
+OPTFLAGS = -std=c++20 -fno-rtti -O2
 CCFLAGS += -Wall $(OPTFLAGS)
 
 generate_upgrades:

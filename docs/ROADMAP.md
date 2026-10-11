@@ -2,6 +2,6 @@
 
 ## v4.0
 
-[ ] Upgrade V8
-[ ] Add language handlers
+[x] Upgrade V8
+[x] Add language handlers
 [ ] SPI Scroll options #597

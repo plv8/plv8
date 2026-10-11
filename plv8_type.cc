@@ -625,10 +625,12 @@ CreateExternalArray(void *data, plv8_external_array_type array_type,
 		break;
 	case kExternalInt64Array:
 		array = v8::BigInt64Array::New(buffer, 0, byte_size / sizeof(int64));
+		break;
 	default:
 		throw js_error("unexpected array type");
 	}
-	array->SetInternalField(0, External::New(isolate, DatumGetPointer(datum)));
+	if (array->InternalFieldCount() > 0)
+		array->SetInternalField(0, External::New(isolate, DatumGetPointer(datum), v8::kExternalPointerTypeTagDefault));
 
 	// needs to be a copy, as the data could go away
 	memcpy(buffer->GetBackingStore()->Data(), data, byte_size);
@@ -646,7 +648,8 @@ ExtractExternalArrayDatum(Handle<v8::Value> value)
 	if (value->IsTypedArray())
 	{
 		Handle<Object> object = Handle<Object>::Cast(value);
-		return Handle<External>::Cast(object->GetInternalField(0))->Value();
+		if (object->InternalFieldCount() > 0 && object->GetInternalField(0).As<v8::Value>()->IsExternal())
+			return object->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault);
 	}
 
 	return NULL;
@@ -684,6 +687,10 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	case BOOLOID:
 		if (value->IsBoolean())
 			return BoolGetDatum(value->BooleanValue(isolate));
+		if (value->IsNumber())
+			return BoolGetDatum(value->Int32Value(isolate->GetCurrentContext()).FromMaybe(0) != 0);
+		if (value->IsBigInt())
+			return BoolGetDatum(BigInt::Cast(*value)->Int64Value() != 0);
 		break;
 	case INT2OID:
 		if (value->IsNumber())
@@ -833,6 +840,53 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			return CStringGetTextDatum(str);
 		}
 		break;
+	}
+
+	/*
+	 * Direct binary buffer return for pg_tle user-defined base types
+	 * (stored internally as varlena / bytea with optional fixed length).
+	 */
+	if (type->category == TYPCATEGORY_USER && !type->byval &&
+		(value->IsUint8Array() || value->IsInt8Array() || value->IsArrayBuffer()))
+	{
+		const char *src_bytes = NULL;
+		size_t byte_len = 0;
+
+		if (value->IsUint8Array() || value->IsInt8Array())
+		{
+			v8::Handle<v8::Uint8Array> array = v8::Handle<v8::Uint8Array>::Cast(value);
+			src_bytes = (const char *) array->Buffer()->GetBackingStore()->Data() + array->ByteOffset();
+			byte_len = array->Length();
+		}
+		else if (value->IsArrayBuffer())
+		{
+			v8::Handle<v8::ArrayBuffer> ab = v8::Handle<v8::ArrayBuffer>::Cast(value);
+			src_bytes = (const char *) ab->GetBackingStore()->Data();
+			byte_len = ab->ByteLength();
+		}
+
+		size_t varlena_size = byte_len + VARHDRSZ;
+		if (type->len > 0 && (size_t) type->len != varlena_size)
+		{
+			PG_TRY();
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_EXCEPTION),
+						 errmsg("type %s is defined as fixed-size %d, but returned buffer has internal length %zu",
+								format_type_be(type->typid), (int) type->len, varlena_size)));
+			}
+			PG_CATCH();
+			{
+				throw pg_error();
+			}
+			PG_END_TRY();
+		}
+
+		void *res_varlena = palloc(varlena_size);
+		SET_VARSIZE(res_varlena, varlena_size);
+		if (byte_len > 0 && src_bytes != NULL)
+			memcpy(VARDATA(res_varlena), src_bytes, byte_len);
+		return PointerGetDatum(res_varlena);
 	}
 
 	/* Use lexical cast for non-numeric types. */
@@ -1060,6 +1114,21 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 	}
 
 	default:
+		/*
+		 * Direct binary buffer argument passing for pg_tle user-defined base
+		 * types (TYPCATEGORY_USER, stored internally as varlena / bytea) when
+		 * invoking pl/<any> (such as pl/v8-wasm) functions.
+		 */
+		if (plv8_pass_user_types_as_bytes &&
+			type->category == TYPCATEGORY_USER && !type->byval)
+		{
+			void	   *p = PG_DETOAST_DATUM_COPY(datum);
+
+			return CreateExternalArray(VARDATA_ANY(p),
+									   kExternalUnsignedByteArray,
+									   VARSIZE_ANY_EXHDR(p),
+									   PointerGetDatum(p));
+		}
 		return ToString(datum, type);
 	}
 }
@@ -1344,7 +1413,9 @@ EpochToDate(double epoch)
 	PG_RETURN_DATEADT((DateADT) epoch);
 }
 
-CString::CString(Handle<v8::Value> value) : m_utf8(Isolate::GetCurrent(), value)
+CString::CString(Handle<v8::Value> value)
+	: m_utf8(Isolate::GetCurrent(),
+			 value.IsEmpty() ? Local<v8::Value>::Cast(v8::String::Empty(Isolate::GetCurrent())) : value)
 {
 	m_str = ToCString(m_utf8);
 }

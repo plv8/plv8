@@ -400,6 +400,7 @@ extern bool plv8_wasm_cache_lookup(const char *key, std::vector<uint8_t> *out);
 extern bool plv8_wasm_cache_store(const char *key, const uint8_t *bytes, size_t len);
 extern uint64 plv8_tle_modules_fingerprint(void);
 extern void plv8_Require(const v8::FunctionCallbackInfo<v8::Value>& args);
+extern void plv8_Import(const v8::FunctionCallbackInfo<v8::Value>& args);
 extern void plv8_CompileBytecode(const v8::FunctionCallbackInfo<v8::Value>& args);
 extern v8::MaybeLocal<v8::Module> plv8_ResolveModuleCallback(
 	v8::Local<v8::Context> context,

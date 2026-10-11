@@ -264,12 +264,11 @@ BEGIN
 END;
 $$;
 
-SELECT pgtle.install_module(
+INSERT INTO plv8.modules (path, source, bytecode, is_trusted)
+VALUES (
   'untrusted_wasm_mod',
-  '1.0.0',
   '/* untrusted wasm */',
-  (SELECT bytecode FROM pgtle.modules WHERE module_name = 'wasm_suite' LIMIT 1),
-  NULL,
+  (SELECT bytecode FROM plv8.modules WHERE package_name = 'wasm_suite' LIMIT 1),
   false
 );
 
@@ -290,7 +289,7 @@ BEGIN
 END;
 $$;
 CREATE ROLE wasm_unpriv_tester;
-GRANT USAGE ON SCHEMA public, pgtle TO wasm_unpriv_tester;
+GRANT USAGE ON SCHEMA public, pgtle, plv8 TO wasm_unpriv_tester;
 GRANT EXECUTE ON FUNCTION wasm_untrusted_add(int4, int4) TO wasm_unpriv_tester;
 
 SET ROLE wasm_unpriv_tester;

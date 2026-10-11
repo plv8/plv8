@@ -1,4 +1,4 @@
--- Regression test suite for Item 2: pg_tle Module Loader in plv8
+-- Regression test suite for plv8 Module Loader (plv8.packages & plv8.modules)
 \set ON_ERROR_STOP on
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS plv8 CASCADE;
@@ -6,160 +6,91 @@ DROP EXTENSION IF EXISTS pg_tle CASCADE;
 RESET client_min_messages;
 CREATE EXTENSION pg_tle;
 CREATE EXTENSION plv8;
--- 1. Install versioned ES modules in pgtle.modules (including multi-digit semver 1.9.0 vs 1.10.0)
-SELECT pgtle.install_module(
-    'math_utils',
-    '1.0.0',
-    $$
+-- 1. Install versioned ES module packages in plv8.packages & plv8.modules (including multi-digit semver 1.9.0 vs 1.10.0)
+INSERT INTO plv8.packages (name, version, entry_point) VALUES
+    ('math_utils', '1.0.0', 'index.js'),
+    ('math_utils', '1.9.0', 'index.js'),
+    ('math_utils', '1.10.0', 'index.js');
+INSERT INTO plv8.modules (path, package_name, package_version, source) VALUES
+    ('index.js', 'math_utils', '1.0.0', $$
     export function add(a, b) { return a + b; }
     export const VERSION = '1.0.0';
-    $$
-);
- install_module 
-----------------
- t
-(1 row)
-
-SELECT pgtle.install_module(
-    'math_utils',
-    '1.9.0',
-    $$
+    $$),
+    ('index.js', 'math_utils', '1.9.0', $$
     export function add(a, b) { return (a + b) * 5; }
     export const VERSION = '1.9.0';
-    $$
-);
- install_module 
-----------------
- t
-(1 row)
-
-SELECT pgtle.install_module(
-    'math_utils',
-    '1.10.0',
-    $$
+    $$),
+    ('index.js', 'math_utils', '1.10.0', $$
     export function add(a, b) { return (a + b) * 10; }
     export const VERSION = '1.10.0';
     export const META_URL = import.meta.url;
-    $$
-);
- install_module 
-----------------
- t
-(1 row)
-
--- 2. Install multi-file package with relative imports
-SELECT pgtle.install_module(
-    'pkg/sub/leaf.js',
-    '1.0.0',
-    $$
+    $$);
+-- 2. Install multi-file standalone modules with relative imports and requires allowlist
+INSERT INTO plv8.modules (path, source, requires, is_trusted) VALUES
+    ('pkg/sub/leaf.js', $$
     export function leafVal() { return 7; }
-    $$
-);
- install_module 
-----------------
- t
-(1 row)
-
-SELECT pgtle.install_module(
-    'pkg/helper.js',
-    '1.0.0',
-    $$
+    $$, NULL, true),
+    ('pkg/helper.js', $$
     import { leafVal } from './sub/leaf.js';
     export function triple(x) { return x * 3 + leafVal(); }
-    $$,
-    NULL,
-    ARRAY['pkg/sub/leaf.js'],
-    true
-);
- install_module 
-----------------
- t
-(1 row)
-
-SELECT pgtle.install_module(
-    'pkg/index.js',
-    '1.0.0',
-    $$
+    $$, ARRAY['pkg/sub/leaf.js'], true),
+    ('pkg/index.js', $$
     import { triple } from './helper.js';
     export function compute(x) { return triple(x) + 1; }
     export const PKG_URL = import.meta.url;
-    $$,
-    NULL,
-    ARRAY['pkg/helper.js'],
-    true
-);
- install_module 
-----------------
- t
-(1 row)
-
--- 3. Install a default-export-only module and a multi-file CommonJS (exports.* + relative require('./...')) package
-SELECT pgtle.install_module(
-    'default_greeter',
-    '1.0.0',
-    $$
+    $$, ARRAY['pkg/helper.js'], true);
+-- 3. Install a default-export-only module, a multi-file CommonJS module, a sloppy CJS module, and a package with semver dependencies
+INSERT INTO plv8.modules (path, source) VALUES
+    ('default_greeter', $$
     export default function greet(name) {
         return 'Hello, ' + name + '!';
     }
-    $$
-);
- install_module 
-----------------
- t
-(1 row)
-
-SELECT pgtle.install_module(
-    'cjs_pkg/leaf',
-    '1.0.0',
-    $$
+    $$),
+    ('cjs_pkg/leaf', $$
     exports.tag = function(v) { return 'leaf:' + v; };
-    $$
-);
- install_module 
-----------------
- t
-(1 row)
-
-SELECT pgtle.install_module(
-    'cjs_pkg/formatter',
-    '1.0.0',
-    $$
+    $$);
+INSERT INTO plv8.modules (path, source, requires, is_trusted) VALUES
+    ('cjs_pkg/formatter', $$
     const math = require('tle:math_utils@1.0.0');
     const leaf = require('./leaf');
     exports.formatSum = function(a, b) {
         return 'sum=' + math.add(a, b) + ',' + leaf.tag(a);
     };
-    $$,
-    NULL,
-    ARRAY['math_utils@1.0.0', 'cjs_pkg/leaf'],
-    true
-);
- install_module 
-----------------
- t
-(1 row)
-
+    $$, ARRAY['math_utils@1.0.0', 'cjs_pkg/leaf'], true);
+INSERT INTO plv8.modules (path, source, sloppy) VALUES
+    ('sloppy_cjs_mod', $$
+    implicitSloppyVar = 42;
+    exports.getSloppy = function() { return implicitSloppyVar; };
+    $$, true);
+INSERT INTO plv8.packages (name, version, entry_point, dependencies) VALUES
+    ('pinned_calc', '1.0.0', 'index.js', '{"math_utils": "~1.0.0"}');
+INSERT INTO plv8.modules (path, package_name, package_version, source) VALUES
+    ('index.js', 'pinned_calc', '1.0.0', $$
+    import { add, VERSION } from 'math_utils';
+    export function calc(a, b) { return VERSION + ':' + add(a, b); }
+    $$);
 -- 4. Test ES static import (default highest semver version 1.10.0 over 1.9.0)
 CREATE FUNCTION plv8_test_esm_latest(a int, b int) RETURNS jsonb AS $$
     import { add, VERSION, META_URL } from 'math_utils';
     return { sum: add(a, b), version: VERSION, meta_url: META_URL };
 $$ LANGUAGE plv8;
 SELECT plv8_test_esm_latest(3, 4);
-                          plv8_test_esm_latest                           
--------------------------------------------------------------------------
- {"sum": 70, "version": "1.10.0", "meta_url": "pgtle:math_utils@1.10.0"}
+                              plv8_test_esm_latest                               
+---------------------------------------------------------------------------------
+ {"sum": 70, "version": "1.10.0", "meta_url": "plv8:math_utils@1.10.0/index.js"}
 (1 row)
 
--- 5. Test ES static import with explicit @version and both pgtle: and tle: schemes
+-- 5. Test ES static import with explicit @version, semver range (^1.0.0), and package dependency pinning (~1.0.0)
 CREATE FUNCTION plv8_test_esm_v1(a int, b int) RETURNS jsonb AS $$
     import { add, VERSION } from 'pgtle:math_utils@1.0.0';
     import { add as add_tle } from 'tle:math_utils@1.0.0';
-    return { sum: add(a, b), sum_tle: add_tle(a, b), version: VERSION };
+    import { calc } from 'pinned_calc';
+    return { sum: add(a, b), sum_tle: add_tle(a, b), version: VERSION, pinned: calc(a, b) };
 $$ LANGUAGE plv8;
 SELECT plv8_test_esm_v1(3, 4);
-               plv8_test_esm_v1               
-----------------------------------------------
- {"sum": 7, "sum_tle": 7, "version": "1.0.0"}
+                         plv8_test_esm_v1                          
+-------------------------------------------------------------------
+ {"sum": 7, "pinned": "1.0.0:7", "sum_tle": 7, "version": "1.0.0"}
 (1 row)
 
 -- 6. Test transitive relative imports
@@ -168,28 +99,32 @@ CREATE FUNCTION plv8_test_relative(x int) RETURNS jsonb AS $$
     return { result: compute(x), url: PKG_URL };
 $$ LANGUAGE plv8;
 SELECT plv8_test_relative(5);
-                plv8_test_relative                 
----------------------------------------------------
- {"url": "pgtle:pkg/index.js@1.0.0", "result": 23}
+             plv8_test_relative             
+--------------------------------------------
+ {"url": "plv8:pkg/index.js", "result": 23}
 (1 row)
 
--- 7. Test CommonJS require(), plv8.require(), and CommonJS exports.* module with relative require('./leaf')
+-- 7. Test CommonJS require(), plv8.require(), plv8.import(), and sloppy CJS mode
 CREATE FUNCTION plv8_test_require(name text) RETURNS jsonb AS $$
     const m2 = require('math_utils');
     const m1 = plv8.require('math_utils@1.0.0');
     const greet = require('default_greeter');
+    const greet_ns = plv8.import('default_greeter');
     const fmt = require('tle:cjs_pkg/formatter');
+    const sloppy = require('sloppy_cjs_mod');
     return {
         m2_add: m2.add(2, 3),
         m1_add: m1.add(2, 3),
         greeting: greet(name),
-        cjs_fmt: fmt.formatSum(7, 8)
+        ns_has_default: typeof greet_ns.default === 'function',
+        cjs_fmt: fmt.formatSum(7, 8),
+        sloppy_val: sloppy.getSloppy()
     };
 $$ LANGUAGE plv8;
 SELECT plv8_test_require('Postgres');
-                                    plv8_test_require                                    
------------------------------------------------------------------------------------------
- {"m1_add": 5, "m2_add": 50, "cjs_fmt": "sum=15,leaf:7", "greeting": "Hello, Postgres!"}
+                                                         plv8_test_require                                                         
+-----------------------------------------------------------------------------------------------------------------------------------
+ {"m1_add": 5, "m2_add": 50, "cjs_fmt": "sum=15,leaf:7", "greeting": "Hello, Postgres!", "sloppy_val": 42, "ns_has_default": true}
 (1 row)
 
 -- 8. Test DO block and dynamic import() returning a Promise
@@ -221,13 +156,12 @@ SELECT plv8_read_dyn_import_global();
  dyn:1.0.0:17
 (1 row)
 
--- 9. Test V8 CodeCache bytecode compilation (plv8.compile_bytecode + pgtle.install_module)
+-- 9. Test V8 CodeCache bytecode compilation (plv8.compile_bytecode + plv8.modules)
 CREATE FUNCTION plv8_compile_module_bc(src text, modname text) RETURNS bytea AS $$
     return plv8.compile_bytecode(src, modname);
 $$ LANGUAGE plv8;
-SELECT pgtle.install_module(
+INSERT INTO plv8.modules (path, source, bytecode, is_trusted) VALUES (
     'fast_vec',
-    '1.0.0',
     '/* bytecode */',
     plv8_compile_module_bc(
         $$
@@ -238,22 +172,16 @@ SELECT pgtle.install_module(
         }
         export const ENGINE = 'v8-code-cache';
         $$,
-        'fast_vec@1.0.0'
+        'fast_vec'
     ),
-    NULL,
     true
 );
- install_module 
-----------------
- t
-(1 row)
-
-SELECT module_name, version, source_code, octet_length(bytecode) > 32 AS has_bytecode, is_trusted
-FROM pgtle.modules
-WHERE module_name = 'fast_vec';
- module_name | version |  source_code   | has_bytecode | is_trusted 
--------------+---------+----------------+--------------+------------
- fast_vec    | 1.0.0   | /* bytecode */ | t            | t
+SELECT path, source, octet_length(bytecode) > 32 AS has_bytecode, is_trusted
+FROM plv8.modules
+WHERE path = 'fast_vec';
+   path   |     source     | has_bytecode | is_trusted 
+----------+----------------+--------------+------------
+ fast_vec | /* bytecode */ | t            | t
 (1 row)
 
 CREATE FUNCTION plv8_test_bytecode_mod() RETURNS jsonb AS $$
@@ -271,18 +199,18 @@ SELECT plv8_test_bytecode_mod();
  {"engine": "v8-code-cache", "esm_dot": 32, "req_dot": 80}
 (1 row)
 
--- 10. Test live catalog invalidation (UPDATE pgtle.modules invalidates cached module & function)
-UPDATE pgtle.modules
-SET source_code = $$
+-- 10. Test live catalog invalidation (UPDATE plv8.modules invalidates cached module & function)
+UPDATE plv8.modules
+SET source = $$
     export function add(a, b) { return (a + b) * 100; }
     export const VERSION = '1.10.0-patched';
     export const META_URL = import.meta.url;
 $$
-WHERE module_name = 'math_utils' AND version = '1.10.0';
+WHERE package_name = 'math_utils' AND package_version = '1.10.0';
 SELECT plv8_test_esm_latest(3, 4);
-                               plv8_test_esm_latest                               
-----------------------------------------------------------------------------------
- {"sum": 700, "version": "1.10.0-patched", "meta_url": "pgtle:math_utils@1.10.0"}
+                                   plv8_test_esm_latest                                   
+------------------------------------------------------------------------------------------
+ {"sum": 700, "version": "1.10.0-patched", "meta_url": "plv8:math_utils@1.10.0/index.js"}
 (1 row)
 
 -- 11. Test missing module error handling
@@ -292,25 +220,17 @@ CREATE FUNCTION plv8_test_missing_mod() RETURNS int AS $$
 $$ LANGUAGE plv8;
 \set ON_ERROR_STOP off
 SELECT plv8_test_missing_mod();
-ERROR:  module "nonexistent_module_xyz" not found in pgtle.modules
+ERROR:  module "nonexistent_module_xyz" not found in plv8.modules
 CONTEXT:  plv8_test_missing_mod() LINE 2:     const m = require('nonexistent_module_xyz');
 \set ON_ERROR_STOP on
 -- 12. Test untrusted module security (is_trusted = false) with unprivileged role
-SELECT pgtle.install_module(
+INSERT INTO plv8.modules (path, source, is_trusted) VALUES (
     'admin_only_mod',
-    '1.0.0',
     $$
     export function secret() { return 'top-secret-42'; }
     $$,
-    NULL,
-    NULL,
     false
 );
- install_module 
-----------------
- t
-(1 row)
-
 CREATE FUNCTION plv8_call_admin_mod() RETURNS text AS $$
     import { secret } from 'admin_only_mod';
     return secret();
@@ -336,29 +256,29 @@ SELECT plv8_req_admin_mod();
 DROP ROLE IF EXISTS plv8_unpriv_tester;
 NOTICE:  role "plv8_unpriv_tester" does not exist, skipping
 CREATE ROLE plv8_unpriv_tester;
-GRANT USAGE ON SCHEMA pgtle TO plv8_unpriv_tester;
-GRANT SELECT ON pgtle.modules TO plv8_unpriv_tester;
+GRANT USAGE ON SCHEMA plv8 TO plv8_unpriv_tester;
+GRANT SELECT ON plv8.modules, plv8.packages TO plv8_unpriv_tester;
 GRANT EXECUTE ON FUNCTION plv8_call_admin_mod() TO plv8_unpriv_tester;
 GRANT EXECUTE ON FUNCTION plv8_req_admin_mod() TO plv8_unpriv_tester;
 GRANT EXECUTE ON FUNCTION plv8_test_esm_v1(int, int) TO plv8_unpriv_tester;
 SET ROLE plv8_unpriv_tester;
 SELECT plv8_test_esm_v1(10, 20);
-                plv8_test_esm_v1                
-------------------------------------------------
- {"sum": 30, "sum_tle": 30, "version": "1.0.0"}
+                           plv8_test_esm_v1                           
+----------------------------------------------------------------------
+ {"sum": 30, "pinned": "1.0.0:30", "sum_tle": 30, "version": "1.0.0"}
 (1 row)
 
 \set ON_ERROR_STOP off
 SELECT plv8_call_admin_mod();
-ERROR:  permission denied for untrusted module "admin_only_mod@1.0.0"
+ERROR:  permission denied for untrusted module "admin_only_mod"
 CONTEXT:  undefined() LINE -1: 
 SELECT plv8_req_admin_mod();
-ERROR:  permission denied for untrusted module "admin_only_mod@1.0.0"
+ERROR:  permission denied for untrusted module "admin_only_mod"
 CONTEXT:  plv8_req_admin_mod() LINE 2:     const m = require('admin_only_mod');
 \set ON_ERROR_STOP on
 RESET ROLE;
-REVOKE ALL ON pgtle.modules FROM plv8_unpriv_tester;
-REVOKE ALL ON SCHEMA pgtle FROM plv8_unpriv_tester;
+REVOKE ALL ON plv8.modules, plv8.packages FROM plv8_unpriv_tester;
+REVOKE ALL ON SCHEMA plv8 FROM plv8_unpriv_tester;
 REVOKE ALL ON FUNCTION plv8_call_admin_mod() FROM plv8_unpriv_tester;
 REVOKE ALL ON FUNCTION plv8_req_admin_mod() FROM plv8_unpriv_tester;
 REVOKE ALL ON FUNCTION plv8_test_esm_v1(int, int) FROM plv8_unpriv_tester;

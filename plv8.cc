@@ -51,6 +51,7 @@ extern "C" {
 #include "utils/dsa.h"
 #include "utils/guc.h"
 #include "utils/guc_tables.h"
+#include "utils/inval.h"
 #include "utils/jsonb.h"
 #include "utils/memutils.h"
 #include "utils/lsyscache.h"
@@ -78,12 +79,14 @@ PGDLLEXPORT Datum	plv8_call_validator(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plv8_reset(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plv8_info(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plv8_save_snapshot(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_modules_changed(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(plv8_call_handler);
 PG_FUNCTION_INFO_V1(plv8_call_validator);
 PG_FUNCTION_INFO_V1(plv8_reset);
 PG_FUNCTION_INFO_V1(plv8_info);
 PG_FUNCTION_INFO_V1(plv8_save_snapshot);
+PG_FUNCTION_INFO_V1(plv8_modules_changed);
 
 
 PGDLLEXPORT void _PG_init(void);
@@ -98,6 +101,17 @@ using namespace v8;
 
 static pthread_t main_pg_thread_id;
 static bool main_pg_thread_initialized = false;
+static int plv8_max_module_depth = 32;
+static int plv8_current_module_depth = 0;
+static Oid plv8_cached_modules_relid = InvalidOid;
+static Oid plv8_cached_packages_relid = InvalidOid;
+static void plv8_modules_inval_cb(Datum arg, Oid relid);
+
+struct Plv8ModuleDepthScope
+{
+	Plv8ModuleDepthScope() { plv8_current_module_depth++; }
+	~Plv8ModuleDepthScope() { plv8_current_module_depth--; }
+};
 
 bool
 is_main_pg_thread(void)
@@ -1262,6 +1276,23 @@ _PG_init(void)
     }
 #undef WASM_CACHE_SIZE_VAR
 
+#define MAX_MODULE_DEPTH_VAR "plv8.max_module_depth"
+    guc_value = plv8_find_option(MAX_MODULE_DEPTH_VAR);
+    if (guc_value != NULL) {
+        plv8_max_module_depth = plv8_int_option(guc_value);
+    } else {
+        DefineCustomIntVariable(MAX_MODULE_DEPTH_VAR,
+                                gettext_noop("Maximum module import/require nesting depth."),
+                                NULL,
+                                &plv8_max_module_depth,
+                                32, 1, 256,
+                                PGC_USERSET, 0,
+                                NULL,
+                                NULL,
+                                NULL);
+    }
+#undef MAX_MODULE_DEPTH_VAR
+
 	if (process_shared_preload_libraries_in_progress)
 	{
 		prev_shmem_request_hook = shmem_request_hook;
@@ -1281,6 +1312,7 @@ _PG_init(void)
 	}
 
 	RegisterXactCallback(plv8_xact_cb, NULL);
+	CacheRegisterRelcacheCallback(plv8_modules_inval_cb, (Datum) 0);
 
 	EmitWarningsOnPlaceholders("plv8");
 
@@ -4336,1279 +4368,1752 @@ pg_error::rethrow() throw()
 
 static const char PLV8_BYTECODE_MAGIC[8] = {'P', 'L', 'V', '8', 'B', 'C', '0', '1'};
 
-static uint64
-plv8_fnv1a64(uint64 h, const void *data, size_t len)
-{
-	const unsigned char *p = (const unsigned char *) data;
-	for (size_t i = 0; i < len; i++)
-	{
-		h ^= (uint64) p[i];
-		h *= 1099511628211ULL;
-	}
-	return h;
+static void plv8_modules_inval_cb(Datum arg, Oid relid) {
+  if (relid == InvalidOid ||
+      (OidIsValid(plv8_cached_modules_relid) &&
+       relid == plv8_cached_modules_relid) ||
+      (OidIsValid(plv8_cached_packages_relid) &&
+       relid == plv8_cached_packages_relid)) {
+    for (size_t i = 0; i < ContextVector.size(); i++) {
+      if (ContextVector[i] != nullptr) {
+        ContextVector[i]->tle_modules_fp = 0;
+      }
+    }
+    if (relid == InvalidOid) {
+      plv8_cached_modules_relid = InvalidOid;
+      plv8_cached_packages_relid = InvalidOid;
+    }
+  }
 }
 
-uint64
-plv8_tle_modules_fingerprint(void)
-{
-	Oid				nspoid;
-	Oid				relid;
-	Relation		rel;
-	TupleDesc		tupdesc;
-	TableScanDesc	scan;
-	HeapTuple		tuple;
-	uint64			fp = 14695981039346656037ULL;
-
-	if (!IsTransactionState())
-		return 0;
-
-	nspoid = get_namespace_oid("pgtle", true);
-	if (!OidIsValid(nspoid))
-		return 0;
-
-	relid = get_relname_relid("modules", nspoid);
-	if (!OidIsValid(relid))
-		return 0;
-
-	rel = table_open(relid, AccessShareLock);
-	tupdesc = RelationGetDescr(rel);
-	scan = table_beginscan_catalog(rel, 0, NULL);
-
-	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
-	{
-		uint64		row_hash = 14695981039346656037ULL;
-		ItemPointerData tid = tuple->t_self;
-		TransactionId xmin = HeapTupleHeaderGetRawXmin(tuple->t_data);
-		CommandId	cid = HeapTupleHeaderGetRawCommandId(tuple->t_data);
-
-		CHECK_FOR_INTERRUPTS();
-
-		row_hash = plv8_fnv1a64(row_hash, &tid, sizeof(tid));
-		row_hash = plv8_fnv1a64(row_hash, &xmin, sizeof(xmin));
-		row_hash = plv8_fnv1a64(row_hash, &cid, sizeof(cid));
-
-		for (int attnum = 1; attnum <= 6 && attnum <= tupdesc->natts; attnum++)
-		{
-			bool	isnull = false;
-			Datum	d = heap_getattr(tuple, attnum, tupdesc, &isnull);
-			row_hash = plv8_fnv1a64(row_hash, &isnull, sizeof(isnull));
-			if (!isnull)
-			{
-				Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-				if (attr->attlen == -1)
-				{
-					struct varlena *v = PG_DETOAST_DATUM_PACKED(d);
-					row_hash = plv8_fnv1a64(row_hash, VARDATA_ANY(v), VARSIZE_ANY_EXHDR(v));
-					if ((Pointer) v != DatumGetPointer(d))
-						pfree(v);
-				}
-				else if (attr->attbyval)
-				{
-					row_hash = plv8_fnv1a64(row_hash, &d, sizeof(Datum));
-				}
-			}
-		}
-
-		fp ^= row_hash;
-	}
-
-	table_endscan(scan);
-	table_close(rel, AccessShareLock);
-
-	return fp;
+Datum plv8_modules_changed(PG_FUNCTION_ARGS) {
+  if (!CALLED_AS_TRIGGER(fcinfo))
+    elog(ERROR, "plv8_modules_changed: not called by trigger manager");
+  TriggerData* trigdata = (TriggerData*)fcinfo->context;
+  CacheInvalidateRelcache(trigdata->tg_relation);
+  return PointerGetDatum(NULL);
 }
 
-static void
-plv8_sync_tle_module_cache(plv8_context *ctx)
-{
-	uint64 cur_fp;
-
-	if (!ctx)
-		return;
-
-	cur_fp = plv8_tle_modules_fingerprint();
-	if (ctx->tle_modules_fp != cur_fp)
-	{
-		for (auto &kv : ctx->tle_module_map)
-			kv.second.Reset();
-		ctx->tle_module_map.clear();
-		ctx->tle_module_id_to_spec.clear();
-		ctx->tle_modules_fp = cur_fp;
-	}
+static uint64 plv8_fnv1a64(uint64 h, const void* data, size_t len) {
+  const unsigned char* p = (const unsigned char*)data;
+  for (size_t i = 0; i < len; i++) {
+    h ^= (uint64)p[i];
+    h *= 1099511628211ULL;
+  }
+  return h;
 }
 
-static bool
-plv8_extract_hoisted_imports(const char *src, std::string *imports_out, std::string *body_out)
-{
-	const char *p = src;
-	bool at_line_start = true;
-	int brace_depth = 0;
-	bool found_esm = false;
+static uint64 plv8_hash_catalog_table(Oid relid) {
+  if (!OidIsValid(relid)) return 0;
 
-	imports_out->clear();
-	body_out->clear();
+  uint64 fp = 0;
+  Relation rel = table_open(relid, AccessShareLock);
+  TupleDesc tupdesc = RelationGetDescr(rel);
+  TableScanDesc scan = table_beginscan_catalog(rel, 0, NULL);
+  HeapTuple tuple;
 
-	while (*p)
-	{
-		if (at_line_start)
-		{
-			const char *ws = p;
-			while (*ws == ' ' || *ws == '\t' || *ws == '\r')
-				ws++;
+  while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL) {
+    uint64 row_hash = 14695981039346656037ULL;
+    ItemPointerData tid = tuple->t_self;
+    TransactionId xmin = HeapTupleHeaderGetRawXmin(tuple->t_data);
+    CommandId cid = HeapTupleHeaderGetRawCommandId(tuple->t_data);
 
-			if (brace_depth == 0 && strncmp(ws, "import", 6) == 0 &&
-				(ws[6] == ' ' || ws[6] == '\t' || ws[6] == '{' || ws[6] == '*' || ws[6] == '"' || ws[6] == '\''))
-			{
-				const char *stmt_start = ws;
-				const char *cur = ws + 6;
-				char in_quote = 0;
+    CHECK_FOR_INTERRUPTS();
 
-				while (*cur)
-				{
-					if (in_quote)
-					{
-						if (*cur == '\\' && cur[1])
-							cur += 2;
-						else if (*cur == in_quote)
-						{
-							in_quote = 0;
-							cur++;
-						}
-						else
-							cur++;
-					}
-					else
-					{
-						if (*cur == '\'' || *cur == '"' || *cur == '`')
-						{
-							in_quote = *cur;
-							cur++;
-						}
-						else if (*cur == ';')
-						{
-							cur++;
-							break;
-						}
-						else if (*cur == '\n')
-						{
-							const char *back = cur - 1;
-							while (back > stmt_start && (*back == ' ' || *back == '\t' || *back == '\r'))
-								back--;
-							if (*back == '\'' || *back == '"')
-							{
-								cur++;
-								break;
-							}
-							cur++;
-						}
-						else
-							cur++;
-					}
-				}
+    row_hash = plv8_fnv1a64(row_hash, &tid, sizeof(tid));
+    row_hash = plv8_fnv1a64(row_hash, &xmin, sizeof(xmin));
+    row_hash = plv8_fnv1a64(row_hash, &cid, sizeof(cid));
 
-				imports_out->append(stmt_start, cur - stmt_start);
-				imports_out->push_back('\n');
-				found_esm = true;
-				p = cur;
-				at_line_start = true;
-				continue;
-			}
-			else if (brace_depth == 0 && strncmp(ws, "export", 6) == 0 &&
-					 (ws[6] == ' ' || ws[6] == '\t'))
-			{
-				const char *after_export = ws + 6;
-				while (*after_export == ' ' || *after_export == '\t')
-					after_export++;
-				if (strncmp(after_export, "default", 7) == 0 &&
-					(after_export[7] == ' ' || after_export[7] == '\t'))
-				{
-					body_out->append("return ");
-					found_esm = true;
-					p = after_export + 7;
-					at_line_start = false;
-					continue;
-				}
-				else if (strncmp(after_export, "function", 8) == 0 ||
-						 strncmp(after_export, "const", 5) == 0 ||
-						 strncmp(after_export, "let", 3) == 0 ||
-						 strncmp(after_export, "var", 3) == 0 ||
-						 strncmp(after_export, "class", 5) == 0)
-				{
-					found_esm = true;
-					p = after_export;
-					at_line_start = false;
-					continue;
-				}
-			}
-		}
+    for (int attnum = 1; attnum <= 10 && attnum <= tupdesc->natts; attnum++) {
+      bool isnull = false;
+      Datum d = heap_getattr(tuple, attnum, tupdesc, &isnull);
+      row_hash = plv8_fnv1a64(row_hash, &isnull, sizeof(isnull));
+      if (!isnull) {
+#if PG_VERSION_NUM >= 110000
+        Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
+#else
+        Form_pg_attribute attr = tupdesc->attrs[attnum - 1];
+#endif
+        if (attr->attlen == -1) {
+          struct varlena* v = PG_DETOAST_DATUM_PACKED(d);
+          row_hash =
+              plv8_fnv1a64(row_hash, VARDATA_ANY(v), VARSIZE_ANY_EXHDR(v));
+          if ((Pointer)v != DatumGetPointer(d)) pfree(v);
+        } else if (attr->attbyval) {
+          row_hash = plv8_fnv1a64(row_hash, &d, sizeof(Datum));
+        }
+      }
+    }
 
-		if (*p == '/' && p[1] == '/')
-		{
-			while (*p && *p != '\n')
-				body_out->push_back(*p++);
-			if (*p == '\n')
-			{
-				body_out->push_back(*p++);
-				at_line_start = true;
-			}
-			continue;
-		}
-		if (*p == '/' && p[1] == '*')
-		{
-			body_out->push_back(*p++);
-			body_out->push_back(*p++);
-			while (*p && !(*p == '*' && p[1] == '/'))
-				body_out->push_back(*p++);
-			if (*p)
-			{
-				body_out->push_back(*p++);
-				body_out->push_back(*p++);
-			}
-			continue;
-		}
-		if (*p == '\'' || *p == '"' || *p == '`')
-		{
-			char q = *p;
-			body_out->push_back(*p++);
-			while (*p && *p != q)
-			{
-				if (*p == '\\' && p[1])
-					body_out->push_back(*p++);
-				body_out->push_back(*p++);
-			}
-			if (*p == q)
-				body_out->push_back(*p++);
-			at_line_start = false;
-			continue;
-		}
+    fp ^= row_hash;
+  }
 
-		if (*p == '{')
-			brace_depth++;
-		else if (*p == '}' && brace_depth > 0)
-			brace_depth--;
-
-		if (*p == '\n')
-			at_line_start = true;
-		else if (*p != ' ' && *p != '\t' && *p != '\r')
-			at_line_start = false;
-
-		body_out->push_back(*p++);
-	}
-
-	return found_esm;
+  table_endscan(scan);
+  table_close(rel, AccessShareLock);
+  return fp;
 }
 
-static std::string
-plv8_normalize_tle_specifier(const std::string &raw_spec,
-							 const std::string &base_spec,
-							 bool *escaped_root_out = nullptr)
-{
-	if (escaped_root_out != nullptr)
-		*escaped_root_out = false;
+uint64 plv8_tle_modules_fingerprint(void) {
+  if (!IsTransactionState()) return 0;
 
-	std::string spec = raw_spec;
+  AcceptInvalidationMessages();
 
-	if (spec.rfind("pgtle:", 0) == 0)
-		spec = spec.substr(6);
-	else if (spec.rfind("tle:", 0) == 0)
-		spec = spec.substr(4);
+  Oid nspoid = get_namespace_oid("plv8", true);
+  if (!OidIsValid(nspoid)) return 0;
 
-	while (spec.rfind("/", 0) == 0)
-		spec = spec.substr(1);
+  Oid mod_relid = get_relname_relid("modules", nspoid);
+  Oid pkg_relid = get_relname_relid("packages", nspoid);
+  if (!OidIsValid(mod_relid)) return 0;
 
-	if (spec.rfind("./", 0) == 0 || spec.rfind("../", 0) == 0 || spec == "..")
-	{
-		std::string base_dir;
-		std::string base_ver;
-		std::string clean_base = base_spec;
+  plv8_cached_modules_relid = mod_relid;
+  plv8_cached_packages_relid = pkg_relid;
 
-		if (clean_base.rfind("pgtle:", 0) == 0)
-			clean_base = clean_base.substr(6);
-		else if (clean_base.rfind("tle:", 0) == 0)
-			clean_base = clean_base.substr(4);
-		while (clean_base.rfind("/", 0) == 0)
-			clean_base = clean_base.substr(1);
-
-		size_t slash_pos = clean_base.find('/');
-		size_t at_pos = std::string::npos;
-		for (size_t i = 1; i < clean_base.size(); i++)
-		{
-			if (clean_base[i] == '@' && (slash_pos == std::string::npos || i > slash_pos))
-			{
-				at_pos = i;
-				break;
-			}
-		}
-		if (at_pos != std::string::npos)
-		{
-			base_ver = clean_base.substr(at_pos);
-			clean_base = clean_base.substr(0, at_pos);
-		}
-
-		size_t last_slash = clean_base.rfind('/');
-		if (last_slash != std::string::npos)
-			base_dir = clean_base.substr(0, last_slash);
-
-		std::string combined = base_dir.empty() ? spec : (base_dir + "/" + spec);
-		std::vector<std::string> parts;
-		size_t start = 0;
-		while (start <= combined.size())
-		{
-			size_t end = combined.find('/', start);
-			std::string seg = (end == std::string::npos)
-				? combined.substr(start)
-				: combined.substr(start, end - start);
-			if (seg == "" || seg == ".")
-			{
-			}
-			else if (seg == "..")
-			{
-				if (parts.empty())
-				{
-					if (escaped_root_out != nullptr)
-						*escaped_root_out = true;
-					return "";
-				}
-				parts.pop_back();
-			}
-			else
-			{
-				parts.push_back(seg);
-			}
-			if (end == std::string::npos)
-				break;
-			start = end + 1;
-		}
-
-		std::string joined;
-		for (size_t i = 0; i < parts.size(); i++)
-		{
-			if (i > 0)
-				joined += "/";
-			joined += parts[i];
-		}
-		spec = joined + base_ver;
-	}
-
-	return spec;
+  uint64 fp = 14695981039346656037ULL;
+  fp ^= plv8_hash_catalog_table(mod_relid);
+  if (OidIsValid(pkg_relid)) {
+    fp ^= (plv8_hash_catalog_table(pkg_relid) * 1099511628211ULL);
+  }
+  if (fp == 0) fp = 1;
+  return fp;
 }
 
-static int
-plv8_compare_semver(const std::string &a, const std::string &b)
-{
-	size_t ia = 0, ib = 0;
+static void plv8_sync_tle_module_cache(plv8_context* ctx) {
+  uint64 cur_fp;
 
-	while (ia < a.size() || ib < b.size())
-	{
-		if (ia < a.size() && ib < b.size() &&
-			a[ia] >= '0' && a[ia] <= '9' &&
-			b[ib] >= '0' && b[ib] <= '9')
-		{
-			unsigned long long va = 0, vb = 0;
-			while (ia < a.size() && a[ia] >= '0' && a[ia] <= '9')
-			{
-				va = va * 10ULL + (unsigned long long)(a[ia] - '0');
-				ia++;
-			}
-			while (ib < b.size() && b[ib] >= '0' && b[ib] <= '9')
-			{
-				vb = vb * 10ULL + (unsigned long long)(b[ib] - '0');
-				ib++;
-			}
-			if (va != vb)
-				return (va > vb) ? 1 : -1;
-		}
-		else
-		{
-			unsigned char ca = (ia < a.size()) ? (unsigned char) a[ia] : 0;
-			unsigned char cb = (ib < b.size()) ? (unsigned char) b[ib] : 0;
-			if (ca != cb)
-				return (ca > cb) ? 1 : -1;
-			if (ia < a.size())
-				ia++;
-			if (ib < b.size())
-				ib++;
-		}
-		if (ia < a.size() && a[ia] == '.')
-			ia++;
-		if (ib < b.size() && b[ib] == '.')
-			ib++;
-	}
-	return 0;
+  if (!ctx) return;
+
+  cur_fp = plv8_tle_modules_fingerprint();
+  if (ctx->tle_modules_fp != cur_fp) {
+    for (auto& kv : ctx->tle_module_map) kv.second.Reset();
+    ctx->tle_module_map.clear();
+    ctx->tle_module_id_to_spec.clear();
+    ctx->tle_modules_fp = cur_fp;
+  }
 }
 
-static void
-plv8_split_tle_spec(const std::string &spec, std::string &name_out, std::string &ver_out)
-{
-	std::string clean = spec;
-	if (clean.rfind("pgtle:", 0) == 0)
-		clean = clean.substr(6);
-	else if (clean.rfind("tle:", 0) == 0)
-		clean = clean.substr(4);
+static bool plv8_extract_hoisted_imports(const char* src,
+                                         std::string* imports_out,
+                                         std::string* body_out) {
+  const char* p = src;
+  bool at_line_start = true;
+  int brace_depth = 0;
+  bool found_esm = false;
 
-	size_t slash_pos = clean.find('/');
-	size_t at_pos = std::string::npos;
-	for (size_t i = 1; i < clean.size(); i++)
-	{
-		if (clean[i] == '@' && (slash_pos == std::string::npos || i > slash_pos))
-		{
-			at_pos = i;
-			break;
-		}
-	}
-	if (at_pos != std::string::npos)
-	{
-		name_out = clean.substr(0, at_pos);
-		ver_out = clean.substr(at_pos + 1);
-	}
-	else
-	{
-		name_out = clean;
-		ver_out.clear();
-	}
+  imports_out->clear();
+  body_out->clear();
+
+  while (*p) {
+    if (at_line_start) {
+      const char* ws = p;
+      while (*ws == ' ' || *ws == '\t' || *ws == '\r') ws++;
+
+      if (brace_depth == 0 && strncmp(ws, "import", 6) == 0 &&
+          (ws[6] == ' ' || ws[6] == '\t' || ws[6] == '{' || ws[6] == '*' ||
+           ws[6] == '"' || ws[6] == '\'')) {
+        const char* stmt_start = ws;
+        const char* cur = ws + 6;
+        char in_quote = 0;
+
+        while (*cur) {
+          if (in_quote) {
+            if (*cur == '\\' && cur[1])
+              cur += 2;
+            else if (*cur == in_quote) {
+              in_quote = 0;
+              cur++;
+            } else
+              cur++;
+          } else {
+            if (*cur == '\'' || *cur == '"' || *cur == '`') {
+              in_quote = *cur;
+              cur++;
+            } else if (*cur == ';') {
+              cur++;
+              break;
+            } else if (*cur == '\n') {
+              const char* back = cur - 1;
+              while (back > stmt_start &&
+                     (*back == ' ' || *back == '\t' || *back == '\r'))
+                back--;
+              if (*back == '\'' || *back == '"') {
+                cur++;
+                break;
+              }
+              cur++;
+            } else
+              cur++;
+          }
+        }
+
+        imports_out->append(stmt_start, cur - stmt_start);
+        imports_out->push_back('\n');
+        found_esm = true;
+        p = cur;
+        at_line_start = true;
+        continue;
+      } else if (brace_depth == 0 && strncmp(ws, "export", 6) == 0 &&
+                 (ws[6] == ' ' || ws[6] == '\t')) {
+        const char* after_export = ws + 6;
+        while (*after_export == ' ' || *after_export == '\t') after_export++;
+        if (strncmp(after_export, "default", 7) == 0 &&
+            (after_export[7] == ' ' || after_export[7] == '\t')) {
+          body_out->append("return ");
+          found_esm = true;
+          p = after_export + 7;
+          at_line_start = false;
+          continue;
+        } else if (strncmp(after_export, "function", 8) == 0 ||
+                   strncmp(after_export, "const", 5) == 0 ||
+                   strncmp(after_export, "let", 3) == 0 ||
+                   strncmp(after_export, "var", 3) == 0 ||
+                   strncmp(after_export, "class", 5) == 0) {
+          found_esm = true;
+          p = after_export;
+          at_line_start = false;
+          continue;
+        }
+      }
+    }
+
+    if (*p == '/' && p[1] == '/') {
+      while (*p && *p != '\n') body_out->push_back(*p++);
+      if (*p == '\n') {
+        body_out->push_back(*p++);
+        at_line_start = true;
+      }
+      continue;
+    }
+    if (*p == '/' && p[1] == '*') {
+      body_out->push_back(*p++);
+      body_out->push_back(*p++);
+      while (*p && !(*p == '*' && p[1] == '/')) body_out->push_back(*p++);
+      if (*p) {
+        body_out->push_back(*p++);
+        body_out->push_back(*p++);
+      }
+      continue;
+    }
+    if (*p == '\'' || *p == '"' || *p == '`') {
+      char q = *p;
+      body_out->push_back(*p++);
+      while (*p && *p != q) {
+        if (*p == '\\' && p[1]) body_out->push_back(*p++);
+        body_out->push_back(*p++);
+      }
+      if (*p == q) body_out->push_back(*p++);
+      at_line_start = false;
+      continue;
+    }
+
+    if (*p == '{')
+      brace_depth++;
+    else if (*p == '}' && brace_depth > 0)
+      brace_depth--;
+
+    if (*p == '\n')
+      at_line_start = true;
+    else if (*p != ' ' && *p != '\t' && *p != '\r')
+      at_line_start = false;
+
+    body_out->push_back(*p++);
+  }
+
+  return found_esm;
 }
 
-static bool
-plv8_fetch_tle_module(const std::string &normalized_spec,
-					  const std::string &base_spec,
-					  std::string &resolved_name,
-					  std::string &resolved_version,
-					  std::string &source_out,
-					  std::vector<uint8_t> &bytecode_out,
-					  bool &is_trusted_out,
-					  std::string &err_msg)
-{
-	std::string target_name;
-	std::string target_version;
-	plv8_split_tle_spec(normalized_spec, target_name, target_version);
-	bool has_explicit_version = !target_version.empty();
+/* ---------- Semver Parsing & Range Evaluation ---------- */
 
-	std::string imp_name;
-	std::string imp_version;
-	if (!base_spec.empty())
-		plv8_split_tle_spec(base_spec, imp_name, imp_version);
+struct Plv8Semver {
+  int major;
+  int minor;
+  int patch;
+};
 
-	if (!IsTransactionState())
-	{
-		err_msg = "cannot load pgtle module outside a transaction";
-		return false;
-	}
+static bool plv8_semver_parse(const std::string& str, Plv8Semver* out) {
+  if (str.empty()) return false;
+  size_t pos = 0;
+  int parts[3] = {0, 0, 0};
 
-	Oid nspoid = get_namespace_oid("pgtle", true);
-	if (!OidIsValid(nspoid))
-	{
-		err_msg = "schema \"pgtle\" does not exist (is pg_tle installed?)";
-		return false;
-	}
+  for (int i = 0; i < 3; i++) {
+    if (pos >= str.size() || str[pos] < '0' || str[pos] > '9') return false;
+    if (str[pos] == '0' && pos + 1 < str.size() && str[pos + 1] >= '0' &&
+        str[pos + 1] <= '9') {
+      return false;  // leading zero not allowed in strict semver
+    }
+    long long val = 0;
+    while (pos < str.size() && str[pos] >= '0' && str[pos] <= '9') {
+      val = val * 10 + (str[pos] - '0');
+      if (val > 2147483647LL) return false;
+      pos++;
+    }
+    parts[i] = (int)val;
+    if (i < 2) {
+      if (pos >= str.size() || str[pos] != '.') return false;
+      pos++;
+    }
+  }
 
-	Oid relid = get_relname_relid("modules", nspoid);
-	if (!OidIsValid(relid))
-	{
-		err_msg = "table \"pgtle.modules\" does not exist";
-		return false;
-	}
+  if (pos < str.size()) {
+    // Allow optional -prerelease or +build suffix for compatibility
+    if (str[pos] != '-' && str[pos] != '+') return false;
+  }
 
-	bool found = false;
-	bool caller_is_super = false;
-	bool imp_has_requires = false;
-	std::string imp_best_ver;
-	std::vector<std::string> imp_requires;
-
-	PG_TRY();
-	{
-		caller_is_super = superuser();
-		Relation rel = table_open(relid, AccessShareLock);
-		TupleDesc tupdesc = RelationGetDescr(rel);
-		TableScanDesc scan = table_beginscan_catalog(rel, 0, NULL);
-		HeapTuple tuple;
-
-		while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
-		{
-			bool isnull_name = false, isnull_ver = false, isnull_src = false;
-			bool isnull_bc = false, isnull_trusted = false;
-
-			CHECK_FOR_INTERRUPTS();
-
-			Datum d_name = heap_getattr(tuple, 1, tupdesc, &isnull_name);
-			Datum d_ver = heap_getattr(tuple, 2, tupdesc, &isnull_ver);
-			if (isnull_name || isnull_ver)
-				continue;
-
-			char *c_name = TextDatumGetCString(d_name);
-			char *c_ver = TextDatumGetCString(d_ver);
-			std::string row_name(c_name);
-			std::string row_ver(c_ver);
-			pfree(c_name);
-			pfree(c_ver);
-
-			if (!imp_name.empty() && tupdesc->natts >= 6 && row_name == imp_name &&
-				(imp_version.empty() || row_ver == imp_version))
-			{
-				if (imp_best_ver.empty() ||
-					(!imp_version.empty()) ||
-					plv8_compare_semver(row_ver, imp_best_ver) > 0)
-				{
-					imp_best_ver = row_ver;
-					imp_requires.clear();
-					bool isnull_req = false;
-					Datum d_req = heap_getattr(tuple, 5, tupdesc, &isnull_req);
-					if (!isnull_req)
-					{
-						imp_has_requires = true;
-						ArrayType *arr = DatumGetArrayTypeP(d_req);
-						Datum *elems = nullptr;
-						bool *nulls = nullptr;
-						int nelems = 0;
-						deconstruct_array(arr, TEXTOID, -1, false, TYPALIGN_INT,
-										  &elems, &nulls, &nelems);
-						for (int i = 0; i < nelems; i++)
-						{
-							if (!nulls[i])
-							{
-								char *req_c = TextDatumGetCString(elems[i]);
-								imp_requires.emplace_back(req_c);
-								pfree(req_c);
-							}
-						}
-						if (elems)
-							pfree(elems);
-						if (nulls)
-							pfree(nulls);
-						if ((Pointer) arr != DatumGetPointer(d_req))
-							pfree(arr);
-					}
-					else
-					{
-						imp_has_requires = false;
-					}
-				}
-			}
-
-			if (row_name != target_name)
-				continue;
-			if (has_explicit_version && row_ver != target_version)
-				continue;
-
-			if (!found || (!has_explicit_version && plv8_compare_semver(row_ver, resolved_version) > 0))
-			{
-				Datum d_src = heap_getattr(tuple, 3, tupdesc, &isnull_src);
-				Datum d_bc = heap_getattr(tuple, 4, tupdesc, &isnull_bc);
-				Datum d_trusted = (tupdesc->natts >= 6)
-					? heap_getattr(tuple, 6, tupdesc, &isnull_trusted)
-					: heap_getattr(tuple, 5, tupdesc, &isnull_trusted);
-
-				resolved_name = row_name;
-				resolved_version = row_ver;
-
-				if (!isnull_src)
-				{
-					char *c_src = TextDatumGetCString(d_src);
-					source_out.assign(c_src);
-					pfree(c_src);
-				}
-				else
-					source_out.clear();
-
-				bytecode_out.clear();
-				if (!isnull_bc)
-				{
-					bytea *bc = DatumGetByteaPP(d_bc);
-					const uint8_t *bc_ptr = (const uint8_t *) VARDATA_ANY(bc);
-					size_t bc_len = VARSIZE_ANY_EXHDR(bc);
-					bytecode_out.assign(bc_ptr, bc_ptr + bc_len);
-					if ((Pointer) bc != DatumGetPointer(d_bc))
-						pfree(bc);
-				}
-
-				is_trusted_out = isnull_trusted ? true : DatumGetBool(d_trusted);
-				found = true;
-				if (has_explicit_version && imp_name.empty())
-					break;
-			}
-		}
-
-		table_endscan(scan);
-		table_close(rel, AccessShareLock);
-	}
-	PG_CATCH();
-	{
-		FlushErrorState();
-		err_msg = "failed to scan pgtle.modules catalog";
-		return false;
-	}
-	PG_END_TRY();
-
-	if (!found)
-	{
-		if (has_explicit_version)
-			err_msg = "module \"" + target_name + "@" + target_version + "\" not found in pgtle.modules";
-		else
-			err_msg = "module \"" + target_name + "\" not found in pgtle.modules";
-		return false;
-	}
-
-	if (!is_trusted_out && !caller_is_super)
-	{
-		err_msg = "permission denied for untrusted module \"" + resolved_name + "@" + resolved_version + "\"";
-		return false;
-	}
-
-	if (imp_has_requires)
-	{
-		bool allowed = false;
-		for (size_t i = 0; i < imp_requires.size(); i++)
-		{
-			std::string req_n, req_v;
-			plv8_split_tle_spec(imp_requires[i], req_n, req_v);
-			if (req_n == resolved_name && (req_v.empty() || req_v == resolved_version))
-			{
-				allowed = true;
-				break;
-			}
-		}
-		if (!allowed)
-		{
-			err_msg = "pg_tle module \"" + resolved_name + "\" is not listed in requires of \"" + imp_name + "\"";
-			return false;
-		}
-	}
-
-	return true;
+  out->major = parts[0];
+  out->minor = parts[1];
+  out->patch = parts[2];
+  return true;
 }
 
-static MaybeLocal<Module>
-plv8_load_tle_module(Local<Context> context, const std::string &raw_spec, const std::string &base_spec)
-{
-	Isolate *isolate = Isolate::GetCurrent();
-	bool escaped_root = false;
-	std::string norm_spec = plv8_normalize_tle_specifier(raw_spec, base_spec, &escaped_root);
-	if (escaped_root)
-	{
-		std::string msg = "relative module specifier \"" + raw_spec + "\" traverses above root";
-		isolate->ThrowException(Exception::Error(ToString(msg.c_str())));
-		return MaybeLocal<Module>();
-	}
-
-	if (current_context && base_spec.empty())
-	{
-		plv8_sync_tle_module_cache(current_context);
-		auto it = current_context->tle_module_map.find(norm_spec);
-		if (it != current_context->tle_module_map.end() && !it->second.IsEmpty())
-		{
-			return it->second.Get(isolate);
-		}
-	}
-
-	std::string resolved_name, resolved_ver, source_code, err_msg;
-	std::vector<uint8_t> bytecode;
-	bool is_trusted = true;
-
-	if (!plv8_fetch_tle_module(norm_spec, base_spec, resolved_name, resolved_ver,
-							   source_code, bytecode, is_trusted, err_msg))
-	{
-		isolate->ThrowException(Exception::Error(ToString(err_msg.c_str())));
-		return MaybeLocal<Module>();
-	}
-
-	std::string canonical_key = resolved_name + "@" + resolved_ver;
-	if (current_context)
-	{
-		auto it = current_context->tle_module_map.find(canonical_key);
-		if (it != current_context->tle_module_map.end() && !it->second.IsEmpty())
-		{
-			Local<Module> cached_mod = it->second.Get(isolate);
-			current_context->tle_module_map[norm_spec].Reset(isolate, cached_mod);
-			return cached_mod;
-		}
-	}
-
-	std::string origin_url = "pgtle:" + canonical_key;
-	Local<v8::String> resource_name = ToString(origin_url.c_str());
-	ScriptOrigin origin(resource_name,
-						0,
-						0,
-						false,
-						-1,
-						Local<Value>(),
-						false,
-						false,
-						true /* is_module */);
-
-	std::string actual_source = source_code;
-	ScriptCompiler::CachedData *cached_data = nullptr;
-	ScriptCompiler::CompileOptions compile_options = ScriptCompiler::kNoCompileOptions;
-
-	if (bytecode.size() >= 16 &&
-		memcmp(bytecode.data(), PLV8_BYTECODE_MAGIC, 8) == 0)
-	{
-		uint32_t src_len = 0, cache_len = 0;
-		memcpy(&src_len, bytecode.data() + 8, sizeof(uint32_t));
-		memcpy(&cache_len, bytecode.data() + 12, sizeof(uint32_t));
-		if (16ULL + src_len + cache_len == bytecode.size() && cache_len > 0)
-		{
-			actual_source.assign((const char *) (bytecode.data() + 16), src_len);
-			uint8_t *cd_buf = new uint8_t[cache_len];
-			memcpy(cd_buf, bytecode.data() + 16 + src_len, cache_len);
-			cached_data = new ScriptCompiler::CachedData(
-				cd_buf, (int) cache_len, ScriptCompiler::CachedData::BufferOwned);
-			compile_options = ScriptCompiler::kConsumeCodeCache;
-		}
-	}
-	else if (bytecode.size() >= 8 &&
-			 bytecode[0] == 0x00 && bytecode[1] == 0x61 &&
-			 bytecode[2] == 0x73 && bytecode[3] == 0x6d &&
-			 bytecode[4] == 0x01 && bytecode[5] == 0x00 &&
-			 bytecode[6] == 0x00 && bytecode[7] == 0x00)
-	{
-		std::ostringstream wasm_js;
-		wasm_js << "const __wasm_bytes = new Uint8Array([";
-		for (size_t i = 0; i < bytecode.size(); i++)
-		{
-			if (i > 0)
-				wasm_js << ",";
-			wasm_js << (unsigned int) bytecode[i];
-		}
-		wasm_js << "]);\n";
-		wasm_js << "const __cache_key = " << "\"pgtle:" << canonical_key << ":" << bytecode.size() << "\";\n";
-		wasm_js << "const __mod = (typeof plv8.compile_wasm_cached === 'function') "
-				<< "? plv8.compile_wasm_cached(__cache_key, __wasm_bytes) "
-				<< ": new WebAssembly.Module(__wasm_bytes);\n";
-		wasm_js << "let __inst = null;\n";
-		wasm_js << "const __imports = {\n"
-				<< "  env: {\n"
-				<< "    abort: function() { throw new Error('WASM execution aborted'); },\n"
-				<< "    plv8_elog_notice: function(ptr, len) {\n"
-				<< "      const b = new Uint8Array(__inst.exports.memory.buffer, ptr >>> 0, len >>> 0);\n"
-				<< "      let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);\n"
-				<< "      plv8.elog(NOTICE, s);\n"
-				<< "    },\n"
-				<< "    plv8_elog_error: function(ptr, len) {\n"
-				<< "      const b = new Uint8Array(__inst.exports.memory.buffer, ptr >>> 0, len >>> 0);\n"
-				<< "      let s = ''; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);\n"
-				<< "      throw new Error(s);\n"
-				<< "    }\n"
-				<< "  }\n"
-				<< "};\n";
-		wasm_js << "__inst = new WebAssembly.Instance(__mod, __imports);\n";
-		wasm_js << "export const module = __mod;\n";
-		wasm_js << "export const instance = __inst;\n";
-		wasm_js << "export const exports = __inst.exports;\n";
-
-		bool exported_memory = false;
-		size_t pos = 8;
-		auto read_uleb128 = [&](size_t &p, uint32_t &out) -> bool {
-			out = 0;
-			unsigned shift = 0;
-			while (p < bytecode.size() && shift < 35)
-			{
-				uint8_t byte = bytecode[p++];
-				out |= (uint32_t)(byte & 0x7f) << shift;
-				if ((byte & 0x80) == 0)
-					return true;
-				shift += 7;
-			}
-			return false;
-		};
-		auto is_valid_js_ident = [](const std::string &s) -> bool {
-			if (s.empty() || s == "default" || s == "module" ||
-				s == "instance" || s == "exports")
-				return false;
-			char c0 = s[0];
-			if (!((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') ||
-				  c0 == '_' || c0 == '$'))
-				return false;
-			for (size_t i = 1; i < s.size(); i++)
-			{
-				char c = s[i];
-				if (!((c >= 'a' && c <= 'z') ||
-					  (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-					  c == '_' || c == '$'))
-					return false;
-			}
-			return true;
-		};
-
-		while (pos < bytecode.size())
-		{
-			uint8_t sec_id = bytecode[pos++];
-			uint32_t sec_len = 0;
-			if (!read_uleb128(pos, sec_len) || pos + sec_len > bytecode.size())
-				break;
-			size_t sec_end = pos + sec_len;
-			if (sec_id == 7)
-			{
-				uint32_t count = 0;
-				if (read_uleb128(pos, count))
-				{
-					for (uint32_t i = 0; i < count && pos < sec_end; i++)
-					{
-						uint32_t name_len = 0;
-						if (!read_uleb128(pos, name_len) || pos + name_len > sec_end)
-							break;
-						std::string exp_name((const char *) (bytecode.data() + pos), name_len);
-						pos += name_len;
-						if (pos >= sec_end)
-							break;
-						pos++;
-						uint32_t exp_idx = 0;
-						if (!read_uleb128(pos, exp_idx))
-							break;
-						if (is_valid_js_ident(exp_name))
-						{
-							if (exp_name == "memory")
-								exported_memory = true;
-							wasm_js << "export const " << exp_name
-									<< " = __inst.exports[\"" << exp_name << "\"];\n";
-						}
-					}
-				}
-				break;
-			}
-			pos = sec_end;
-		}
-		if (!exported_memory)
-			wasm_js << "export const memory = __inst.exports.memory;\n";
-		wasm_js << "export default __inst.exports;\n";
-		actual_source = wasm_js.str();
-	}
-	else if (!bytecode.empty())
-	{
-		uint8_t *cd_buf = new uint8_t[bytecode.size()];
-		memcpy(cd_buf, bytecode.data(), bytecode.size());
-		cached_data = new ScriptCompiler::CachedData(
-			cd_buf, (int) bytecode.size(), ScriptCompiler::CachedData::BufferOwned);
-		compile_options = ScriptCompiler::kConsumeCodeCache;
-	}
-	else
-	{
-		if (actual_source.find("export ") == std::string::npos &&
-			actual_source.find("export{") == std::string::npos &&
-			actual_source.find("export\t") == std::string::npos &&
-			(actual_source.find("exports") != std::string::npos ||
-			 actual_source.find("require(") != std::string::npos))
-		{
-			std::string cjs_imports, cjs_body;
-			plv8_extract_hoisted_imports(actual_source.c_str(), &cjs_imports, &cjs_body);
-			actual_source = cjs_imports +
-				"\nconst module = { exports: {} };\nconst exports = module.exports;\n" +
-				"const require = (spec) => plv8.require(spec, \"" + canonical_key + "\");\n" +
-				cjs_body +
-				"\nexport default module.exports;\n";
-		}
-	}
-
-	Local<v8::String> source_str = ToString(actual_source.data(), actual_source.size());
-	ScriptCompiler::Source script_source(source_str, origin, cached_data);
-
-	MaybeLocal<Module> maybe_mod = ScriptCompiler::CompileModule(
-		isolate, &script_source, compile_options);
-
-	if (maybe_mod.IsEmpty() && compile_options == ScriptCompiler::kConsumeCodeCache)
-	{
-		ScriptCompiler::Source fallback_source(source_str, origin);
-		maybe_mod = ScriptCompiler::CompileModule(isolate, &fallback_source);
-	}
-
-	Local<Module> mod;
-	if (!maybe_mod.ToLocal(&mod))
-		return MaybeLocal<Module>();
-
-	if (current_context)
-	{
-		current_context->tle_module_map[canonical_key].Reset(isolate, mod);
-		current_context->tle_module_map[norm_spec].Reset(isolate, mod);
-		current_context->tle_module_id_to_spec[mod->GetIdentityHash()] = canonical_key;
-	}
-
-	return mod;
+static int plv8_semver_cmp(const Plv8Semver& a, const Plv8Semver& b) {
+  if (a.major != b.major) return (a.major > b.major) ? 1 : -1;
+  if (a.minor != b.minor) return (a.minor > b.minor) ? 1 : -1;
+  if (a.patch != b.patch) return (a.patch > b.patch) ? 1 : -1;
+  return 0;
 }
 
-MaybeLocal<Module>
-plv8_ResolveModuleCallback(Local<Context> context,
-						   Local<v8::String> specifier,
-						   Local<FixedArray> import_attributes,
-						   Local<Module> referrer)
-{
-	Isolate *isolate = Isolate::GetCurrent();
-	v8::String::Utf8Value spec_utf8(isolate, specifier);
-	std::string raw_spec(*spec_utf8 ? *spec_utf8 : "");
+static int plv8_compare_semver(const std::string& a, const std::string& b) {
+  size_t ia = 0, ib = 0;
 
-	std::string base_spec;
-	if (!referrer.IsEmpty() && current_context)
-	{
-		auto it = current_context->tle_module_id_to_spec.find(referrer->GetIdentityHash());
-		if (it != current_context->tle_module_id_to_spec.end())
-			base_spec = it->second;
-	}
-
-	return plv8_load_tle_module(context, raw_spec, base_spec);
+  while (ia < a.size() || ib < b.size()) {
+    if (ia < a.size() && ib < b.size() && a[ia] >= '0' && a[ia] <= '9' &&
+        b[ib] >= '0' && b[ib] <= '9') {
+      unsigned long long va = 0, vb = 0;
+      while (ia < a.size() && a[ia] >= '0' && a[ia] <= '9') {
+        va = va * 10ULL + (unsigned long long)(a[ia] - '0');
+        ia++;
+      }
+      while (ib < b.size() && b[ib] >= '0' && b[ib] <= '9') {
+        vb = vb * 10ULL + (unsigned long long)(b[ib] - '0');
+        ib++;
+      }
+      if (va != vb) return (va > vb) ? 1 : -1;
+    } else {
+      unsigned char ca = (ia < a.size()) ? (unsigned char)a[ia] : 0;
+      unsigned char cb = (ib < b.size()) ? (unsigned char)b[ib] : 0;
+      if (ca != cb) return (ca > cb) ? 1 : -1;
+      if (ia < a.size()) ia++;
+      if (ib < b.size()) ib++;
+    }
+    if (ia < a.size() && a[ia] == '.') ia++;
+    if (ib < b.size() && b[ib] == '.') ib++;
+  }
+  return 0;
 }
 
-MaybeLocal<Promise>
-plv8_HostImportModuleDynamicallyCallback(Local<Context> context,
-										 Local<Data> host_defined_options,
-										 Local<Value> resource_name,
-										 Local<v8::String> specifier,
-										 Local<FixedArray> import_attributes)
-{
-	Isolate *isolate = Isolate::GetCurrent();
-	Local<Promise::Resolver> resolver;
-	if (!Promise::Resolver::New(context).ToLocal(&resolver))
-		return MaybeLocal<Promise>();
-
-	TryCatch try_catch(isolate);
-	v8::String::Utf8Value spec_utf8(isolate, specifier);
-	std::string raw_spec(*spec_utf8 ? *spec_utf8 : "");
-
-	std::string base_spec;
-	if (!resource_name.IsEmpty() && resource_name->IsString())
-	{
-		v8::String::Utf8Value res_utf8(isolate, resource_name);
-		if (*res_utf8)
-		{
-			if (strncmp(*res_utf8, "pgtle:", 6) == 0)
-				base_spec = *res_utf8 + 6;
-			else if (strncmp(*res_utf8, "tle:", 4) == 0)
-				base_spec = *res_utf8 + 4;
-		}
-	}
-
-	MaybeLocal<Module> maybe_mod = plv8_load_tle_module(context, raw_spec, base_spec);
-	Local<Module> mod;
-	if (!maybe_mod.ToLocal(&mod))
-	{
-		Local<Value> exc = try_catch.HasCaught()
-			? try_catch.Exception()
-			: Exception::Error(ToString("failed to load module"));
-		resolver->Reject(context, exc).FromMaybe(false);
-		return resolver->GetPromise();
-	}
-
-	if (mod->GetStatus() == Module::kUninstantiated)
-	{
-		Maybe<bool> inst = mod->InstantiateModule(context, plv8_ResolveModuleCallback);
-		if (inst.IsNothing() || !inst.FromJust())
-		{
-			Local<Value> exc = try_catch.HasCaught()
-				? try_catch.Exception()
-				: Exception::Error(ToString("failed to instantiate module"));
-			resolver->Reject(context, exc).FromMaybe(false);
-			return resolver->GetPromise();
-		}
-	}
-
-	if (mod->GetStatus() == Module::kInstantiated)
-	{
-		bool prev_ignore = current_context ? current_context->ignore_unhandled_promises : false;
-		if (current_context)
-			current_context->ignore_unhandled_promises = true;
-		MaybeLocal<Value> eval_res = mod->Evaluate(context);
-		if (current_context)
-			current_context->ignore_unhandled_promises = prev_ignore;
-
-		Local<Value> val;
-		if (!eval_res.ToLocal(&val))
-		{
-			Local<Value> exc = try_catch.HasCaught()
-				? try_catch.Exception()
-				: Exception::Error(ToString("failed to evaluate module"));
-			resolver->Reject(context, exc).FromMaybe(false);
-			return resolver->GetPromise();
-		}
-		if (val->IsPromise())
-		{
-			Local<Promise> prom = val.As<Promise>();
-			if (prom->State() == Promise::kRejected)
-			{
-				resolver->Reject(context, prom->Result()).FromMaybe(false);
-				return resolver->GetPromise();
-			}
-		}
-	}
-
-	if (mod->GetStatus() == Module::kErrored)
-	{
-		resolver->Reject(context, mod->GetException()).FromMaybe(false);
-		return resolver->GetPromise();
-	}
-
-	resolver->Resolve(context, mod->GetModuleNamespace()).FromMaybe(false);
-	return resolver->GetPromise();
+static std::string plv8_trim(const std::string& s) {
+  size_t start = 0;
+  while (start < s.size() &&
+         (s[start] == ' ' || s[start] == '\t' || s[start] == '\r' ||
+          s[start] == '\n'))
+    start++;
+  size_t end = s.size();
+  while (end > start &&
+         (s[end - 1] == ' ' || s[end - 1] == '\t' || s[end - 1] == '\r' ||
+          s[end - 1] == '\n'))
+    end--;
+  return s.substr(start, end - start);
 }
 
-void
-plv8_HostInitializeImportMetaObjectCallback(Local<Context> context,
-											Local<Module> module,
-											Local<Object> meta)
-{
-	std::string url = "pgtle:anonymous";
+static bool plv8_semver_satisfies_single(const Plv8Semver& ver,
+                                         const std::string& token_raw,
+                                         bool* valid_range_out) {
+  std::string tok = plv8_trim(token_raw);
+  if (tok.empty() || tok == "*") {
+    *valid_range_out = true;
+    return true;
+  }
 
-	if (current_context)
-	{
-		auto it = current_context->tle_module_id_to_spec.find(module->GetIdentityHash());
-		if (it != current_context->tle_module_id_to_spec.end())
-			url = "pgtle:" + it->second;
-	}
+  if (tok[0] == '^') {
+    Plv8Semver base;
+    if (!plv8_semver_parse(plv8_trim(tok.substr(1)), &base)) {
+      *valid_range_out = false;
+      return false;
+    }
+    *valid_range_out = true;
+    if (plv8_semver_cmp(ver, base) < 0) return false;
+    Plv8Semver upper = {0, 0, 0};
+    if (base.major > 0) {
+      upper.major = base.major + 1;
+    } else if (base.minor > 0) {
+      upper.minor = base.minor + 1;
+    } else {
+      upper.patch = base.patch + 1;
+    }
+    return plv8_semver_cmp(ver, upper) < 0;
+  }
 
-	meta->CreateDataProperty(
-		context,
-		ToString("url"),
-		ToString(url.c_str())).FromMaybe(false);
+  if (tok[0] == '~') {
+    Plv8Semver base;
+    if (!plv8_semver_parse(plv8_trim(tok.substr(1)), &base)) {
+      *valid_range_out = false;
+      return false;
+    }
+    *valid_range_out = true;
+    if (plv8_semver_cmp(ver, base) < 0) return false;
+    Plv8Semver upper = {base.major, base.minor + 1, 0};
+    return plv8_semver_cmp(ver, upper) < 0;
+  }
+
+  if (tok.rfind(">=", 0) == 0) {
+    Plv8Semver base;
+    if (!plv8_semver_parse(plv8_trim(tok.substr(2)), &base)) {
+      *valid_range_out = false;
+      return false;
+    }
+    *valid_range_out = true;
+    return plv8_semver_cmp(ver, base) >= 0;
+  }
+
+  if (tok.rfind("<=", 0) == 0) {
+    Plv8Semver base;
+    if (!plv8_semver_parse(plv8_trim(tok.substr(2)), &base)) {
+      *valid_range_out = false;
+      return false;
+    }
+    *valid_range_out = true;
+    return plv8_semver_cmp(ver, base) <= 0;
+  }
+
+  if (tok[0] == '>') {
+    Plv8Semver base;
+    if (!plv8_semver_parse(plv8_trim(tok.substr(1)), &base)) {
+      *valid_range_out = false;
+      return false;
+    }
+    *valid_range_out = true;
+    return plv8_semver_cmp(ver, base) > 0;
+  }
+
+  if (tok[0] == '<') {
+    Plv8Semver base;
+    if (!plv8_semver_parse(plv8_trim(tok.substr(1)), &base)) {
+      *valid_range_out = false;
+      return false;
+    }
+    *valid_range_out = true;
+    return plv8_semver_cmp(ver, base) < 0;
+  }
+
+  if (tok[0] == '=') {
+    tok = plv8_trim(tok.substr(1));
+  }
+
+  // Check wildcard forms: 1.x, 1.*, 1.2.x, 1.2.*
+  size_t dot1 = tok.find('.');
+  if (dot1 != std::string::npos) {
+    std::string s_maj = tok.substr(0, dot1);
+    std::string rest = tok.substr(dot1 + 1);
+    size_t dot2 = rest.find('.');
+    std::string s_min =
+        (dot2 == std::string::npos) ? rest : rest.substr(0, dot2);
+    std::string s_pat =
+        (dot2 == std::string::npos) ? "x" : rest.substr(dot2 + 1);
+
+    auto is_wild = [](const std::string& s) {
+      return s == "x" || s == "X" || s == "*";
+    };
+    auto parse_int = [](const std::string& s, int* v) {
+      if (s.empty()) return false;
+      long long n = 0;
+      for (char c : s) {
+        if (c < '0' || c > '9') return false;
+        n = n * 10 + (c - '0');
+        if (n > 2147483647LL) return false;
+      }
+      *v = (int)n;
+      return true;
+    };
+
+    if (is_wild(s_min) || is_wild(s_pat)) {
+      int maj = 0;
+      if (!parse_int(s_maj, &maj)) {
+        *valid_range_out = false;
+        return false;
+      }
+      if (is_wild(s_min)) {
+        *valid_range_out = true;
+        return ver.major == maj;
+      }
+      int min = 0;
+      if (!parse_int(s_min, &min) || !is_wild(s_pat)) {
+        *valid_range_out = false;
+        return false;
+      }
+      *valid_range_out = true;
+      return ver.major == maj && ver.minor == min;
+    }
+  }
+
+  Plv8Semver exact;
+  if (!plv8_semver_parse(tok, &exact)) {
+    *valid_range_out = false;
+    return false;
+  }
+  *valid_range_out = true;
+  return plv8_semver_cmp(ver, exact) == 0;
 }
 
-static Local<Object>
-plv8_compile_and_eval_anon_module(Local<Context> context,
-								  const char *name,
-								  const char *mod_src)
-{
-	Isolate *isolate = Isolate::GetCurrent();
-	EscapableHandleScope handle_scope(isolate);
-	TryCatch try_catch(isolate);
+static bool plv8_semver_satisfies(const std::string& ver_str,
+                                  const std::string& range_str) {
+  if (range_str.empty()) return true;
+  if (ver_str == range_str) return true;
 
-	Local<v8::String> sname = ToString(name ? name : "pgtle:anonymous");
-	Local<v8::String> source = ToString(mod_src);
-	ScriptOrigin origin(sname,
-						0,
-						0,
-						false,
-						-1,
-						Local<Value>(),
-						false,
-						false,
-						true /* is_module */);
-	ScriptCompiler::Source script_source(source, origin);
+  Plv8Semver ver;
+  if (!plv8_semver_parse(ver_str, &ver)) {
+    return ver_str == range_str;
+  }
 
-	MaybeLocal<Module> maybe_mod = ScriptCompiler::CompileModule(isolate, &script_source);
-	Local<Module> mod;
-	if (!maybe_mod.ToLocal(&mod))
-		throw js_error(try_catch);
+  // Split by "||"
+  size_t pos = 0;
+  bool any_branch_matched = false;
+  while (pos <= range_str.size()) {
+    size_t next_or = range_str.find("||", pos);
+    std::string branch = (next_or == std::string::npos)
+                             ? range_str.substr(pos)
+                             : range_str.substr(pos, next_or - pos);
+    branch = plv8_trim(branch);
 
-	Maybe<bool> inst = mod->InstantiateModule(context, plv8_ResolveModuleCallback);
-	if (inst.IsNothing() || !inst.FromJust())
-		throw js_error(try_catch);
+    // Check hyphen range: "1.0.0 - 2.0.0"
+    size_t hyph = branch.find(" - ");
+    bool branch_ok = true;
+    if (hyph != std::string::npos) {
+      Plv8Semver low, high;
+      if (!plv8_semver_parse(plv8_trim(branch.substr(0, hyph)), &low) ||
+          !plv8_semver_parse(plv8_trim(branch.substr(hyph + 3)), &high)) {
+        return false;
+      }
+      branch_ok =
+          (plv8_semver_cmp(ver, low) >= 0 && plv8_semver_cmp(ver, high) <= 0);
+    } else if (!branch.empty()) {
+      // Tokenize space-separated comparators (joining operator + version if separated by space)
+      std::vector<std::string> raw_tokens;
+      size_t i = 0;
+      while (i < branch.size()) {
+        while (i < branch.size() && (branch[i] == ' ' || branch[i] == '\t'))
+          i++;
+        if (i >= branch.size()) break;
+        size_t j = i;
+        while (j < branch.size() && branch[j] != ' ' && branch[j] != '\t') j++;
+        raw_tokens.push_back(branch.substr(i, j - i));
+        i = j;
+      }
 
-	bool prev_ignore = current_context ? current_context->ignore_unhandled_promises : false;
-	if (current_context)
-		current_context->ignore_unhandled_promises = true;
-	MaybeLocal<Value> eval_res = mod->Evaluate(context);
-	if (current_context)
-		current_context->ignore_unhandled_promises = prev_ignore;
+      for (size_t t = 0; t < raw_tokens.size(); t++) {
+        std::string tok = raw_tokens[t];
+        if ((tok == ">=" || tok == "<=" || tok == ">" || tok == "<" ||
+             tok == "=" || tok == "^" || tok == "~") &&
+            t + 1 < raw_tokens.size()) {
+          tok += raw_tokens[++t];
+        }
+        bool valid_tok = false;
+        bool sat = plv8_semver_satisfies_single(ver, tok, &valid_tok);
+        if (!valid_tok) return false;
+        if (!sat) branch_ok = false;
+      }
+    }
 
-	Local<Value> val;
-	if (!eval_res.ToLocal(&val))
-		throw js_error(try_catch);
+    if (branch_ok) any_branch_matched = true;
+    if (next_or == std::string::npos) break;
+    pos = next_or + 2;
+  }
 
-	if (val->IsPromise())
-	{
-		Local<Promise> prom = val.As<Promise>();
-		if (prom->State() == Promise::kRejected)
-		{
-			isolate->ThrowException(prom->Result());
-			throw js_error(try_catch);
-		}
-	}
-
-	Local<Value> ns_val = mod->GetModuleNamespace();
-	return handle_scope.Escape(ns_val.As<Object>());
+  return any_branch_matched;
 }
 
-void
-plv8_Require(const FunctionCallbackInfo<Value> &args)
-{
-	Isolate *isolate = args.GetIsolate();
-	HandleScope handle_scope(isolate);
-	Local<Context> context = isolate->GetCurrentContext();
+/* ---------- Specifier Normalization & Module Resolution ---------- */
 
-	if (args.Length() < 1 || !args[0]->IsString())
-	{
-		isolate->ThrowException(Exception::TypeError(ToString("require() expects a module name string")));
-		return;
-	}
+struct Plv8ModuleId {
+  bool is_package = false;
+  std::string package_name;
+  std::string package_version;
+  std::string path;
 
-	v8::String::Utf8Value spec_utf8(isolate, args[0]);
-	std::string raw_spec(*spec_utf8 ? *spec_utf8 : "");
+  std::string canonical_key() const {
+    if (is_package) {
+      return "pkg:" + package_name + "@" + package_version + "/" + path;
+    }
+    return "mod:" + path;
+  }
 
-	std::string base_spec;
-	if (args.Length() >= 2 && args[1]->IsString())
-	{
-		v8::String::Utf8Value base_utf8(isolate, args[1]);
-		if (*base_utf8)
-			base_spec.assign(*base_utf8);
-	}
-	else if (raw_spec.rfind("./", 0) == 0 || raw_spec.rfind("../", 0) == 0)
-	{
-		Local<StackTrace> st = StackTrace::CurrentStackTrace(isolate, 4, StackTrace::kScriptName);
-		if (!st.IsEmpty())
-		{
-			for (int i = 0; i < st->GetFrameCount(); i++)
-			{
-				Local<StackFrame> frame = st->GetFrame(isolate, i);
-				if (!frame.IsEmpty() && !frame->GetScriptName().IsEmpty())
-				{
-					v8::String::Utf8Value sname(isolate, frame->GetScriptName());
-					if (*sname && (strncmp(*sname, "pgtle:", 6) == 0 || strncmp(*sname, "tle:", 4) == 0))
-					{
-						base_spec.assign(*sname);
-						break;
-					}
-				}
-			}
-		}
-	}
+  std::string meta_url() const {
+    if (is_package) {
+      return "plv8:" + package_name + "@" + package_version + "/" + path;
+    }
+    return "plv8:" + path;
+  }
+};
 
-	TryCatch try_catch(isolate);
-	MaybeLocal<Module> maybe_mod = plv8_load_tle_module(context, raw_spec, base_spec);
-	Local<Module> mod;
-	if (!maybe_mod.ToLocal(&mod))
-	{
-		try_catch.ReThrow();
-		return;
-	}
-
-	if (mod->GetStatus() == Module::kUninstantiated)
-	{
-		Maybe<bool> inst = mod->InstantiateModule(context, plv8_ResolveModuleCallback);
-		if (inst.IsNothing() || !inst.FromJust())
-		{
-			try_catch.ReThrow();
-			return;
-		}
-	}
-
-	if (mod->GetStatus() == Module::kInstantiated)
-	{
-		bool prev_ignore = current_context ? current_context->ignore_unhandled_promises : false;
-		if (current_context)
-			current_context->ignore_unhandled_promises = true;
-		MaybeLocal<Value> eval_res = mod->Evaluate(context);
-		if (current_context)
-			current_context->ignore_unhandled_promises = prev_ignore;
-
-		Local<Value> val;
-		if (!eval_res.ToLocal(&val))
-		{
-			try_catch.ReThrow();
-			return;
-		}
-		if (val->IsPromise())
-		{
-			Local<Promise> prom = val.As<Promise>();
-			if (prom->State() == Promise::kRejected)
-			{
-				isolate->ThrowException(prom->Result());
-				return;
-			}
-		}
-	}
-
-	if (mod->GetStatus() == Module::kErrored)
-	{
-		isolate->ThrowException(mod->GetException());
-		return;
-	}
-
-	Local<Value> ns_val = mod->GetModuleNamespace();
-	if (ns_val->IsModuleNamespaceObject() || ns_val->IsObject())
-	{
-		Local<Object> ns_obj = ns_val.As<Object>();
-		Local<Array> keys;
-		if (ns_obj->GetOwnPropertyNames(context).ToLocal(&keys) && keys->Length() == 1)
-		{
-			Local<Value> k0;
-			if (keys->Get(context, 0).ToLocal(&k0) && k0->IsString())
-			{
-				v8::String::Utf8Value k_utf8(isolate, k0);
-				if (*k_utf8 && strcmp(*k_utf8, "default") == 0)
-				{
-					Local<Value> def_val;
-					if (ns_obj->Get(context, k0).ToLocal(&def_val))
-					{
-						args.GetReturnValue().Set(def_val);
-						return;
-					}
-				}
-			}
-		}
-	}
-
-	args.GetReturnValue().Set(ns_val);
+static std::string plv8_strip_spec_prefix(const std::string& raw) {
+  std::string s = raw;
+  if (s.rfind("plv8-pkg:", 0) == 0)
+    s = s.substr(9);
+  else if (s.rfind("plv8:", 0) == 0)
+    s = s.substr(5);
+  else if (s.rfind("pgtle:", 0) == 0)
+    s = s.substr(6);
+  else if (s.rfind("tle://", 0) == 0)
+    s = s.substr(6);
+  else if (s.rfind("tle:", 0) == 0)
+    s = s.substr(4);
+  while (!s.empty() && s[0] == '/') s = s.substr(1);
+  return s;
 }
 
-void
-plv8_CompileBytecode(const FunctionCallbackInfo<Value> &args)
-{
-	Isolate *isolate = args.GetIsolate();
-	HandleScope handle_scope(isolate);
+static bool plv8_parse_canonical_key(const std::string& key,
+                                     Plv8ModuleId* out) {
+  if (key.rfind("pkg:", 0) == 0) {
+    std::string rest = key.substr(4);
+    size_t search_start = (!rest.empty() && rest[0] == '@') ? 1 : 0;
+    size_t at_pos = rest.find('@', search_start);
+    if (at_pos == std::string::npos) return false;
+    size_t slash_pos = rest.find('/', at_pos + 1);
+    if (slash_pos == std::string::npos) return false;
+    out->is_package = true;
+    out->package_name = rest.substr(0, at_pos);
+    out->package_version = rest.substr(at_pos + 1, slash_pos - at_pos - 1);
+    out->path = rest.substr(slash_pos + 1);
+    return true;
+  }
+  if (key.rfind("mod:", 0) == 0) {
+    out->is_package = false;
+    out->package_name.clear();
+    out->package_version.clear();
+    out->path = key.substr(4);
+    return true;
+  }
+  return false;
+}
 
-	if (args.Length() < 1 || !args[0]->IsString())
-	{
-		isolate->ThrowException(Exception::TypeError(
-			ToString("plv8.compile_bytecode(source[, module_name]) expects a source string")));
-		return;
-	}
+static bool plv8_is_relative_spec(const std::string& spec) {
+  return spec == "." || spec == ".." || spec.rfind("./", 0) == 0 ||
+         spec.rfind("../", 0) == 0;
+}
 
-	Local<v8::String> source_str = args[0].As<v8::String>();
-	v8::String::Utf8Value src_utf8(isolate, source_str);
-	const char *src_bytes = *src_utf8 ? *src_utf8 : "";
-	uint32_t src_len = (uint32_t) src_utf8.length();
+static bool plv8_join_relative_path(const std::string& base_path,
+                                    const std::string& rel_spec,
+                                    std::string* out_path) {
+  std::string base_dir;
+  size_t last_slash = base_path.rfind('/');
+  if (last_slash != std::string::npos) {
+    base_dir = base_path.substr(0, last_slash);
+  }
+  std::string combined =
+      base_dir.empty() ? rel_spec : (base_dir + "/" + rel_spec);
 
-	std::string origin_url = "pgtle:bytecode";
-	if (args.Length() >= 2 && args[1]->IsString())
-	{
-		v8::String::Utf8Value name_utf8(isolate, args[1]);
-		if (*name_utf8 && (*name_utf8)[0] != '\0')
-		{
-			std::string n(*name_utf8);
-			origin_url = (n.rfind("pgtle:", 0) == 0) ? n : ("pgtle:" + n);
-		}
-	}
+  std::vector<std::string> parts;
+  size_t start = 0;
+  while (start <= combined.size()) {
+    size_t end = combined.find('/', start);
+    std::string seg = (end == std::string::npos)
+                          ? combined.substr(start)
+                          : combined.substr(start, end - start);
+    if (seg.empty() || seg == ".") {
+      // skip
+    } else if (seg == "..") {
+      if (parts.empty()) {
+        return false;  // escaped root
+      }
+      parts.pop_back();
+    } else {
+      parts.push_back(seg);
+    }
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
 
-	ScriptOrigin origin(ToString(origin_url.c_str()),
-						0,
-						0,
-						false,
-						-1,
-						Local<Value>(),
-						false,
-						false,
-						true /* is_module */);
-	ScriptCompiler::Source script_source(source_str, origin);
+  if (parts.empty()) return false;
 
-	TryCatch try_catch(isolate);
-	MaybeLocal<Module> maybe_mod = ScriptCompiler::CompileModule(isolate, &script_source);
-	Local<Module> mod;
-	if (!maybe_mod.ToLocal(&mod))
-	{
-		try_catch.ReThrow();
-		return;
-	}
+  std::string joined;
+  for (size_t i = 0; i < parts.size(); i++) {
+    if (i > 0) joined += "/";
+    joined += parts[i];
+  }
+  *out_path = joined;
+  return true;
+}
 
-	ScriptCompiler::CachedData *cd = ScriptCompiler::CreateCodeCache(mod->GetUnboundModuleScript());
-	if (!cd || !cd->data || cd->length <= 0)
-	{
-		if (cd)
-			delete cd;
-		isolate->ThrowException(Exception::Error(ToString("V8 CreateCodeCache returned empty data")));
-		return;
-	}
+static void plv8_parse_spec_parts(const std::string& clean_spec,
+                                  std::string* pkg_name_out,
+                                  std::string* sub_path_out,
+                                  std::string* inline_range_out) {
+  pkg_name_out->clear();
+  sub_path_out->clear();
+  inline_range_out->clear();
 
-	uint32_t cache_len = (uint32_t) cd->length;
-	size_t total_len = 16 + (size_t) src_len + (size_t) cache_len;
+  size_t slash_search = (!clean_spec.empty() && clean_spec[0] == '@') ? 1 : 0;
+  size_t slash_pos = clean_spec.find('/', slash_search);
+  if (slash_pos != std::string::npos && !clean_spec.empty() &&
+      clean_spec[0] == '@') {
+    slash_pos = clean_spec.find('/', slash_pos + 1);
+  }
 
-	std::unique_ptr<v8::BackingStore> bs = v8::ArrayBuffer::NewBackingStore(isolate, total_len);
-	uint8_t *dst = static_cast<uint8_t *>(bs->Data());
+  std::string head = (slash_pos == std::string::npos)
+                         ? clean_spec
+                         : clean_spec.substr(0, slash_pos);
+  std::string tail = (slash_pos == std::string::npos)
+                         ? ""
+                         : clean_spec.substr(slash_pos + 1);
 
-	memcpy(dst, PLV8_BYTECODE_MAGIC, 8);
-	memcpy(dst + 8, &src_len, sizeof(uint32_t));
-	memcpy(dst + 12, &cache_len, sizeof(uint32_t));
-	if (src_len > 0)
-		memcpy(dst + 16, src_bytes, src_len);
-	memcpy(dst + 16 + src_len, cd->data, cache_len);
+  size_t at_search = (!head.empty() && head[0] == '@') ? 1 : 0;
+  size_t at_pos = head.find('@', at_search);
+  if (at_pos != std::string::npos) {
+    *pkg_name_out = head.substr(0, at_pos);
+    *inline_range_out = head.substr(at_pos + 1);
+    *sub_path_out = tail;
+  } else {
+    *pkg_name_out = head;
+    if (!tail.empty()) {
+      size_t tail_at = tail.rfind('@');
+      if (tail_at != std::string::npos && tail_at > 0) {
+        *sub_path_out = tail.substr(0, tail_at);
+        *inline_range_out = tail.substr(tail_at + 1);
+      } else {
+        *sub_path_out = tail;
+      }
+    }
+  }
+}
 
-	delete cd;
+struct Plv8FetchedModule {
+  Plv8ModuleId id;
+  std::string source;
+  std::vector<uint8_t> bytecode;
+  bool sloppy = false;
+  bool is_trusted = true;
+};
 
-	Local<ArrayBuffer> ab = v8::ArrayBuffer::New(isolate, std::move(bs));
-	Local<Uint8Array> u8 = v8::Uint8Array::New(ab, 0, total_len);
-	args.GetReturnValue().Set(u8);
+static bool plv8_fetch_tle_module(const std::string& raw_spec,
+                                  const std::string& base_spec,
+                                  Plv8FetchedModule* mod_out,
+                                  std::string& err_msg) {
+  if (!IsTransactionState()) {
+    err_msg = "cannot load plv8 module outside a transaction";
+    return false;
+  }
+
+  Oid nspoid = get_namespace_oid("plv8", true);
+  if (!OidIsValid(nspoid)) {
+    err_msg = "schema \"plv8\" does not exist";
+    return false;
+  }
+
+  Oid mod_relid = get_relname_relid("modules", nspoid);
+  Oid pkg_relid = get_relname_relid("packages", nspoid);
+  if (!OidIsValid(mod_relid)) {
+    err_msg = "table \"plv8.modules\" does not exist";
+    return false;
+  }
+
+  Plv8ModuleId importer;
+  bool has_importer = false;
+  if (!base_spec.empty()) {
+    if (!plv8_parse_canonical_key(base_spec, &importer)) {
+      std::string clean_base = plv8_strip_spec_prefix(base_spec);
+      if (!clean_base.empty()) {
+        has_importer = true;
+        importer.is_package = false;
+        importer.path = clean_base;
+      }
+    } else {
+      has_importer = true;
+    }
+  }
+
+  std::string clean_spec = plv8_strip_spec_prefix(raw_spec);
+  if (clean_spec.empty()) {
+    err_msg = "could not load module \"\"";
+    return false;
+  }
+
+  bool is_rel = plv8_is_relative_spec(clean_spec);
+  std::string rel_joined_path;
+  if (is_rel) {
+    if (!has_importer) {
+      err_msg = "could not load relative module \"" + raw_spec +
+                "\" without an importing module";
+      return false;
+    }
+    if (!plv8_join_relative_path(importer.path, clean_spec, &rel_joined_path)) {
+      err_msg = "relative module specifier \"" + raw_spec +
+                "\" traverses above root";
+      return false;
+    }
+  }
+
+  bool caller_is_super = false;
+  bool found = false;
+  bool imp_has_requires = false;
+  std::vector<std::string> imp_requires;
+
+  PG_TRY();
+  {
+    caller_is_super = superuser();
+
+    // 1. If we have an importer or package table, read packages catalog first
+    struct PkgEntry {
+      std::string name;
+      std::string version;
+      std::string entry_point;
+      std::unordered_map<std::string, std::string> deps;
+    };
+    std::vector<PkgEntry> packages;
+
+    if (OidIsValid(pkg_relid)) {
+      Relation pkg_rel = table_open(pkg_relid, AccessShareLock);
+      TupleDesc pkg_desc = RelationGetDescr(pkg_rel);
+      TableScanDesc pkg_scan = table_beginscan_catalog(pkg_rel, 0, NULL);
+      HeapTuple pkg_tup;
+
+      while ((pkg_tup = heap_getnext(pkg_scan, ForwardScanDirection)) != NULL) {
+        CHECK_FOR_INTERRUPTS();
+        bool n_name = false, n_ver = false, n_ep = false, n_deps = false;
+        Datum d_name = heap_getattr(pkg_tup, 1, pkg_desc, &n_name);
+        Datum d_ver = heap_getattr(pkg_tup, 2, pkg_desc, &n_ver);
+        Datum d_ep = heap_getattr(pkg_tup, 3, pkg_desc, &n_ep);
+        if (n_name || n_ver) continue;
+
+        PkgEntry pe;
+        char* c_name = TextDatumGetCString(d_name);
+        char* c_ver = TextDatumGetCString(d_ver);
+        pe.name.assign(c_name);
+        pe.version.assign(c_ver);
+        pfree(c_name);
+        pfree(c_ver);
+
+        if (!n_ep) {
+          char* c_ep = TextDatumGetCString(d_ep);
+          pe.entry_point.assign(c_ep);
+          pfree(c_ep);
+        } else {
+          pe.entry_point = "index.js";
+        }
+
+        if (pkg_desc->natts >= 4) {
+          Datum d_deps = heap_getattr(pkg_tup, 4, pkg_desc, &n_deps);
+          if (!n_deps) {
+            Jsonb* jb = DatumGetJsonbP(d_deps);
+            JsonbIterator* it = JsonbIteratorInit(&jb->root);
+            JsonbValue v;
+            JsonbIteratorToken r;
+            std::string cur_key;
+            while ((r = JsonbIteratorNext(&it, &v, true)) != WJB_DONE) {
+              if (r == WJB_KEY && v.type == jbvString) {
+                cur_key.assign(v.val.string.val, v.val.string.len);
+              } else if (r == WJB_VALUE && v.type == jbvString &&
+                         !cur_key.empty()) {
+                pe.deps[cur_key] =
+                    std::string(v.val.string.val, v.val.string.len);
+                cur_key.clear();
+              }
+            }
+            if ((Pointer)jb != DatumGetPointer(d_deps)) pfree(jb);
+          }
+        }
+        packages.push_back(std::move(pe));
+      }
+
+      table_endscan(pkg_scan);
+      table_close(pkg_rel, AccessShareLock);
+    }
+
+    // 2. Scan plv8.modules
+    struct ModRow {
+      std::string path;
+      std::string source;
+      std::string pkg_name;
+      std::string pkg_ver;
+      bool is_pkg = false;
+      bool sloppy = false;
+      bool is_trusted = true;
+      bool has_requires = false;
+      std::vector<std::string> requires_list;
+      std::vector<uint8_t> bytecode;
+    };
+    std::vector<ModRow> modules;
+
+    Relation mod_rel = table_open(mod_relid, AccessShareLock);
+    TupleDesc mod_desc = RelationGetDescr(mod_rel);
+    TableScanDesc mod_scan = table_beginscan_catalog(mod_rel, 0, NULL);
+    HeapTuple mod_tup;
+
+    while ((mod_tup = heap_getnext(mod_scan, ForwardScanDirection)) != NULL) {
+      CHECK_FOR_INTERRUPTS();
+      bool n_path = false, n_src = false, n_pkg = false, n_ver = false;
+      bool n_sloppy = false, n_bc = false, n_req = false, n_trust = false;
+
+      Datum d_path = heap_getattr(mod_tup, 1, mod_desc, &n_path);
+      if (n_path) continue;
+
+      ModRow mr;
+      char* c_path = TextDatumGetCString(d_path);
+      mr.path.assign(c_path);
+      pfree(c_path);
+
+      if (mod_desc->natts >= 2) {
+        Datum d_src = heap_getattr(mod_tup, 2, mod_desc, &n_src);
+        if (!n_src) {
+          char* c_src = TextDatumGetCString(d_src);
+          mr.source.assign(c_src);
+          pfree(c_src);
+        }
+      }
+
+      if (mod_desc->natts >= 4) {
+        Datum d_pkg = heap_getattr(mod_tup, 3, mod_desc, &n_pkg);
+        Datum d_ver = heap_getattr(mod_tup, 4, mod_desc, &n_ver);
+        if (!n_pkg) {
+          char* c_pkg = TextDatumGetCString(d_pkg);
+          mr.pkg_name.assign(c_pkg);
+          pfree(c_pkg);
+          mr.is_pkg = true;
+        }
+        if (!n_ver) {
+          char* c_ver = TextDatumGetCString(d_ver);
+          mr.pkg_ver.assign(c_ver);
+          pfree(c_ver);
+        }
+      }
+
+      if (mod_desc->natts >= 7) {
+        Datum d_sloppy = heap_getattr(mod_tup, 7, mod_desc, &n_sloppy);
+        if (!n_sloppy) mr.sloppy = DatumGetBool(d_sloppy);
+      }
+
+      if (mod_desc->natts >= 8) {
+        Datum d_bc = heap_getattr(mod_tup, 8, mod_desc, &n_bc);
+        if (!n_bc) {
+          bytea* bc = DatumGetByteaPP(d_bc);
+          const uint8_t* bc_ptr = (const uint8_t*)VARDATA_ANY(bc);
+          size_t bc_len = VARSIZE_ANY_EXHDR(bc);
+          mr.bytecode.assign(bc_ptr, bc_ptr + bc_len);
+          if ((Pointer)bc != DatumGetPointer(d_bc)) pfree(bc);
+        }
+      }
+
+      if (mod_desc->natts >= 9) {
+        Datum d_req = heap_getattr(mod_tup, 9, mod_desc, &n_req);
+        if (!n_req) {
+          mr.has_requires = true;
+          ArrayType* arr = DatumGetArrayTypeP(d_req);
+          Datum* elems = nullptr;
+          bool* nulls = nullptr;
+          int nelems = 0;
+          deconstruct_array(arr, TEXTOID, -1, false, 'i', &elems, &nulls,
+                            &nelems);
+          for (int i = 0; i < nelems; i++) {
+            if (!nulls[i]) {
+              char* req_c = TextDatumGetCString(elems[i]);
+              mr.requires_list.emplace_back(req_c);
+              pfree(req_c);
+            }
+          }
+          if (elems) pfree(elems);
+          if (nulls) pfree(nulls);
+          if ((Pointer)arr != DatumGetPointer(d_req)) pfree(arr);
+        }
+      }
+
+      if (mod_desc->natts >= 10) {
+        Datum d_trust = heap_getattr(mod_tup, 10, mod_desc, &n_trust);
+        if (!n_trust) mr.is_trusted = DatumGetBool(d_trust);
+      }
+
+      if (mr.source.empty() && mr.bytecode.empty()) continue;
+
+      if (has_importer && mr.is_pkg == importer.is_package &&
+          mr.path == importer.path &&
+          (!mr.is_pkg || (mr.pkg_name == importer.package_name &&
+                          mr.pkg_ver == importer.package_version))) {
+        imp_has_requires = mr.has_requires;
+        imp_requires = mr.requires_list;
+      }
+
+      modules.push_back(std::move(mr));
+    }
+
+    table_endscan(mod_scan);
+    table_close(mod_rel, AccessShareLock);
+
+    auto populate_from_row = [&](const ModRow& mr) {
+      mod_out->id.is_package = mr.is_pkg;
+      mod_out->id.package_name = mr.pkg_name;
+      mod_out->id.package_version = mr.pkg_ver;
+      mod_out->id.path = mr.path;
+      mod_out->source = mr.source;
+      mod_out->bytecode = mr.bytecode;
+      mod_out->sloppy = mr.sloppy;
+      mod_out->is_trusted = mr.is_trusted;
+      found = true;
+    };
+
+    if (is_rel) {
+      for (const auto& mr : modules) {
+        if (mr.is_pkg == importer.is_package && mr.path == rel_joined_path &&
+            (!mr.is_pkg || (mr.pkg_name == importer.package_name &&
+                            mr.pkg_ver == importer.package_version))) {
+          populate_from_row(mr);
+          break;
+        }
+      }
+    } else {
+      std::string pkg_name, sub_path, inline_range;
+      plv8_parse_spec_parts(clean_spec, &pkg_name, &sub_path, &inline_range);
+
+      std::string range = inline_range;
+      bool is_declared = false;
+      if (range.empty() && has_importer && importer.is_package) {
+        if (importer.package_name == pkg_name) {
+          is_declared = true;
+          range = importer.package_version;
+        } else {
+          for (const auto& pe : packages) {
+            if (pe.name == importer.package_name &&
+                pe.version == importer.package_version) {
+              auto it = pe.deps.find(pkg_name);
+              if (it != pe.deps.end()) {
+                range = it->second;
+                is_declared = true;
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      // 1. Standalone module match (takes priority unless declared as a package dependency or inline @version)
+      if (!is_declared && inline_range.empty()) {
+        for (const auto& mr : modules) {
+          if (!mr.is_pkg && mr.path == clean_spec) {
+            populate_from_row(mr);
+            break;
+          }
+        }
+      }
+
+      // 2. Package match in plv8.packages
+      if (!found) {
+        std::string best_ver;
+        std::string best_ep;
+        bool pkg_matched = false;
+
+        for (const auto& pe : packages) {
+          if (pe.name != pkg_name) continue;
+          if (!range.empty() && !plv8_semver_satisfies(pe.version, range))
+            continue;
+          if (!pkg_matched || plv8_compare_semver(pe.version, best_ver) > 0) {
+            best_ver = pe.version;
+            best_ep = pe.entry_point;
+            pkg_matched = true;
+          }
+        }
+
+        if (pkg_matched) {
+          std::string target_path = sub_path.empty() ? best_ep : sub_path;
+          for (const auto& mr : modules) {
+            if (mr.is_pkg && mr.pkg_name == pkg_name &&
+                mr.pkg_ver == best_ver && mr.path == target_path) {
+              populate_from_row(mr);
+              break;
+            }
+          }
+        }
+      }
+
+      // 3. Fallback for standalone modules referenced with inline @version suffix
+      if (!found && !is_declared && !inline_range.empty()) {
+        size_t last_at = clean_spec.rfind('@');
+        std::string stripped = (last_at != std::string::npos && last_at > 0)
+                                   ? clean_spec.substr(0, last_at)
+                                   : clean_spec;
+        for (const auto& mr : modules) {
+          if (!mr.is_pkg && (mr.path == clean_spec || mr.path == stripped)) {
+            populate_from_row(mr);
+            break;
+          }
+        }
+      }
+    }
+  }
+  PG_CATCH();
+  {
+    FlushErrorState();
+    err_msg = "failed to scan plv8.modules catalog";
+    return false;
+  }
+  PG_END_TRY();
+
+  if (!found) {
+    err_msg = "module \"" + clean_spec + "\" not found in plv8.modules";
+    return false;
+  }
+
+  std::string target_label =
+      mod_out->id.is_package
+          ? (mod_out->id.package_name + "@" + mod_out->id.package_version)
+          : mod_out->id.path;
+
+  if (!mod_out->is_trusted && !caller_is_super) {
+    err_msg = "permission denied for untrusted module \"" + target_label + "\"";
+    return false;
+  }
+
+  if (imp_has_requires) {
+    bool allowed = false;
+    for (size_t i = 0; i < imp_requires.size(); i++) {
+      std::string entry = plv8_strip_spec_prefix(imp_requires[i]);
+      std::string req_pkg, req_sub, req_ver;
+      plv8_parse_spec_parts(entry, &req_pkg, &req_sub, &req_ver);
+      std::string req_full =
+          req_sub.empty() ? req_pkg : (req_pkg + "/" + req_sub);
+
+      if (mod_out->id.is_package) {
+        std::string pkg_sub =
+            mod_out->id.package_name + "/" + mod_out->id.path;
+        if ((req_full == mod_out->id.package_name || req_full == pkg_sub ||
+             req_full == mod_out->id.path) &&
+            (req_ver.empty() ||
+             plv8_semver_satisfies(mod_out->id.package_version, req_ver))) {
+          allowed = true;
+          break;
+        }
+      } else {
+        if (req_full == mod_out->id.path || entry == mod_out->id.path) {
+          allowed = true;
+          break;
+        }
+      }
+    }
+    if (!allowed) {
+      std::string imp_label =
+          importer.is_package ? importer.package_name : importer.path;
+      err_msg = "plv8 module \"" + target_label +
+                "\" is not listed in requires of \"" + imp_label + "\"";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static MaybeLocal<Module> plv8_load_tle_module(Local<Context> context,
+                                               const std::string& raw_spec,
+                                               const std::string& base_spec) {
+  Isolate* isolate = Isolate::GetCurrent();
+
+  if (plv8_current_module_depth >= plv8_max_module_depth) {
+    std::string msg = "module import depth exceeded (" +
+                      std::to_string(plv8_max_module_depth) +
+                      "): possible circular dependency";
+    isolate->ThrowException(Exception::Error(ToString(msg.c_str())));
+    return MaybeLocal<Module>();
+  }
+
+  if (current_context && base_spec.empty()) {
+    plv8_sync_tle_module_cache(current_context);
+  }
+
+  Plv8FetchedModule fetched;
+  std::string err_msg;
+  if (!plv8_fetch_tle_module(raw_spec, base_spec, &fetched, err_msg)) {
+    isolate->ThrowException(Exception::Error(ToString(err_msg.c_str())));
+    return MaybeLocal<Module>();
+  }
+
+  std::string canonical_key = fetched.id.canonical_key();
+  if (current_context) {
+    auto it = current_context->tle_module_map.find(canonical_key);
+    if (it != current_context->tle_module_map.end() && !it->second.IsEmpty()) {
+      return it->second.Get(isolate);
+    }
+  }
+
+  std::string origin_url = fetched.id.meta_url();
+  Local<v8::String> resource_name = ToString(origin_url.c_str());
+  ScriptOrigin origin(resource_name, 0, 0, false, -1, Local<v8::Value>(), false,
+                      false, true /* is_module */);
+
+  std::string actual_source = fetched.source;
+  const std::vector<uint8_t>& bytecode = fetched.bytecode;
+  ScriptCompiler::CachedData* cached_data = nullptr;
+  ScriptCompiler::CompileOptions compile_options =
+      ScriptCompiler::kNoCompileOptions;
+
+  if (bytecode.size() >= 16 &&
+      memcmp(bytecode.data(), PLV8_BYTECODE_MAGIC, 8) == 0) {
+    uint32_t src_len = 0, cache_len = 0;
+    memcpy(&src_len, bytecode.data() + 8, sizeof(uint32_t));
+    memcpy(&cache_len, bytecode.data() + 12, sizeof(uint32_t));
+    if (16ULL + src_len + cache_len == bytecode.size() && cache_len > 0) {
+      actual_source.assign((const char*)(bytecode.data() + 16), src_len);
+      uint8_t* cd_buf = new uint8_t[cache_len];
+      memcpy(cd_buf, bytecode.data() + 16 + src_len, cache_len);
+      cached_data = new ScriptCompiler::CachedData(
+          cd_buf, (int)cache_len, ScriptCompiler::CachedData::BufferOwned);
+      compile_options = ScriptCompiler::kConsumeCodeCache;
+    }
+  } else if (bytecode.size() >= 8 && bytecode[0] == 0x00 &&
+             bytecode[1] == 0x61 && bytecode[2] == 0x73 &&
+             bytecode[3] == 0x6d && bytecode[4] == 0x01 &&
+             bytecode[5] == 0x00 && bytecode[6] == 0x00 &&
+             bytecode[7] == 0x00) {
+    std::ostringstream wasm_js;
+    wasm_js << "const __wasm_bytes = new Uint8Array([";
+    for (size_t i = 0; i < bytecode.size(); i++) {
+      if (i > 0) wasm_js << ",";
+      wasm_js << (unsigned int)bytecode[i];
+    }
+    wasm_js << "]);\n";
+    wasm_js << "const __cache_key = " << "\"plv8:" << canonical_key << ":"
+            << bytecode.size() << "\";\n";
+    wasm_js << "const __mod = (typeof plv8.compile_wasm_cached === 'function') "
+            << "? plv8.compile_wasm_cached(__cache_key, __wasm_bytes) "
+            << ": new WebAssembly.Module(__wasm_bytes);\n";
+    wasm_js << "if (typeof globalThis.__plv8_wasm_polyfills_loaded === 'undefined') {\n"
+            << "  try { plv8.find_function('public.plv8_wasm_bootstrap_polyfills')(); } catch (_e) {}\n"
+            << "}\n";
+    wasm_js << "let __inst = null;\n";
+    wasm_js << "const __get_inst = function() { return __inst; };\n";
+    wasm_js << "const __wasi = (typeof globalThis.__plv8_wasm_create_wasi === 'function') "
+            << "? globalThis.__plv8_wasm_create_wasi(__get_inst) : {};\n";
+    wasm_js << "const __pg_host = (typeof globalThis.__plv8_wasm_create_postgres === 'function') "
+            << "? globalThis.__plv8_wasm_create_postgres(__get_inst) : (globalThis.postgres || {});\n";
+    wasm_js << "const __imports = {\n"
+            << "  wasi_snapshot_preview1: __wasi,\n"
+            << "  wasi_unstable: __wasi,\n"
+            << "  env: {\n"
+            << "    abort: function() { throw new Error('WASM execution "
+               "aborted'); },\n"
+            << "    __wasi_fd_write: __wasi.fd_write || function() { return 0; },\n"
+            << "    'syscall.seek': function() { return 0; },\n"
+            << "    plv8_elog_notice: function(ptr, len) {\n"
+            << "      const b = new Uint8Array(__inst.exports.memory.buffer, "
+               "ptr >>> 0, len >>> 0);\n"
+            << "      let s = ''; for (let i = 0; i < b.length; i++) s += "
+               "String.fromCharCode(b[i]);\n"
+            << "      plv8.elog(NOTICE, s);\n"
+            << "    },\n"
+            << "    plv8_elog_error: function(ptr, len) {\n"
+            << "      const b = new Uint8Array(__inst.exports.memory.buffer, "
+               "ptr >>> 0, len >>> 0);\n"
+            << "      let s = ''; for (let i = 0; i < b.length; i++) s += "
+               "String.fromCharCode(b[i]);\n"
+            << "      throw new Error(s);\n"
+            << "    }\n"
+            << "  },\n"
+            << "  postgres: __pg_host\n"
+            << "};\n";
+    wasm_js << "__inst = new WebAssembly.Instance(__mod, __imports);\n";
+    wasm_js << "if (typeof __inst.exports._initialize === 'function') { __inst.exports._initialize(); }\n";
+    wasm_js << "export const module = __mod;\n";
+    wasm_js << "export const instance = __inst;\n";
+    wasm_js << "export const exports = __inst.exports;\n";
+
+    bool exported_memory = false;
+    size_t pos = 8;
+    auto read_uleb128 = [&](size_t& p, uint32_t& out) -> bool {
+      out = 0;
+      unsigned shift = 0;
+      while (p < bytecode.size() && shift < 35) {
+        uint8_t byte = bytecode[p++];
+        out |= (uint32_t)(byte & 0x7f) << shift;
+        if ((byte & 0x80) == 0) return true;
+        shift += 7;
+      }
+      return false;
+    };
+    auto is_valid_js_ident = [](const std::string& s) -> bool {
+      if (s.empty() || s == "default" || s == "module" || s == "instance" ||
+          s == "exports")
+        return false;
+      char c0 = s[0];
+      if (!((c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') || c0 == '_' ||
+            c0 == '$'))
+        return false;
+      for (size_t i = 1; i < s.size(); i++) {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '$'))
+          return false;
+      }
+      return true;
+    };
+
+    while (pos < bytecode.size()) {
+      uint8_t sec_id = bytecode[pos++];
+      uint32_t sec_len = 0;
+      if (!read_uleb128(pos, sec_len) || pos + sec_len > bytecode.size()) break;
+      size_t sec_end = pos + sec_len;
+      if (sec_id == 7) {
+        uint32_t count = 0;
+        if (read_uleb128(pos, count)) {
+          for (uint32_t i = 0; i < count && pos < sec_end; i++) {
+            uint32_t name_len = 0;
+            if (!read_uleb128(pos, name_len) || pos + name_len > sec_end) break;
+            std::string exp_name((const char*)(bytecode.data() + pos),
+                                 name_len);
+            pos += name_len;
+            if (pos >= sec_end) break;
+            pos++;
+            uint32_t exp_idx = 0;
+            if (!read_uleb128(pos, exp_idx)) break;
+            if (is_valid_js_ident(exp_name)) {
+              if (exp_name == "memory") exported_memory = true;
+              wasm_js << "export const " << exp_name << " = __inst.exports[\""
+                      << exp_name << "\"];\n";
+            }
+          }
+        }
+        break;
+      }
+      pos = sec_end;
+    }
+    if (!exported_memory)
+      wasm_js << "export const memory = __inst.exports.memory;\n";
+    wasm_js << "export default __inst.exports;\n";
+    actual_source = wasm_js.str();
+  } else if (!bytecode.empty()) {
+    uint8_t* cd_buf = new uint8_t[bytecode.size()];
+    memcpy(cd_buf, bytecode.data(), bytecode.size());
+    cached_data = new ScriptCompiler::CachedData(
+        cd_buf, (int)bytecode.size(), ScriptCompiler::CachedData::BufferOwned);
+    compile_options = ScriptCompiler::kConsumeCodeCache;
+  } else {
+    bool is_cjs =
+        fetched.sloppy ||
+        (actual_source.find("export ") == std::string::npos &&
+         actual_source.find("export{") == std::string::npos &&
+         actual_source.find("export\t") == std::string::npos &&
+         (actual_source.find("exports") != std::string::npos ||
+          actual_source.find("require(") != std::string::npos));
+    if (is_cjs) {
+      std::string cjs_imports, cjs_body;
+      plv8_extract_hoisted_imports(actual_source.c_str(), &cjs_imports,
+                                   &cjs_body);
+      if (fetched.sloppy) {
+        std::ostringstream escaped;
+        escaped << "\"";
+        for (unsigned char c : cjs_body) {
+          if (c == '\\')
+            escaped << "\\\\";
+          else if (c == '"')
+            escaped << "\\\"";
+          else if (c == '\n')
+            escaped << "\\n";
+          else if (c == '\r')
+            escaped << "\\r";
+          else if (c == '\t')
+            escaped << "\\t";
+          else
+            escaped << (char)c;
+        }
+        escaped << "\"";
+        actual_source =
+            cjs_imports +
+            "\nconst module = { exports: {} };\nconst exports = "
+            "module.exports;\nconst require = (spec) => plv8.require(spec, \"" +
+            canonical_key + "\");\n" +
+            "(new Function('exports', 'require', 'module', " + escaped.str() +
+            ")).call(module.exports, module.exports, require, module);\n"
+            "export default module.exports;\n";
+      } else {
+        actual_source = cjs_imports +
+                        "\nconst module = { exports: {} };\nconst exports = "
+                        "module.exports;\n" +
+                        "const require = (spec) => plv8.require(spec, \"" +
+                        canonical_key + "\");\n" + cjs_body +
+                        "\nexport default module.exports;\n";
+      }
+    }
+  }
+
+  Local<v8::String> source_str =
+      ToString(actual_source.data(), actual_source.size());
+  ScriptCompiler::Source script_source(source_str, origin, cached_data);
+
+  MaybeLocal<Module> maybe_mod =
+      ScriptCompiler::CompileModule(isolate, &script_source, compile_options);
+
+  if (maybe_mod.IsEmpty() &&
+      compile_options == ScriptCompiler::kConsumeCodeCache) {
+    ScriptCompiler::Source fallback_source(source_str, origin);
+    maybe_mod = ScriptCompiler::CompileModule(isolate, &fallback_source);
+  }
+
+  Local<Module> mod;
+  if (!maybe_mod.ToLocal(&mod)) return MaybeLocal<Module>();
+
+  if (current_context) {
+    current_context->tle_module_map[canonical_key].Reset(isolate, mod);
+    current_context->tle_module_id_to_spec[mod->GetIdentityHash()] =
+        canonical_key;
+  }
+
+  return mod;
+}
+
+MaybeLocal<Module> plv8_ResolveModuleCallback(
+    Local<Context> context, Local<v8::String> specifier,
+    Local<FixedArray> import_attributes, Local<Module> referrer) {
+  Isolate* isolate = Isolate::GetCurrent();
+  v8::String::Utf8Value spec_utf8(isolate, specifier);
+  std::string raw_spec(*spec_utf8 ? *spec_utf8 : "");
+
+  std::string base_spec;
+  if (!referrer.IsEmpty() && current_context) {
+    auto it = current_context->tle_module_id_to_spec.find(
+        referrer->GetIdentityHash());
+    if (it != current_context->tle_module_id_to_spec.end())
+      base_spec = it->second;
+  }
+
+  Plv8ModuleDepthScope depth_scope;
+  return plv8_load_tle_module(context, raw_spec, base_spec);
+}
+
+MaybeLocal<Promise> plv8_HostImportModuleDynamicallyCallback(
+    Local<Context> context, Local<Data> host_defined_options,
+    Local<v8::Value> resource_name, Local<v8::String> specifier,
+    Local<FixedArray> import_attributes) {
+  Isolate* isolate = Isolate::GetCurrent();
+  Local<Promise::Resolver> resolver;
+  if (!Promise::Resolver::New(context).ToLocal(&resolver))
+    return MaybeLocal<Promise>();
+
+  TryCatch try_catch(isolate);
+  v8::String::Utf8Value spec_utf8(isolate, specifier);
+  std::string raw_spec(*spec_utf8 ? *spec_utf8 : "");
+
+  std::string base_spec;
+  if (!resource_name.IsEmpty() && resource_name->IsString()) {
+    v8::String::Utf8Value res_utf8(isolate, resource_name);
+    if (*res_utf8) {
+      if (strncmp(*res_utf8, "plv8:", 5) == 0 ||
+          strncmp(*res_utf8, "pgtle:", 6) == 0 ||
+          strncmp(*res_utf8, "tle:", 4) == 0) {
+        base_spec = *res_utf8;
+      }
+    }
+  }
+
+  MaybeLocal<Module> maybe_mod =
+      plv8_load_tle_module(context, raw_spec, base_spec);
+  Local<Module> mod;
+  if (!maybe_mod.ToLocal(&mod)) {
+    Local<v8::Value> exc =
+        try_catch.HasCaught()
+            ? try_catch.Exception()
+            : Exception::Error(ToString("failed to load module"));
+    resolver->Reject(context, exc).FromMaybe(false);
+    return resolver->GetPromise();
+  }
+
+  if (mod->GetStatus() == Module::kUninstantiated) {
+    Maybe<bool> inst =
+        mod->InstantiateModule(context, plv8_ResolveModuleCallback);
+    if (inst.IsNothing() || !inst.FromJust()) {
+      Local<v8::Value> exc =
+          try_catch.HasCaught()
+              ? try_catch.Exception()
+              : Exception::Error(ToString("failed to instantiate module"));
+      resolver->Reject(context, exc).FromMaybe(false);
+      return resolver->GetPromise();
+    }
+  }
+
+  if (mod->GetStatus() == Module::kInstantiated) {
+    bool prev_ignore =
+        current_context ? current_context->ignore_unhandled_promises : false;
+    if (current_context) current_context->ignore_unhandled_promises = true;
+    MaybeLocal<v8::Value> eval_res = mod->Evaluate(context);
+    if (current_context)
+      current_context->ignore_unhandled_promises = prev_ignore;
+
+    Local<v8::Value> val;
+    if (!eval_res.ToLocal(&val)) {
+      Local<v8::Value> exc =
+          try_catch.HasCaught()
+              ? try_catch.Exception()
+              : Exception::Error(ToString("failed to evaluate module"));
+      resolver->Reject(context, exc).FromMaybe(false);
+      return resolver->GetPromise();
+    }
+    if (val->IsPromise()) {
+      Local<Promise> prom = val.As<Promise>();
+      if (prom->State() == Promise::kRejected) {
+        resolver->Reject(context, prom->Result()).FromMaybe(false);
+        return resolver->GetPromise();
+      }
+    }
+  }
+
+  if (mod->GetStatus() == Module::kErrored) {
+    resolver->Reject(context, mod->GetException()).FromMaybe(false);
+    return resolver->GetPromise();
+  }
+
+  resolver->Resolve(context, mod->GetModuleNamespace()).FromMaybe(false);
+  return resolver->GetPromise();
+}
+
+void plv8_HostInitializeImportMetaObjectCallback(Local<Context> context,
+                                                 Local<Module> module,
+                                                 Local<Object> meta) {
+  std::string url = "plv8:anonymous";
+
+  if (current_context) {
+    auto it =
+        current_context->tle_module_id_to_spec.find(module->GetIdentityHash());
+    if (it != current_context->tle_module_id_to_spec.end()) {
+      Plv8ModuleId id;
+      if (plv8_parse_canonical_key(it->second, &id)) {
+        url = id.meta_url();
+      } else {
+        url = "plv8:" + it->second;
+      }
+    }
+  }
+
+  meta->CreateDataProperty(context, ToString("url"), ToString(url.c_str()))
+      .FromMaybe(false);
+}
+
+static Local<Object> plv8_compile_and_eval_anon_module(Local<Context> context,
+                                                       const char* name,
+                                                       const char* mod_src) {
+  Isolate* isolate = Isolate::GetCurrent();
+  EscapableHandleScope handle_scope(isolate);
+  TryCatch try_catch(isolate);
+
+  Local<v8::String> sname = ToString(name ? name : "plv8:anonymous");
+  Local<v8::String> source = ToString(mod_src);
+  ScriptOrigin origin(sname, 0, 0, false, -1, Local<v8::Value>(), false, false,
+                      true /* is_module */);
+  ScriptCompiler::Source script_source(source, origin);
+
+  MaybeLocal<Module> maybe_mod =
+      ScriptCompiler::CompileModule(isolate, &script_source);
+  Local<Module> mod;
+  if (!maybe_mod.ToLocal(&mod)) throw js_error(try_catch);
+
+  Maybe<bool> inst =
+      mod->InstantiateModule(context, plv8_ResolveModuleCallback);
+  if (inst.IsNothing() || !inst.FromJust()) throw js_error(try_catch);
+
+  bool prev_ignore =
+      current_context ? current_context->ignore_unhandled_promises : false;
+  if (current_context) current_context->ignore_unhandled_promises = true;
+  MaybeLocal<v8::Value> eval_res = mod->Evaluate(context);
+  if (current_context) current_context->ignore_unhandled_promises = prev_ignore;
+
+  Local<v8::Value> val;
+  if (!eval_res.ToLocal(&val)) throw js_error(try_catch);
+
+  if (val->IsPromise()) {
+    Local<Promise> prom = val.As<Promise>();
+    if (prom->State() == Promise::kRejected) {
+      isolate->ThrowException(prom->Result());
+      throw js_error(try_catch);
+    }
+  }
+
+  Local<v8::Value> ns_val = mod->GetModuleNamespace();
+  return handle_scope.Escape(ns_val.As<Object>());
+}
+
+static void plv8_load_module_sync_impl(
+    const FunctionCallbackInfo<v8::Value>& args, bool unwrap_default) {
+  Isolate* isolate = args.GetIsolate();
+  HandleScope handle_scope(isolate);
+  Local<Context> context = isolate->GetCurrentContext();
+
+  if (args.Length() < 1 || !args[0]->IsString()) {
+    isolate->ThrowException(Exception::TypeError(
+        ToString(unwrap_default ? "require() expects a module name string"
+                                : "import() expects a module name string")));
+    return;
+  }
+
+  v8::String::Utf8Value spec_utf8(isolate, args[0]);
+  std::string raw_spec(*spec_utf8 ? *spec_utf8 : "");
+
+  std::string base_spec;
+  if (args.Length() >= 2 && args[1]->IsString()) {
+    v8::String::Utf8Value base_utf8(isolate, args[1]);
+    if (*base_utf8) base_spec.assign(*base_utf8);
+  } else {
+    Local<StackTrace> st =
+        StackTrace::CurrentStackTrace(isolate, 4, StackTrace::kScriptName);
+    if (!st.IsEmpty()) {
+      for (int i = 0; i < st->GetFrameCount(); i++) {
+        Local<StackFrame> frame = st->GetFrame(isolate, i);
+        if (!frame.IsEmpty() && !frame->GetScriptName().IsEmpty()) {
+          v8::String::Utf8Value sname(isolate, frame->GetScriptName());
+          if (*sname && (strncmp(*sname, "plv8:", 5) == 0 ||
+                         strncmp(*sname, "pgtle:", 6) == 0 ||
+                         strncmp(*sname, "tle:", 4) == 0)) {
+            std::string url(*sname);
+            std::string body = plv8_strip_spec_prefix(url);
+            // Check if this matches a known canonical key in tle_module_map
+            if (current_context) {
+              for (const auto& kv : current_context->tle_module_id_to_spec) {
+                Plv8ModuleId cid;
+                if (plv8_parse_canonical_key(kv.second, &cid) &&
+                    cid.meta_url() == url) {
+                  base_spec = kv.second;
+                  break;
+                }
+              }
+            }
+            if (base_spec.empty()) base_spec = url;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  Plv8ModuleDepthScope depth_scope;
+  TryCatch try_catch(isolate);
+  MaybeLocal<Module> maybe_mod =
+      plv8_load_tle_module(context, raw_spec, base_spec);
+  Local<Module> mod;
+  if (!maybe_mod.ToLocal(&mod)) {
+    try_catch.ReThrow();
+    return;
+  }
+
+  if (mod->GetStatus() == Module::kUninstantiated) {
+    Maybe<bool> inst =
+        mod->InstantiateModule(context, plv8_ResolveModuleCallback);
+    if (inst.IsNothing() || !inst.FromJust()) {
+      try_catch.ReThrow();
+      return;
+    }
+  }
+
+  if (mod->GetStatus() == Module::kInstantiated) {
+    bool prev_ignore =
+        current_context ? current_context->ignore_unhandled_promises : false;
+    if (current_context) current_context->ignore_unhandled_promises = true;
+    MaybeLocal<v8::Value> eval_res = mod->Evaluate(context);
+    if (current_context)
+      current_context->ignore_unhandled_promises = prev_ignore;
+
+    Local<v8::Value> val;
+    if (!eval_res.ToLocal(&val)) {
+      try_catch.ReThrow();
+      return;
+    }
+    if (val->IsPromise()) {
+      Local<Promise> prom = val.As<Promise>();
+      if (prom->State() == Promise::kRejected) {
+        isolate->ThrowException(prom->Result());
+        return;
+      }
+    }
+  }
+
+  if (mod->GetStatus() == Module::kErrored) {
+    isolate->ThrowException(mod->GetException());
+    return;
+  }
+
+  Local<v8::Value> ns_val = mod->GetModuleNamespace();
+  if (unwrap_default &&
+      (ns_val->IsModuleNamespaceObject() || ns_val->IsObject())) {
+    Local<Object> ns_obj = ns_val.As<Object>();
+    Local<Array> keys;
+    if (ns_obj->GetOwnPropertyNames(context).ToLocal(&keys) &&
+        keys->Length() == 1) {
+      Local<v8::Value> k0;
+      if (keys->Get(context, 0).ToLocal(&k0) && k0->IsString()) {
+        v8::String::Utf8Value k_utf8(isolate, k0);
+        if (*k_utf8 && strcmp(*k_utf8, "default") == 0) {
+          Local<v8::Value> def_val;
+          if (ns_obj->Get(context, k0).ToLocal(&def_val)) {
+            args.GetReturnValue().Set(def_val);
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  args.GetReturnValue().Set(ns_val);
+}
+
+void plv8_Require(const FunctionCallbackInfo<v8::Value>& args) {
+  plv8_load_module_sync_impl(args, true);
+}
+
+void plv8_Import(const FunctionCallbackInfo<v8::Value>& args) {
+  plv8_load_module_sync_impl(args, false);
+}
+
+void plv8_CompileBytecode(const FunctionCallbackInfo<v8::Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  HandleScope handle_scope(isolate);
+
+  if (args.Length() < 1 || !args[0]->IsString()) {
+    isolate->ThrowException(Exception::TypeError(
+        ToString("plv8.compile_bytecode(source[, module_name]) expects a "
+                 "source string")));
+    return;
+  }
+
+  Local<v8::String> source_str = args[0].As<v8::String>();
+  v8::String::Utf8Value src_utf8(isolate, source_str);
+  const char* src_bytes = *src_utf8 ? *src_utf8 : "";
+  uint32_t src_len = (uint32_t)src_utf8.length();
+
+  std::string origin_url = "plv8:bytecode";
+  if (args.Length() >= 2 && args[1]->IsString()) {
+    v8::String::Utf8Value name_utf8(isolate, args[1]);
+    if (*name_utf8 && (*name_utf8)[0] != '\0') {
+      std::string n = plv8_strip_spec_prefix(*name_utf8);
+      origin_url = "plv8:" + n;
+    }
+  }
+
+  ScriptOrigin origin(ToString(origin_url.c_str()), 0, 0, false, -1,
+                      Local<v8::Value>(), false, false, true /* is_module */);
+  ScriptCompiler::Source script_source(source_str, origin);
+
+  TryCatch try_catch(isolate);
+  MaybeLocal<Module> maybe_mod =
+      ScriptCompiler::CompileModule(isolate, &script_source);
+  Local<Module> mod;
+  if (!maybe_mod.ToLocal(&mod)) {
+    try_catch.ReThrow();
+    return;
+  }
+
+  ScriptCompiler::CachedData* cd =
+      ScriptCompiler::CreateCodeCache(mod->GetUnboundModuleScript());
+  if (!cd || !cd->data || cd->length <= 0) {
+    if (cd) delete cd;
+    isolate->ThrowException(
+        Exception::Error(ToString("V8 CreateCodeCache returned empty data")));
+    return;
+  }
+
+  uint32_t cache_len = (uint32_t)cd->length;
+  size_t total_len = 16 + (size_t)src_len + (size_t)cache_len;
+
+  std::unique_ptr<v8::BackingStore> bs =
+      v8::ArrayBuffer::NewBackingStore(isolate, total_len);
+  uint8_t* dst = static_cast<uint8_t*>(bs->Data());
+
+  memcpy(dst, PLV8_BYTECODE_MAGIC, 8);
+  memcpy(dst + 8, &src_len, sizeof(uint32_t));
+  memcpy(dst + 12, &cache_len, sizeof(uint32_t));
+  if (src_len > 0) memcpy(dst + 16, src_bytes, src_len);
+  memcpy(dst + 16 + src_len, cd->data, cache_len);
+
+  delete cd;
+
+  Local<ArrayBuffer> ab = v8::ArrayBuffer::New(isolate, std::move(bs));
+  Local<Uint8Array> u8 = v8::Uint8Array::New(ab, 0, total_len);
+  args.GetReturnValue().Set(u8);
 }
 

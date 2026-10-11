@@ -170,6 +170,18 @@ INSERT INTO plv8.modules (path, source, bytecode, is_trusted) VALUES (
     true
 );
 
+INSERT INTO plv8.modules (path, source, bytecode, is_trusted) VALUES (
+    'fast_cjs',
+    '/* bytecode */',
+    plv8_compile_module_bc(
+        $$
+        exports.scale = function(x, k) { return x * k; };
+        $$,
+        'fast_cjs'
+    ),
+    true
+);
+
 SELECT path, source, octet_length(bytecode) > 32 AS has_bytecode, is_trusted
 FROM plv8.modules
 WHERE path = 'fast_vec';
@@ -177,9 +189,11 @@ WHERE path = 'fast_vec';
 CREATE FUNCTION plv8_test_bytecode_mod() RETURNS jsonb AS $$
     import { dot, ENGINE } from 'fast_vec';
     const req_fast = require('fast_vec');
+    const req_cjs = require('fast_cjs');
     return {
         esm_dot: dot([1, 2, 3], [4, 5, 6]),
         req_dot: req_fast.dot([2, 3], [10, 20]),
+        cjs_scale: req_cjs.scale(7, 6),
         engine: ENGINE
     };
 $$ LANGUAGE plv8;

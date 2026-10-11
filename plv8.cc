@@ -6067,12 +6067,49 @@ void plv8_CompileBytecode(const FunctionCallbackInfo<v8::Value>& args) {
   uint32_t src_len = (uint32_t)src_utf8.length();
 
   std::string origin_url = "plv8:bytecode";
+  std::string canonical_key;
   if (args.Length() >= 2 && args[1]->IsString()) {
     v8::String::Utf8Value name_utf8(isolate, args[1]);
     if (*name_utf8 && (*name_utf8)[0] != '\0') {
       std::string n = plv8_strip_spec_prefix(*name_utf8);
       origin_url = "plv8:" + n;
+      size_t search_start = (!n.empty() && n[0] == '@') ? 1 : 0;
+      size_t at_pos = n.find('@', search_start);
+      if (at_pos != std::string::npos) {
+        if (n.find('/', at_pos + 1) != std::string::npos) {
+          canonical_key = "pkg:" + n;
+        } else {
+          canonical_key = "pkg:" + n + "/index.js";
+        }
+      } else {
+        canonical_key = "mod:" + n;
+      }
     }
+  }
+
+  std::string actual_source(src_bytes, src_len);
+  bool is_cjs =
+      (actual_source.find("export ") == std::string::npos &&
+       actual_source.find("export{") == std::string::npos &&
+       actual_source.find("export\t") == std::string::npos &&
+       (actual_source.find("exports") != std::string::npos ||
+        actual_source.find("require(") != std::string::npos));
+  if (is_cjs) {
+    std::string cjs_imports, cjs_body;
+    plv8_extract_hoisted_imports(actual_source.c_str(), &cjs_imports,
+                                 &cjs_body);
+    std::string req_call =
+        canonical_key.empty()
+            ? "plv8.require(spec)"
+            : ("plv8.require(spec, \"" + canonical_key + "\")");
+    actual_source = cjs_imports +
+                    "\nconst module = { exports: {} };\nconst exports = "
+                    "module.exports;\nconst require = (spec) => " +
+                    req_call + ";\n" + cjs_body +
+                    "\nexport default module.exports;\n";
+    source_str = ToString(actual_source.data(), actual_source.size());
+    src_bytes = actual_source.data();
+    src_len = (uint32_t)actual_source.size();
   }
 
   ScriptOrigin origin(ToString(origin_url.c_str()), 0, 0, false, -1,

@@ -4174,7 +4174,16 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 }
 
 js_error::js_error() noexcept
-	: m_msg(nullptr), m_code(0), m_detail(nullptr), m_hint(nullptr), m_context(nullptr)
+	: m_msg(nullptr),
+	  m_code(0),
+	  m_detail(nullptr),
+	  m_hint(nullptr),
+	  m_context(nullptr),
+	  m_schema_name(nullptr),
+	  m_table_name(nullptr),
+	  m_column_name(nullptr),
+	  m_datatype_name(nullptr),
+	  m_constraint_name(nullptr)
 {
 }
 
@@ -4192,6 +4201,66 @@ js_error::js_error(v8::TryCatch &try_catch) noexcept : js_error() {
 	HandleScope			handle_scope(isolate);
 
 	init(isolate, try_catch.Exception(), try_catch.Message());
+}
+
+static int
+plv8_parse_sqlerrcode(v8::Local<v8::Context> context, v8::Local<v8::Value> val)
+{
+	if (val.IsEmpty() || val->IsUndefined() || val->IsNull())
+		return 0;
+	if (val->IsNumber())
+	{
+		int32_t code;
+		if (val->Int32Value(context).To(&code))
+			return code;
+	}
+	if (val->IsString())
+	{
+		CString str(val);
+		const char *s = str.str();
+		if (s != NULL && strlen(s) == 5)
+		{
+			bool valid = true;
+			char c[5];
+			for (int i = 0; i < 5; i++)
+			{
+				unsigned char ch = (unsigned char) s[i];
+				if (ch >= '0' && ch <= '9')
+					c[i] = (char) ch;
+				else if (ch >= 'A' && ch <= 'Z')
+					c[i] = (char) ch;
+				else if (ch >= 'a' && ch <= 'z')
+					c[i] = (char) (ch - 'a' + 'A');
+				else
+				{
+					valid = false;
+					break;
+				}
+			}
+			if (valid)
+				return MAKE_SQLSTATE(c[0], c[1], c[2], c[3], c[4]);
+		}
+	}
+	return 0;
+}
+
+static char *
+plv8_extract_err_string_field(v8::Isolate *isolate,
+                              v8::Local<v8::Context> context,
+                              v8::Local<v8::Object> err,
+                              const char *field_name)
+{
+	v8::Local<v8::Value> val;
+	if (err->Get(context, v8::String::NewFromUtf8(isolate, field_name).ToLocalChecked()).ToLocal(&val))
+	{
+		if (!val.IsEmpty() && !val->IsUndefined() && !val->IsNull())
+		{
+			CString cstr(val);
+			if (cstr.str() != NULL)
+				return pstrdup(cstr.str());
+		}
+	}
+	return nullptr;
 }
 
 void
@@ -4238,11 +4307,15 @@ js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Messa
                 if (err->Get(context,
                              v8::String::NewFromUtf8Literal(isolate, "code")).ToLocal(&errCode))
                 {
-                    if (!errCode->IsUndefined() && !errCode->IsNull())
+                    m_code = plv8_parse_sqlerrcode(context, errCode);
+                }
+                if (m_code == 0)
+                {
+                    v8::Local<v8::Value> sqlErrCode;
+                    if (err->Get(context,
+                                 v8::String::NewFromUtf8Literal(isolate, "sqlerrcode")).ToLocal(&sqlErrCode))
                     {
-                        int32_t code;
-                        if (errCode->Int32Value(context).To(&code))
-                            m_code = code;
+                        m_code = plv8_parse_sqlerrcode(context, sqlErrCode);
                     }
                 }
 
@@ -4277,6 +4350,12 @@ js_error::init(Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<Messa
                         CString str_context(errContext);
                         appendStringInfo(&contextStr, "%s\n", str_context.str("?"));
                     }
+
+                m_schema_name = plv8_extract_err_string_field(isolate, context, err, "schema_name");
+                m_table_name = plv8_extract_err_string_field(isolate, context, err, "table_name");
+                m_column_name = plv8_extract_err_string_field(isolate, context, err, "column_name");
+                m_datatype_name = plv8_extract_err_string_field(isolate, context, err, "datatype_name");
+                m_constraint_name = plv8_extract_err_string_field(isolate, context, err, "constraint_name");
             }
         }
 
@@ -4321,7 +4400,36 @@ js_error::error_object()
 	if (strstr(msg, "Error: ") == msg)
 		msg += 7;
 	Local<v8::String> message = ToString(msg);
-	return Exception::Error(message);
+	Local<v8::Value> err_val = Exception::Error(message);
+	Isolate *isolate = Isolate::GetCurrent();
+	if (isolate != NULL)
+	{
+		Local<Context> context = isolate->GetCurrentContext();
+		Local<v8::Object> err;
+		if (!context.IsEmpty() && err_val->ToObject(context).ToLocal(&err) && !err.IsEmpty())
+		{
+			if (m_code)
+			{
+				(void)err->Set(context, v8::String::NewFromUtf8Literal(isolate, "code"), Int32::New(isolate, m_code)).FromMaybe(false);
+				(void)err->Set(context, v8::String::NewFromUtf8Literal(isolate, "sqlerrcode"), ToString(unpack_sql_state(m_code))).FromMaybe(false);
+			}
+			if (m_detail)
+				(void)err->Set(context, v8::String::NewFromUtf8Literal(isolate, "detail"), ToString(m_detail)).FromMaybe(false);
+			if (m_hint)
+				(void)err->Set(context, v8::String::NewFromUtf8Literal(isolate, "hint"), ToString(m_hint)).FromMaybe(false);
+			if (m_schema_name)
+				(void)err->Set(context, v8::String::NewFromUtf8Literal(isolate, "schema_name"), ToString(m_schema_name)).FromMaybe(false);
+			if (m_table_name)
+				(void)err->Set(context, v8::String::NewFromUtf8Literal(isolate, "table_name"), ToString(m_table_name)).FromMaybe(false);
+			if (m_column_name)
+				(void)err->Set(context, v8::String::NewFromUtf8Literal(isolate, "column_name"), ToString(m_column_name)).FromMaybe(false);
+			if (m_datatype_name)
+				(void)err->Set(context, v8::String::NewFromUtf8Literal(isolate, "datatype_name"), ToString(m_datatype_name)).FromMaybe(false);
+			if (m_constraint_name)
+				(void)err->Set(context, v8::String::NewFromUtf8Literal(isolate, "constraint_name"), ToString(m_constraint_name)).FromMaybe(false);
+		}
+	}
+	return err_val;
 }
 
 void
@@ -4335,7 +4443,12 @@ js_error::log(int elevel, const char *msg_format) noexcept {
 					m_msg ? errmsg((msg_format ? msg_format : "%s"), m_msg) : 0,
 					m_detail ? errdetail("%s", m_detail) : 0,
 					m_hint ? errhint("%s", m_hint) : 0,
-					m_context ? errcontext("%s", m_context) : 0
+					m_context ? errcontext("%s", m_context) : 0,
+					m_schema_name ? err_generic_string(PG_DIAG_SCHEMA_NAME, m_schema_name) : 0,
+					m_table_name ? err_generic_string(PG_DIAG_TABLE_NAME, m_table_name) : 0,
+					m_column_name ? err_generic_string(PG_DIAG_COLUMN_NAME, m_column_name) : 0,
+					m_datatype_name ? err_generic_string(PG_DIAG_DATATYPE_NAME, m_datatype_name) : 0,
+					m_constraint_name ? err_generic_string(PG_DIAG_CONSTRAINT_NAME, m_constraint_name) : 0
 			));
 }
 
@@ -4349,7 +4462,12 @@ js_error::rethrow(const char *msg_format) noexcept
 					m_msg ? errmsg((msg_format ? msg_format : "%s"), m_msg) : 0,
 					m_detail ? errdetail("%s", m_detail) : 0,
 					m_hint ? errhint("%s", m_hint) : 0,
-					m_context ? errcontext("%s", m_context) : 0
+					m_context ? errcontext("%s", m_context) : 0,
+					m_schema_name ? err_generic_string(PG_DIAG_SCHEMA_NAME, m_schema_name) : 0,
+					m_table_name ? err_generic_string(PG_DIAG_TABLE_NAME, m_table_name) : 0,
+					m_column_name ? err_generic_string(PG_DIAG_COLUMN_NAME, m_column_name) : 0,
+					m_datatype_name ? err_generic_string(PG_DIAG_DATATYPE_NAME, m_datatype_name) : 0,
+					m_constraint_name ? err_generic_string(PG_DIAG_CONSTRAINT_NAME, m_constraint_name) : 0
 			));
 	exit(0);	// keep compiler quiet
 }

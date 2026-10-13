@@ -57,6 +57,11 @@ private:
 	char	   *m_detail;
 	char	   *m_hint;
 	char	   *m_context;
+	char	   *m_schema_name;
+	char	   *m_table_name;
+	char	   *m_column_name;
+	char	   *m_datatype_name;
+	char	   *m_constraint_name;
 	void init(v8::Isolate *isolate, v8::Local<v8::Value> exception, v8::Local<v8::Message> message) noexcept;
 
 public:

@@ -747,6 +747,7 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 	Handle<Array>	array;
 	int				arraylen = 0;
 	Oid			   *types = NULL;
+	char		  **typestrs = NULL;
 	plv8_param_state *parstate = NULL;
 
 	if (args.Length() > 1)
@@ -757,22 +758,29 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 			array = convertArgsToArray(args, 1, 0);
 		arraylen = array->Length();
 		types = (Oid *) palloc(sizeof(Oid) * arraylen);
+		typestrs = (char **) palloc(sizeof(char *) * arraylen);
 	}
 
 	for (int i = 0; i < arraylen; i++)
 	{
 		CString			typestr(array->Get(context, i).ToLocalChecked());
-		int32			typemod;
-
-#if PG_VERSION_NUM >= 160000
-		parseTypeString(typestr, &types[i], &typemod, NULL);
-#else
-		parseTypeString(typestr, &types[i], &typemod, false);
-#endif
+		typestrs[i] = pstrdup(typestr);
 	}
 
+	SubTranBlock	subtran;
 	PG_TRY();
 	{
+		subtran.enter();
+		for (int i = 0; i < arraylen; i++)
+		{
+			int32			typemod;
+
+#if PG_VERSION_NUM >= 160000
+			parseTypeString(typestrs[i], &types[i], &typemod, NULL);
+#else
+			parseTypeString(typestrs[i], &types[i], &typemod, false);
+#endif
+		}
 		if (args.Length() == 1)
 		{
 			parstate =
@@ -782,15 +790,18 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 										 parstate, 0);
 		}
 		else
-		initial = SPI_prepare(sql, arraylen, types);
+			initial = SPI_prepare(sql, arraylen, types);
 		saved = SPI_saveplan(initial);
 		SPI_freeplan(initial);
 	}
 	PG_CATCH();
 	{
+		subtran.exit(false);
 		throw pg_error();
 	}
 	PG_END_TRY();
+
+	subtran.exit(true);
 
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(isolate, current_context->plan_template);
 
@@ -867,21 +878,22 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 		nulls = (char *) palloc(sizeof(char) * nparam);
 	}
 
-	for (int i = 0; i < nparam; i++)
-	{
-		Handle<v8::Value>	param = params->Get(context, i).ToLocalChecked();
-		Oid					typid;
-
-		if (parstate)
-			typid = parstate->paramTypes[i];
-		else
-			typid = SPI_getargtypeid(plan, i);
-
-		values[i] = value_get_datum(param, typid, &nulls[i]);
-	}
-
+	SubTranBlock		subtran;
 	PG_TRY();
 	{
+		subtran.enter();
+		for (int i = 0; i < nparam; i++)
+		{
+			Handle<v8::Value>	param = params->Get(context, i).ToLocalChecked();
+			Oid					typid;
+
+			if (parstate)
+				typid = parstate->paramTypes[i];
+			else
+				typid = SPI_getargtypeid(plan, i);
+
+			values[i] = value_get_datum(param, typid, &nulls[i]);
+		}
 		if (parstate)
 		{
 			ParamListInfo	paramLI;
@@ -894,9 +906,12 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 	}
 	PG_CATCH();
 	{
+		subtran.exit(false);
 		throw pg_error();
 	}
 	PG_END_TRY();
+
+	subtran.exit(true);
 
 	Handle<v8::String> cname = ToString(cursor->name, strlen(cursor->name));
 	Local<ObjectTemplate> templ = Local<ObjectTemplate>::New(isolate, current_context->cursor_template);
@@ -966,22 +981,21 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 		nulls = (char *) palloc(sizeof(char) * nparam);
 	}
 
-	for (int i = 0; i < nparam; i++)
-	{
-		Handle<v8::Value>	param = params->Get(context, i).ToLocalChecked();
-		Oid					typid;
-
-		if (parstate)
-			typid = parstate->paramTypes[i];
-		else
-			typid = SPI_getargtypeid(plan, i);
-
-		values[i] = value_get_datum(param, typid, &nulls[i]);
-	}
-
 	PG_TRY();
 	{
 		subtran.enter();
+		for (int i = 0; i < nparam; i++)
+		{
+			Handle<v8::Value>	param = params->Get(context, i).ToLocalChecked();
+			Oid					typid;
+
+			if (parstate)
+				typid = parstate->paramTypes[i];
+			else
+				typid = SPI_getargtypeid(plan, i);
+
+			values[i] = value_get_datum(param, typid, &nulls[i]);
+		}
 		if (parstate)
 		{
 			ParamListInfo	paramLI;
@@ -1053,6 +1067,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 	Portal				cursor = SPI_cursor_find(cname);
 	int					nfetch = 1;
 	bool				forward = true, wantarray = false;
+	SubTranBlock		subtran;
 
 	if (!cursor)
 		throw js_error("cannot find cursor");
@@ -1070,15 +1085,17 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 	}
 	PG_TRY();
 	{
+		subtran.enter();
 		SPI_cursor_fetch(cursor, forward, nfetch);
 	}
 	PG_CATCH();
 	{
-		SPI_rollback();
-		SPI_finish();
+		subtran.exit(false);
 		throw pg_error();
 	}
 	PG_END_TRY();
+
+	subtran.exit(true);
 
 	if (SPI_processed > 0)
 	{
@@ -1119,6 +1136,7 @@ plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args)
 	Portal				cursor = SPI_cursor_find(cname);
 	int					nmove = 1;
 	bool				forward = true;
+	SubTranBlock		subtran;
 
 	if (!cursor)
 		throw js_error("cannot find cursor");
@@ -1137,15 +1155,17 @@ plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args)
 
 	PG_TRY();
 	{
+		subtran.enter();
 		SPI_cursor_move(cursor, forward, nmove);
 	}
 	PG_CATCH();
 	{
-		SPI_rollback();
-		SPI_finish();
+		subtran.exit(false);
 		throw pg_error();
 	}
 	PG_END_TRY();
+
+	subtran.exit(true);
 
 	args.GetReturnValue().Set(Undefined(isolate));
 }
@@ -1159,21 +1179,24 @@ plv8_CursorClose(const FunctionCallbackInfo<v8::Value> &args)
 	Handle<v8::Object>	self = args.This();
 	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
+	SubTranBlock		subtran;
 
 	if (!cursor)
 		throw js_error("cannot find cursor");
 
 	PG_TRY();
 	{
+		subtran.enter();
 		SPI_cursor_close(cursor);
 	}
 	PG_CATCH();
 	{
-		SPI_rollback();
-		SPI_finish();
+		subtran.exit(false);
 		throw pg_error();
 	}
 	PG_END_TRY();
+
+	subtran.exit(true);
 
 	args.GetReturnValue().Set(Int32::New(args.GetIsolate(), cursor ? 1 : 0));
 }

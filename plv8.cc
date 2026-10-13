@@ -190,6 +190,7 @@ typedef struct plv8_proc_cache
 
 	int						nhandlers;
 	plv8_handler_dep		handlers[PLV8_MAX_LANG_HANDLER_DEPTH];
+	bool					pass_user_types_as_bytes;
 
 	int						nargs;
 	bool					retset;		/* true if SRF */
@@ -1431,7 +1432,7 @@ plv8_call_handler(PG_FUNCTION_ARGS)
 			~PassUserTypesScope() {
 				plv8_pass_user_types_as_bytes = prev;
 			}
-		} user_types_scope(cache->nhandlers > 0);
+		} user_types_scope(cache->pass_user_types_as_bytes);
 
 		if (is_trigger)
 			return CallTrigger(fcinfo, proc->xenv);
@@ -1486,6 +1487,7 @@ DisposePlv8ContextHandles(plv8_context *ctx)
 				}
 				cache->function.Reset();
 				cache->nhandlers = 0;
+				cache->pass_user_types_as_bytes = false;
 			}
 			cache = (plv8_proc_cache *) hash_seq_search(&status);
 		}
@@ -1555,6 +1557,7 @@ KillIsolateAndAllContexts(void)
 			}
 			cache->function.Reset();
 			cache->nhandlers = 0;
+			cache->pass_user_types_as_bytes = false;
 		}
 	}
 
@@ -2878,6 +2881,7 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 	Oid				plv8_lang_oid = InvalidOid;
 	Oid				lang_handler_oid = InvalidOid;
 	char		   *result_cstr = NULL;
+	bool			is_wasm_lang = false;
 
 	if (ndeps != NULL)
 		*ndeps = 0;
@@ -2913,6 +2917,8 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 				if (!HeapTupleIsValid(langTup))
 					elog(ERROR, "cache lookup failed for language %u", cur_lang_oid);
 				Form_pg_language langStruct = (Form_pg_language) GETSTRUCT(langTup);
+				if (strcmp(NameStr(langStruct->lanname), "pl/v8-wasm") == 0)
+					is_wasm_lang = true;
 				Oid handler_oid = langStruct->lanplcallfoid;
 				ReleaseSysCache(langTup);
 
@@ -2949,7 +2955,11 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 	PG_END_TRY();
 
 	if (result_cstr != NULL)
+	{
+		if (proc != NULL && proc->cache != NULL)
+			proc->cache->pass_user_types_as_bytes = false;
 		return result_cstr;
+	}
 
 	Isolate *isolate = current_context->isolate;
 	Isolate::Scope iscope(isolate);
@@ -2977,10 +2987,11 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 	Local<v8::Value> args[2];
 	args[0] = ToString(src);
 	int call_argc = 1;
+	Local<Object> meta;
 	if (proc != NULL && proc->cache != NULL)
 	{
 		plv8_proc_cache *cache = proc->cache;
-		Local<Object> meta = Object::New(isolate);
+		meta = Object::New(isolate);
 		meta->Set(context, ToString("fn_oid"), Uint32::NewFromUnsigned(isolate, cache->fn_oid)).Check();
 		meta->Set(context, ToString("proname"), ToString(cache->proname)).Check();
 		meta->Set(context, ToString("rettype_oid"), Uint32::NewFromUnsigned(isolate, proc->rettype.typid)).Check();
@@ -3028,6 +3039,21 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 			throw pg_error();
 		}
 		PG_END_TRY();
+	}
+
+	if (proc != NULL && proc->cache != NULL)
+	{
+		bool pass_bytes = is_wasm_lang;
+		if (!meta.IsEmpty())
+		{
+			Local<v8::Value> opt_val;
+			if (meta->Get(context, ToString("pass_user_types_as_bytes")).ToLocal(&opt_val) &&
+				!opt_val.IsEmpty() && opt_val->BooleanValue(isolate))
+			{
+				pass_bytes = true;
+			}
+		}
+		proc->cache->pass_user_types_as_bytes = pass_bytes;
 	}
 
 	CString str(transpiled);
@@ -3106,6 +3132,7 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate,
 			}
 			cache->function.Reset();
 			cache->nhandlers = 0;
+			cache->pass_user_types_as_bytes = false;
 		}
 		else
 		{
@@ -3117,6 +3144,7 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate,
 		new(&cache->function) Persistent<Function>();
 		cache->prosrc = NULL;
 		cache->nhandlers = 0;
+		cache->pass_user_types_as_bytes = false;
 	}
 
 	if (cache->function.IsEmpty())

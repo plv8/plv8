@@ -79,7 +79,7 @@ DATA_built = plv8.sql
 REGRESS = init-extension plv8 plv8-errors scalar_args inline json startup_pre startup varparam json_conv \
 		  jsonb_conv window guc es6 arraybuffer composites currentresource startup_perms bytea find_function_perms \
 		  memory_limits reset show array_spread regression procedure security_definer language_handler tle_modules \
-		  table_macro_support
+		  table_macro_support wasm_engine single_isolate_wasm_snapshot
 
 ifndef BIGINT_GRACEFUL
 	REGRESS += bigint

@@ -53,6 +53,8 @@ jobs:
           export PATH="${PWD}/postgres/inst/bin:$PATH"
           pushd plv8
           make install
+          echo "shared_preload_libraries = 'plv8-4.0.0-ALPHA'" >> ../postgres/inst/bin/data/postgresql.conf
+          ../postgres/inst/bin/pg_ctl -D ../postgres/inst/bin/data -l ../postgres/inst/bin/logfile restart
           make installcheck
           popd
 
@@ -108,6 +110,8 @@ jobs:
           pushd plv8
           make with_llvm=no
           make install with_llvm=no
+          echo "shared_preload_libraries = 'plv8-4.0.0-ALPHA'" >> /var/lib/pgsql/${{ matrix.pg_major }}/data/postgresql.conf
+          su postgres -c "/usr/pgsql-${{ matrix.pg_major }}/bin/pg_ctl -D /var/lib/pgsql/${{ matrix.pg_major }}/data -l /tmp/postgresql.log restart"
           chown -R postgres .
           su postgres -c "PATH=$PATH make installcheck with_llvm=no"
           popd

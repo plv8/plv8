@@ -54,6 +54,7 @@ extern "C" {
 #include "nodes/pathnodes.h"
 #include "nodes/pg_list.h"
 #include "nodes/supportnodes.h"
+#include "parser/parse_func.h"
 #include "parser/parse_relation.h"
 #include "parser/parse_type.h"
 #include "storage/ipc.h"
@@ -113,11 +114,15 @@ PGDLLEXPORT void _PG_init(void);
 PGDLLEXPORT Datum	plv8_inline_handler(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plv8_source_in(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plv8_source_out(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_base_type_in(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_base_type_out(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum	plv8_call_support(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(plv8_inline_handler);
 PG_FUNCTION_INFO_V1(plv8_source_in);
 PG_FUNCTION_INFO_V1(plv8_source_out);
+PG_FUNCTION_INFO_V1(plv8_base_type_in);
+PG_FUNCTION_INFO_V1(plv8_base_type_out);
 PG_FUNCTION_INFO_V1(plv8_call_support);
 #undef String
 } // extern "C"
@@ -242,6 +247,7 @@ static uint64 next_context_id = 1;
 size_t plv8_memory_limit = 256;
 size_t plv8_last_heap_size = 0;
 static int plv8_wasm_cache_size = 64;
+static int plv8_wasm_cache_max_bytes = 0;
 static int plv8_thread_pool_size = 0;
 static char *plv8_boot_script_file = NULL;
 static char *plv8_snapshot_file = NULL;
@@ -285,11 +291,14 @@ static void *plv8_snapshot_mmap_addr = nullptr;
 static size_t plv8_snapshot_mmap_len = 0;
 static uint64 plv8_snapshot_functions_restored = 0;
 static char plv8_snapshot_source[256] = "none";
+static std::string plv8_loaded_snapshot_file;
+static std::string plv8_loaded_boot_script_file;
 static bool plv8_bypass_snapshot_restore = false;
 
 struct Plv8SharedState
 {
 	LWLock			   *lock;
+	LWLock				lock_storage;
 	int					dsa_tranche_id;
 	int					dshash_tranche_id;
 	dsa_handle			wasm_dsa_handle;
@@ -299,6 +308,7 @@ struct Plv8SharedState
 	pg_atomic_uint64	hits;
 	pg_atomic_uint64	misses;
 	pg_atomic_uint64	stores;
+	pg_atomic_uint64	evictions;
 	pg_atomic_uint64	access_seq;
 };
 
@@ -346,44 +356,72 @@ plv8_shmem_request(void)
 #endif
 
 static void
+plv8_init_shared_state_internal(void)
+{
+	if (plv8_shared_state != nullptr)
+		return;
+
+	bool found = false;
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	PG_TRY();
+	{
+		plv8_shared_state = static_cast<Plv8SharedState *>(
+			ShmemInitStruct("plv8_shared_state", sizeof(Plv8SharedState), &found));
+		if (plv8_shared_state != nullptr && !found)
+		{
+			memset(plv8_shared_state, 0, sizeof(Plv8SharedState));
+#if PG_VERSION_NUM >= 190000
+			plv8_shared_state->dsa_tranche_id = LWLockNewTrancheId("plv8_wasm_dsa");
+			plv8_shared_state->dshash_tranche_id = LWLockNewTrancheId("plv8_wasm_dshash");
+#else
+			plv8_shared_state->dsa_tranche_id = LWLockNewTrancheId();
+			LWLockRegisterTranche(plv8_shared_state->dsa_tranche_id, "plv8_wasm_dsa");
+			plv8_shared_state->dshash_tranche_id = LWLockNewTrancheId();
+			LWLockRegisterTranche(plv8_shared_state->dshash_tranche_id, "plv8_wasm_dshash");
+#endif
+			LWLockInitialize(&plv8_shared_state->lock_storage, plv8_shared_state->dsa_tranche_id);
+			plv8_shared_state->lock = &plv8_shared_state->lock_storage;
+			plv8_shared_state->wasm_dsa_handle = DSA_HANDLE_INVALID;
+			plv8_shared_state->wasm_dshash_handle = DSHASH_HANDLE_INVALID;
+			pg_atomic_init_u64(&plv8_shared_state->bytes_used, 0);
+			pg_atomic_init_u64(&plv8_shared_state->entries_count, 0);
+			pg_atomic_init_u64(&plv8_shared_state->hits, 0);
+			pg_atomic_init_u64(&plv8_shared_state->misses, 0);
+			pg_atomic_init_u64(&plv8_shared_state->stores, 0);
+			pg_atomic_init_u64(&plv8_shared_state->evictions, 0);
+			pg_atomic_init_u64(&plv8_shared_state->access_seq, 0);
+		}
+	}
+	PG_CATCH();
+	{
+		LWLockRelease(AddinShmemInitLock);
+		FlushErrorState();
+		plv8_shared_state = nullptr;
+		return;
+	}
+	PG_END_TRY();
+	LWLockRelease(AddinShmemInitLock);
+}
+
+static void
 plv8_shmem_startup(void)
 {
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 
-	bool found = false;
-	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
-	plv8_shared_state = static_cast<Plv8SharedState *>(
-		ShmemInitStruct("plv8_shared_state", sizeof(Plv8SharedState), &found));
-	if (!found)
-	{
-		memset(plv8_shared_state, 0, sizeof(Plv8SharedState));
-		plv8_shared_state->lock = &(GetNamedLWLockTranche("plv8_wasm_cache"))[0].lock;
-#if PG_VERSION_NUM >= 190000
-		plv8_shared_state->dsa_tranche_id = LWLockNewTrancheId("plv8_wasm_dsa");
-		plv8_shared_state->dshash_tranche_id = LWLockNewTrancheId("plv8_wasm_dshash");
-#else
-		plv8_shared_state->dsa_tranche_id = LWLockNewTrancheId();
-		LWLockRegisterTranche(plv8_shared_state->dsa_tranche_id, "plv8_wasm_dsa");
-		plv8_shared_state->dshash_tranche_id = LWLockNewTrancheId();
-		LWLockRegisterTranche(plv8_shared_state->dshash_tranche_id, "plv8_wasm_dshash");
-#endif
-		plv8_shared_state->wasm_dsa_handle = DSA_HANDLE_INVALID;
-		plv8_shared_state->wasm_dshash_handle = DSHASH_HANDLE_INVALID;
-		pg_atomic_init_u64(&plv8_shared_state->bytes_used, 0);
-		pg_atomic_init_u64(&plv8_shared_state->entries_count, 0);
-		pg_atomic_init_u64(&plv8_shared_state->hits, 0);
-		pg_atomic_init_u64(&plv8_shared_state->misses, 0);
-		pg_atomic_init_u64(&plv8_shared_state->stores, 0);
-		pg_atomic_init_u64(&plv8_shared_state->access_seq, 0);
-	}
-	LWLockRelease(AddinShmemInitLock);
+	plv8_init_shared_state_internal();
 }
 
 static dshash_table *
 plv8_get_wasm_dshash()
 {
-	if (plv8_shared_state == nullptr || plv8_wasm_cache_size <= 0)
+	if (plv8_wasm_cache_size <= 0 && plv8_wasm_cache_max_bytes <= 0)
+		return nullptr;
+
+	if (plv8_shared_state == nullptr)
+		plv8_init_shared_state_internal();
+
+	if (plv8_shared_state == nullptr)
 		return nullptr;
 
 	if (local_wasm_dshash != nullptr)
@@ -517,7 +555,9 @@ plv8_wasm_cache_store(const uint8_t *wire_bytes, size_t wire_len, const uint8_t 
 	if (ht == nullptr)
 		return false;
 
-	size_t max_bytes = (size_t) plv8_wasm_cache_size * 1024ULL * 1024ULL;
+	size_t max_bytes = plv8_wasm_cache_max_bytes > 0
+		? (size_t) plv8_wasm_cache_max_bytes
+		: (size_t) plv8_wasm_cache_size * 1024ULL * 1024ULL;
 	/* Do not allow a single entry to exceed 25% of the total cache */
 	if (len > max_bytes / 4)
 		return false;
@@ -540,6 +580,7 @@ plv8_wasm_cache_store(const uint8_t *wire_bytes, size_t wire_len, const uint8_t 
 	}
 
 	size_t role_cap = superuser() ? max_bytes : (max_bytes / 4);
+	size_t final_role_used = 0;
 
 	LWLockAcquire(plv8_shared_state->lock, LW_EXCLUSIVE);
 #if PG_VERSION_NUM >= 150000
@@ -579,6 +620,7 @@ plv8_wasm_cache_store(const uint8_t *wire_bytes, size_t wire_len, const uint8_t 
 			}
 		}
 		dshash_seq_term(&seq);
+		final_role_used = role_used;
 
 		bool over_role = (role_used + len > role_cap);
 		bool over_global = (pg_atomic_read_u64(&plv8_shared_state->bytes_used) + len > max_bytes);
@@ -608,6 +650,7 @@ plv8_wasm_cache_store(const uint8_t *wire_bytes, size_t wire_len, const uint8_t 
 				uint64 prev_cnt = pg_atomic_read_u64(&plv8_shared_state->entries_count);
 				if (prev_cnt > 0)
 					pg_atomic_fetch_sub_u64(&plv8_shared_state->entries_count, 1);
+				pg_atomic_fetch_add_u64(&plv8_shared_state->evictions, 1);
 			}
 			dshash_delete_entry(ht, victim);
 		}
@@ -616,7 +659,8 @@ plv8_wasm_cache_store(const uint8_t *wire_bytes, size_t wire_len, const uint8_t 
 	(void) role_cap;
 #endif
 
-	if (pg_atomic_read_u64(&plv8_shared_state->bytes_used) + len > max_bytes)
+	if (final_role_used + len > role_cap ||
+		pg_atomic_read_u64(&plv8_shared_state->bytes_used) + len > max_bytes)
 	{
 		LWLockRelease(plv8_shared_state->lock);
 		return false;
@@ -909,12 +953,32 @@ plv8_init_v8_engine(void)
 	v8_engine_initialized = true;
 }
 
+static void KillIsolateAndAllContexts(void);
+
+static void
+ReleaseActivePlv8Snapshot(void)
+{
+	if (current_isolate != nullptr)
+		KillIsolateAndAllContexts();
+
+	if (plv8_snapshot_is_mmap && plv8_snapshot_mmap_addr != nullptr && plv8_snapshot_mmap_len > 0)
+	{
+		munmap(plv8_snapshot_mmap_addr, plv8_snapshot_mmap_len);
+	}
+	plv8_snapshot_is_mmap = false;
+	plv8_snapshot_mmap_addr = nullptr;
+	plv8_snapshot_mmap_len = 0;
+	plv8_active_snapshot_blob.data = nullptr;
+	plv8_active_snapshot_blob.raw_size = 0;
+	plv8_snapshot_slots.clear();
+	plv8_snapshot_db_oid = InvalidOid;
+	plv8_snapshot_functions_restored = 0;
+	snprintf(plv8_snapshot_source, sizeof(plv8_snapshot_source), "none");
+}
+
 static bool
 LoadPlv8SnapshotFileInPreload(const char *path)
 {
-	if (!process_shared_preload_libraries_in_progress)
-		return false;
-
 	if (path == nullptr || path[0] == '\0')
 		return false;
 
@@ -1039,6 +1103,8 @@ LoadPlv8SnapshotFileInPreload(const char *path)
 
 	mprotect(addr, map_len, PROT_READ);
 
+	ReleaseActivePlv8Snapshot();
+
 	const Plv8SnapshotSlot *slots_ptr = reinterpret_cast<const Plv8SnapshotSlot *>(
 		static_cast<const char *>(addr) + sizeof(Plv8SnapshotHeader));
 	plv8_snapshot_slots.assign(slots_ptr, slots_ptr + hdr->num_functions);
@@ -1057,9 +1123,6 @@ LoadPlv8SnapshotFileInPreload(const char *path)
 static bool
 BuildBootScriptSnapshotInPreload(const char *script_path)
 {
-	if (!process_shared_preload_libraries_in_progress)
-		return false;
-
 	if (script_path == nullptr || script_path[0] == '\0')
 		return false;
 
@@ -1102,6 +1165,124 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 	}
 	close(fd);
 
+	int timeout_sec = (plv8_execution_timeout > 0 && plv8_execution_timeout <= 300)
+		? plv8_execution_timeout
+		: 30;
+
+	if (!process_shared_preload_libraries_in_progress)
+	{
+		plv8_init_v8_engine();
+		if (v8_platform)
+			v8_platform->EnsureBackendPlatform();
+
+		v8::StartupData blob = { nullptr, 0 };
+		bool timed_out = false;
+		bool compile_failed = false;
+
+		{
+			ScopedSignalBlockerForV8Workers sig_blocker;
+			v8::ArrayBuffer::Allocator *alloc =
+				v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+			{
+				v8::Isolate::CreateParams create_params;
+				create_params.array_buffer_allocator = alloc;
+				create_params.external_references = plv8_external_references;
+				v8::SnapshotCreator creator(create_params);
+				v8::Isolate *iso = creator.GetIsolate();
+				std::atomic<bool> script_done{false};
+				std::atomic<bool> watchdog_fired{false};
+				std::thread watchdog([iso, &script_done, &watchdog_fired, timeout_sec]() {
+					for (int ms = 0; ms < timeout_sec * 1000; ms += 25)
+					{
+						if (script_done.load(std::memory_order_acquire))
+							return;
+						pg_usleep(25000L);
+					}
+					if (!script_done.load(std::memory_order_acquire))
+					{
+						watchdog_fired.store(true, std::memory_order_release);
+						iso->TerminateExecution();
+					}
+				});
+				{
+					v8::HandleScope hs(iso);
+					v8::Local<v8::Context> def_ctx = v8::Context::New(iso);
+					creator.SetDefaultContext(def_ctx);
+
+					v8::Local<v8::ObjectTemplate> global = GetGlobalObjectTemplate(iso);
+					v8::Local<v8::Context> ctx = v8::Context::New(iso, nullptr, global);
+					{
+						v8::Context::Scope cs(ctx);
+						v8::TryCatch tc(iso);
+						v8::Local<v8::String> src = v8::String::NewFromUtf8(
+							iso, script_src.data(), v8::NewStringType::kNormal,
+							(int) script_src.size()).ToLocalChecked();
+						v8::Local<v8::Script> compiled;
+						if (!v8::Script::Compile(ctx, src).ToLocal(&compiled) ||
+							compiled->Run(ctx).IsEmpty())
+						{
+							if (tc.HasTerminated() || watchdog_fired.load(std::memory_order_acquire))
+								timed_out = true;
+							else
+								compile_failed = true;
+						}
+					}
+					script_done.store(true, std::memory_order_release);
+					watchdog.join();
+					creator.AddContext(ctx);
+				}
+				if (!timed_out && !compile_failed)
+				{
+					blob = creator.CreateBlob(
+						v8::SnapshotCreator::FunctionCodeHandling::kKeep);
+				}
+			}
+			delete alloc;
+		}
+
+		if (timed_out)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_QUERY_CANCELED),
+					 errmsg("plv8: timed out compiling boot_script_file \"%s\"",
+							script_path)));
+		}
+		if (compile_failed || blob.data == nullptr || blob.raw_size <= 0 ||
+			(size_t) blob.raw_size > PLV8_MAX_SNAPSHOT_BLOB_SIZE)
+		{
+			delete[] blob.data;
+			ereport(ERROR,
+					(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+					 errmsg("plv8: failed to build boot snapshot from \"%s\"",
+							script_path)));
+		}
+
+		size_t map_len = (size_t) blob.raw_size;
+		void *shared_mem = mmap(nullptr, map_len,
+								PROT_READ | PROT_WRITE,
+								MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+		if (shared_mem == MAP_FAILED)
+		{
+			delete[] blob.data;
+			ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("plv8: anonymous mmap failed for boot_script_file \"%s\": %m",
+							script_path)));
+		}
+		memcpy(shared_mem, blob.data, map_len);
+		delete[] blob.data;
+		mprotect(shared_mem, map_len, PROT_READ);
+
+		ReleaseActivePlv8Snapshot();
+		plv8_active_snapshot_blob.data = static_cast<const char *>(shared_mem);
+		plv8_active_snapshot_blob.raw_size = static_cast<int>(map_len);
+		plv8_snapshot_is_mmap = true;
+		plv8_snapshot_mmap_addr = shared_mem;
+		plv8_snapshot_mmap_len = map_len;
+		snprintf(plv8_snapshot_source, sizeof(plv8_snapshot_source), "boot_script_prefork");
+		return true;
+	}
+
 	/*
 	 * Compile the boot script snapshot in a short-lived forked child process
 	 * and write the resulting blob into a MAP_SHARED anonymous mapping.
@@ -1119,10 +1300,6 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 				 errmsg("plv8: anonymous mmap failed for boot_script_file \"%s\": %m",
 						script_path)));
 	}
-
-	int timeout_sec = (plv8_execution_timeout > 0 && plv8_execution_timeout <= 300)
-		? plv8_execution_timeout
-		: 30;
 
 	pid_t pid = fork();
 	if (pid < 0)
@@ -1148,7 +1325,8 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 			v8::SnapshotCreator creator(create_params);
 			v8::Isolate *iso = creator.GetIsolate();
 			std::atomic<bool> script_done{false};
-			std::thread watchdog([iso, &script_done, timeout_sec]() {
+			std::atomic<bool> watchdog_fired{false};
+			std::thread watchdog([iso, &script_done, &watchdog_fired, timeout_sec]() {
 				for (int ms = 0; ms < timeout_sec * 1000; ms += 25)
 				{
 					if (script_done.load(std::memory_order_acquire))
@@ -1156,7 +1334,10 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 					pg_usleep(25000L);
 				}
 				if (!script_done.load(std::memory_order_acquire))
+				{
+					watchdog_fired.store(true, std::memory_order_release);
 					iso->TerminateExecution();
+				}
 			});
 			{
 				v8::HandleScope hs(iso);
@@ -1175,9 +1356,10 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 					if (!v8::Script::Compile(ctx, src).ToLocal(&compiled) ||
 						compiled->Run(ctx).IsEmpty())
 					{
+						bool timed_out = tc.HasTerminated() || watchdog_fired.load(std::memory_order_acquire);
 						script_done.store(true, std::memory_order_release);
 						watchdog.join();
-						_exit(2);
+						_exit(timed_out ? 4 : 2);
 					}
 				}
 				script_done.store(true, std::memory_order_release);
@@ -1216,10 +1398,13 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 			break;
 		pg_usleep(10000L);
 	}
-	if (!child_exited)
+	if (!child_exited || (WIFEXITED(status) && WEXITSTATUS(status) == 4))
 	{
-		kill(pid, SIGKILL);
-		while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+		if (!child_exited)
+		{
+			kill(pid, SIGKILL);
+			while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+		}
 		munmap(shared_mem, max_shared_blob);
 		ereport(ERROR,
 				(errcode(ERRCODE_QUERY_CANCELED),
@@ -1247,6 +1432,7 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 	}
 
 	mprotect(shared_mem, max_shared_blob, PROT_READ);
+	ReleaseActivePlv8Snapshot();
 	plv8_active_snapshot_blob.data =
 		static_cast<const char *>(shared_mem) + sizeof(uint64);
 	plv8_active_snapshot_blob.raw_size = static_cast<int>(blob_sz);
@@ -1255,6 +1441,32 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 	plv8_snapshot_mmap_len = max_shared_blob;
 	snprintf(plv8_snapshot_source, sizeof(plv8_snapshot_source), "boot_script_prefork");
 	return true;
+}
+
+static void
+SyncPlv8SnapshotFromGucs(void)
+{
+	std::string want_snap = (plv8_snapshot_file != NULL) ? plv8_snapshot_file : "";
+	std::string want_boot = (plv8_boot_script_file != NULL) ? plv8_boot_script_file : "";
+
+	if (want_snap == plv8_loaded_snapshot_file && want_boot == plv8_loaded_boot_script_file)
+		return;
+
+	if (!want_snap.empty())
+	{
+		LoadPlv8SnapshotFileInPreload(want_snap.c_str());
+	}
+	else if (!want_boot.empty())
+	{
+		BuildBootScriptSnapshotInPreload(want_boot.c_str());
+	}
+	else
+	{
+		ReleaseActivePlv8Snapshot();
+	}
+
+	plv8_loaded_snapshot_file = want_snap;
+	plv8_loaded_boot_script_file = want_boot;
 }
 
 /*
@@ -1587,21 +1799,17 @@ _PG_init(void)
     }
 #undef ALLOW_RAW_USER_TYPES_VAR
 
-    GucContext preload_guc_context = process_shared_preload_libraries_in_progress
-        ? PGC_POSTMASTER
-        : PGC_SUSET;
-
 #define BOOT_SCRIPT_FILE_VAR "plv8.boot_script_file"
     guc_value = plv8_find_option(BOOT_SCRIPT_FILE_VAR);
     if (guc_value != NULL) {
         plv8_boot_script_file = plv8_string_option(guc_value);
     } else {
         DefineCustomStringVariable(BOOT_SCRIPT_FILE_VAR,
-                                   gettext_noop("JavaScript file compiled into a shared V8 startup snapshot during postmaster preload."),
+                                   gettext_noop("JavaScript file compiled into a shared V8 startup snapshot during postmaster preload or superuser reload."),
                                    NULL,
                                    &plv8_boot_script_file,
                                    NULL,
-                                   preload_guc_context, GUC_SUPERUSER_ONLY,
+                                   PGC_SUSET, GUC_SUPERUSER_ONLY,
                                    NULL,
                                    NULL,
                                    NULL);
@@ -1618,7 +1826,7 @@ _PG_init(void)
                                    NULL,
                                    &plv8_snapshot_file,
                                    NULL,
-                                   preload_guc_context, GUC_SUPERUSER_ONLY,
+                                   PGC_SUSET, GUC_SUPERUSER_ONLY,
                                    NULL,
                                    NULL,
                                    NULL);
@@ -1635,12 +1843,29 @@ _PG_init(void)
                                 NULL,
                                 &plv8_wasm_cache_size,
                                 64, 0, 2048,
-                                preload_guc_context, 0,
+                                PGC_SUSET, GUC_SUPERUSER_ONLY,
                                 NULL,
                                 NULL,
                                 NULL);
     }
 #undef WASM_CACHE_SIZE_VAR
+
+#define WASM_CACHE_MAX_BYTES_VAR "plv8.wasm_cache_max_bytes"
+    guc_value = plv8_find_option(WASM_CACHE_MAX_BYTES_VAR);
+    if (guc_value != NULL) {
+        plv8_wasm_cache_max_bytes = plv8_int_option(guc_value);
+    } else {
+        DefineCustomIntVariable(WASM_CACHE_MAX_BYTES_VAR,
+                                gettext_noop("Optional fine-grained byte limit override for the WebAssembly cache (0 = use plv8.wasm_cache_size MB)."),
+                                NULL,
+                                &plv8_wasm_cache_max_bytes,
+                                0, 0, INT_MAX,
+                                PGC_SUSET, GUC_SUPERUSER_ONLY,
+                                NULL,
+                                NULL,
+                                NULL);
+    }
+#undef WASM_CACHE_MAX_BYTES_VAR
 
 #define MAX_MODULE_DEPTH_VAR "plv8.max_module_depth"
     guc_value = plv8_find_option(MAX_MODULE_DEPTH_VAR);
@@ -1675,11 +1900,13 @@ _PG_init(void)
 		{
 			plv8_init_v8_engine();
 			LoadPlv8SnapshotFileInPreload(plv8_snapshot_file);
+			plv8_loaded_snapshot_file = plv8_snapshot_file;
 		}
 		else if (plv8_boot_script_file != NULL && plv8_boot_script_file[0] != '\0')
 		{
 			BuildBootScriptSnapshotInPreload(plv8_boot_script_file);
 			plv8_init_v8_engine();
+			plv8_loaded_boot_script_file = plv8_boot_script_file;
 		}
 		else
 		{
@@ -2001,6 +2228,9 @@ plv8_reset(PG_FUNCTION_ARGS)
 	Oid					user_id = GetUserId();
 	unsigned long		i;
 
+	if (superuser())
+		SyncPlv8SnapshotFromGucs();
+
 	for (i = 0; i < ContextVector.size(); i++)
 	{
 		if (ContextVector[i]->user_id == user_id)
@@ -2037,8 +2267,15 @@ plv8_info(PG_FUNCTION_ARGS)
 		catch (pg_error& e)	{ e.rethrow(); }
 	}
 
-	uint64 wasm_bytes = 0, wasm_entries = 0, wasm_hits = 0, wasm_misses = 0, wasm_stores = 0;
-	bool wasm_cache_enabled = (plv8_shared_state != nullptr && plv8_wasm_cache_size > 0);
+	if (plv8_shared_state == nullptr &&
+		(plv8_wasm_cache_size > 0 || plv8_wasm_cache_max_bytes > 0))
+	{
+		plv8_init_shared_state_internal();
+	}
+
+	uint64 wasm_bytes = 0, wasm_entries = 0, wasm_hits = 0, wasm_misses = 0, wasm_stores = 0, wasm_evictions = 0;
+	bool wasm_cache_enabled = (plv8_shared_state != nullptr &&
+							   (plv8_wasm_cache_size > 0 || plv8_wasm_cache_max_bytes > 0));
 	if (wasm_cache_enabled)
 	{
 		wasm_bytes = pg_atomic_read_u64(&plv8_shared_state->bytes_used);
@@ -2046,6 +2283,7 @@ plv8_info(PG_FUNCTION_ARGS)
 		wasm_hits = pg_atomic_read_u64(&plv8_shared_state->hits);
 		wasm_misses = pg_atomic_read_u64(&plv8_shared_state->misses);
 		wasm_stores = pg_atomic_read_u64(&plv8_shared_state->stores);
+		wasm_evictions = pg_atomic_read_u64(&plv8_shared_state->evictions);
 	}
 
 	bool all_same_isolate = true;
@@ -2109,7 +2347,7 @@ plv8_info(PG_FUNCTION_ARGS)
 		"\"snapshot_fn_count\":%zu,"
 		"\"snapshot_functions_restored\":%llu,"
 		"\"snapshot\":{\"loaded\":%s,\"bytes\":%d,\"functions_count\":%zu,\"functions_restored\":%llu,\"source\":%s},"
-		"\"wasm_cache\":{\"enabled\":%s,\"entries\":%llu,\"bytes_used\":%llu,\"hits\":%llu,\"misses\":%llu,\"stores\":%llu}}",
+		"\"wasm_cache\":{\"enabled\":%s,\"entries\":%llu,\"bytes_used\":%llu,\"hits\":%llu,\"misses\":%llu,\"stores\":%llu,\"evictions\":%llu}}",
 		(int) getpid(),
 		all_same_isolate ? "true" : "false",
 		all_same_isolate ? "true" : "false",
@@ -2136,7 +2374,8 @@ plv8_info(PG_FUNCTION_ARGS)
 		(unsigned long long) wasm_bytes,
 		(unsigned long long) wasm_hits,
 		(unsigned long long) wasm_misses,
-		(unsigned long long) wasm_stores);
+		(unsigned long long) wasm_stores,
+		(unsigned long long) wasm_evictions);
 
 	pfree(roles_buf.data);
 	pfree(src_json_buf.data);
@@ -2161,6 +2400,13 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 				 errmsg("output_path must not be null")));
 
 	char *out_path = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	struct stat initial_out_st;
+	if (lstat(out_path, &initial_out_st) == 0 && S_ISLNK(initial_out_st.st_mode))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("refusing to write snapshot to symlink \"%s\"", out_path)));
+	}
 	std::vector<Oid> target_oids;
 
 	if (PG_NARGS() >= 2 && !PG_ARGISNULL(1))
@@ -2392,6 +2638,7 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 	std::vector<Plv8SnapshotSlot> compiled_slots;
 	v8::StartupData blob = { nullptr, 0 };
 	std::string snap_compile_error;
+	bool snap_timed_out = false;
 
 	{
 		ScopedSignalBlockerForV8Workers sig_blocker;
@@ -2410,7 +2657,8 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 				? plv8_execution_timeout
 				: 30;
 			std::atomic<bool> snap_done{false};
-			std::thread watchdog([snap_isolate, &snap_done, timeout_sec]() {
+			std::atomic<bool> watchdog_fired{false};
+			std::thread watchdog([snap_isolate, &snap_done, &watchdog_fired, timeout_sec]() {
 				for (int ms = 0; ms < timeout_sec * 1000; ms += 25)
 				{
 					if (snap_done.load(std::memory_order_acquire))
@@ -2418,7 +2666,10 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 					pg_usleep(25000L);
 				}
 				if (!snap_done.load(std::memory_order_acquire))
+				{
+					watchdog_fired.store(true, std::memory_order_release);
 					snap_isolate->TerminateExecution();
+				}
 			});
 
 			{
@@ -2443,7 +2694,15 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 						if (!v8::Script::Compile(context, s).ToLocal(&sc) ||
 							!sc->Run(context).ToLocal(&unused_res))
 						{
-							snap_compile_error = "failed to compile or run boot_script_file in snapshot";
+							if (tc.HasTerminated() || watchdog_fired.load(std::memory_order_acquire))
+							{
+								snap_timed_out = true;
+								snap_compile_error = "timed out compiling boot_script_file in snapshot";
+							}
+							else
+							{
+								snap_compile_error = "failed to compile or run boot_script_file in snapshot";
+							}
 						}
 					}
 
@@ -2499,7 +2758,15 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 	}
 
 	if (!snap_compile_error.empty())
+	{
+		if (snap_timed_out)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_QUERY_CANCELED),
+					 errmsg("%s", snap_compile_error.c_str())));
+		}
 		ereport(ERROR, (errmsg("%s", snap_compile_error.c_str())));
+	}
 
 	if (blob.data == nullptr || blob.raw_size <= 0 ||
 		(size_t) blob.raw_size > PLV8_MAX_SNAPSHOT_BLOB_SIZE)
@@ -4376,6 +4643,9 @@ GetPlv8Context() {
 	Oid					user_id = GetUserId();
 	unsigned int		i;
 	plv8_context		*my_context = nullptr;
+
+	if (current_context == nullptr && !plv8_bypass_snapshot_restore)
+		SyncPlv8SnapshotFromGucs();
 
 	if (plv8_isolate_oom_killed ||
 		(current_isolate && current_isolate->IsDead()) ||
@@ -9231,5 +9501,73 @@ plv8_call_support(PG_FUNCTION_ARGS)
 
 	PG_RETURN_POINTER(NULL);
 }
+
+Datum
+plv8_base_type_in(PG_FUNCTION_ARGS)
+{
+	char *s = PG_GETARG_CSTRING(0);
+	if (s == nullptr)
+		PG_RETURN_NULL();
+
+	Oid funcoid = fcinfo->flinfo->fn_oid;
+	HeapTuple proc_tp = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcoid));
+	if (!HeapTupleIsValid(proc_tp))
+		elog(ERROR, "cache lookup failed for function %u", funcoid);
+	Form_pg_proc proc = (Form_pg_proc) GETSTRUCT(proc_tp);
+	Oid pronamespace = proc->pronamespace;
+	char *proname = pstrdup(NameStr(proc->proname));
+	Oid typoid = proc->prorettype;
+	ReleaseSysCache(proc_tp);
+
+	Oid argtypes[1] = { TEXTOID };
+	List *qualname = list_make2(makeString(get_namespace_name(pronamespace)),
+								makeString(proname));
+	Oid in_fn_oid = LookupFuncName(qualname, 1, argtypes, false);
+	pfree(proname);
+
+	HeapTuple tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typoid));
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for type %u", typoid);
+	Form_pg_type typtup = (Form_pg_type) GETSTRUCT(tp);
+	int typeLen = typtup->typlen;
+	char *typeName = pstrdup(NameStr(typtup->typname));
+	ReleaseSysCache(tp);
+
+	Datum datum = OidFunctionCall1Coll(in_fn_oid, InvalidOid, CStringGetTextDatum(s));
+	bytea *result = DatumGetByteaPP(datum);
+	if (typeLen >= 0)
+	{
+		int inputLen = VARSIZE_ANY_EXHDR(result) + VARHDRSZ;
+		if (typeLen != inputLen)
+			elog(ERROR, "type %s is defined as fixed-size %d, but actual data length is %d",
+				 typeName, typeLen, inputLen);
+	}
+	pfree(typeName);
+	PG_RETURN_POINTER(result);
+}
+
+Datum
+plv8_base_type_out(PG_FUNCTION_ARGS)
+{
+	Datum datum = PG_GETARG_DATUM(0);
+	Oid funcoid = fcinfo->flinfo->fn_oid;
+	HeapTuple proc_tp = SearchSysCache1(PROCOID, ObjectIdGetDatum(funcoid));
+	if (!HeapTupleIsValid(proc_tp))
+		elog(ERROR, "cache lookup failed for function %u", funcoid);
+	Form_pg_proc proc = (Form_pg_proc) GETSTRUCT(proc_tp);
+	Oid pronamespace = proc->pronamespace;
+	char *proname = pstrdup(NameStr(proc->proname));
+	ReleaseSysCache(proc_tp);
+
+	Oid out_argtypes[1] = { BYTEAOID };
+	List *qualname = list_make2(makeString(get_namespace_name(pronamespace)),
+								makeString(proname));
+	Oid out_fn_oid = LookupFuncName(qualname, 1, out_argtypes, false);
+	pfree(proname);
+
+	Datum result = OidFunctionCall1Coll(out_fn_oid, InvalidOid, datum);
+	PG_RETURN_CSTRING(TextDatumGetCString(result));
+}
+
 
 

@@ -27,6 +27,14 @@ extern "C" {
 #include "fmgr.h"
 } // extern "C"
 
+#ifdef DatumGetNumeric
+#undef DatumGetNumeric
+static inline ::Numeric
+DatumGetNumeric(Datum X)
+{
+	return (::Numeric) PG_DETOAST_DATUM(X);
+}
+#endif
 
 using namespace v8;
 
@@ -516,10 +524,62 @@ JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object) {
 #endif
 	Local<Array> arr = object->GetOwnPropertyNames(context).ToLocalChecked();
 
+	/*
+	 * Rows produced by SPI in preserve_numeric_precision mode carry a hidden
+	 * __numeric_columns list; string values in those columns are exact numeric
+	 * text and are emitted as jsonb numbers rather than strings.
+	 */
+	Local<Array> numeric_cols;
+	{
+		Local<v8::String> tag = ToString("__numeric_columns");
+		Local<v8::Value> tagval;
+		if (object->HasOwnProperty(context, tag).FromMaybe(false) &&
+			object->Get(context, tag).ToLocal(&tagval) && tagval->IsArray())
+			numeric_cols = Local<Array>::Cast(tagval);
+	}
+
 	for (size_t i = 0; i < arr->Length(); i++) {
 		Local<v8::Value> v = arr->Get(context, i).ToLocalChecked();
 		val = JsonbFromValue(pstate, v, WJB_KEY);
 		Local<v8::Value> o = object->Get(context, v).ToLocalChecked();
+
+		if (!numeric_cols.IsEmpty() && o->IsString())
+		{
+			bool is_numeric_col = false;
+			for (uint32_t n = 0; n < numeric_cols->Length() && !is_numeric_col; n++)
+			{
+				Local<v8::Value> cn;
+				if (numeric_cols->Get(context, n).ToLocal(&cn) && cn->StrictEquals(v))
+					is_numeric_col = true;
+			}
+			if (is_numeric_col)
+			{
+				v8::String::Utf8Value utf8(isolate, o);
+				const char *s = *utf8;
+				bool plain = (s != NULL && *s != '\0');
+				int ndots = 0;
+				for (const char *p = s; plain && *p; p++)
+				{
+					if (*p == '-' && p == s) continue;
+					if (*p == '.') { if (++ndots > 1) plain = false; continue; }
+					if (*p < '0' || *p > '9') plain = false;
+				}
+				if (plain)
+				{
+					JsonbValue nv;
+					nv.type = jbvNumeric;
+					nv.val.numeric = DatumGetNumeric(DirectFunctionCall3(numeric_in, CStringGetDatum(s),
+																		  ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1)));
+#if PG_VERSION_NUM >= 190000
+					pushJsonbValue(pstate, WJB_VALUE, &nv);
+					val = pstate->result;
+#else
+					val = pushJsonbValue(pstate, WJB_VALUE, &nv);
+#endif
+					continue;
+				}
+			}
+		}
 
 		if (o->IsDate()) {
 			val = JsonbFromValue(pstate, o, WJB_VALUE);
@@ -1046,8 +1106,29 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 	case FLOAT8OID:
 		return Number::New(isolate, DatumGetFloat8(datum));
 	case NUMERICOID:
-		return Number::New(isolate, DatumGetFloat8(
-			DirectFunctionCall1(numeric_float8, datum)));
+	{
+		float8	f = DatumGetFloat8(DirectFunctionCall1(numeric_float8, datum));
+
+		/*
+		 * With preserve_numeric_precision a numeric that cannot round-trip
+		 * through a double (more than ~15 significant digits) is handed to
+		 * JS as its exact text; otherwise it stays a Number.
+		 */
+		if (plv8_preserve_numeric_precision && !isnan(f) && !isinf(f))
+		{
+			Datum	back = DirectFunctionCall1(float8_numeric, Float8GetDatum(f));
+
+			if (!DatumGetBool(DirectFunctionCall2(numeric_eq, datum, back)))
+			{
+				char   *str = DatumGetCString(DirectFunctionCall1(numeric_out, datum));
+				Local<v8::String> result = ToString(str);
+
+				pfree(str);
+				return result;
+			}
+		}
+		return Number::New(isolate, f);
+	}
 	case DATEOID:
 		return Date::New(isolate->GetCurrentContext(), DateToEpoch(DatumGetDateADT(datum))).ToLocalChecked();
 	case TIMESTAMPOID:

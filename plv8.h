@@ -401,6 +401,7 @@ extern void HandleUnhandledPromiseRejections();
 extern void GetMemoryInfo(v8::Local<v8::Object> obj);
 
 extern bool plv8_pass_user_types_as_bytes;
+extern bool plv8_preserve_numeric_precision;
 extern bool plv8_wasm_cache_lookup(const char *key, std::vector<uint8_t> *out);
 extern bool plv8_wasm_cache_store(const char *key, const uint8_t *bytes, size_t len);
 extern uint64 plv8_tle_modules_fingerprint(void);

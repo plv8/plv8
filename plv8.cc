@@ -191,6 +191,7 @@ typedef struct plv8_proc_cache
 	int						nhandlers;
 	plv8_handler_dep		handlers[PLV8_MAX_LANG_HANDLER_DEPTH];
 	bool					pass_user_types_as_bytes;
+	bool					preserve_numeric_precision;
 
 	int						nargs;
 	bool					retset;		/* true if SRF */
@@ -203,6 +204,7 @@ static v8::Isolate *current_isolate = nullptr;
 static ArrayAllocator *current_allocator = nullptr;
 static bool plv8_isolate_oom_killed = false;
 bool plv8_pass_user_types_as_bytes = false;
+bool plv8_preserve_numeric_precision = false;
 static uint64 next_context_id = 1;
 size_t plv8_memory_limit = 256;
 size_t plv8_last_heap_size = 0;
@@ -499,7 +501,7 @@ static void EnsureSharedIsolate(void);
 static void plv8_cache_function_remove(Oid fn_oid);
 static bool plv8_cache_handlers_valid(plv8_proc_cache *cache, HeapTuple proctuple, Oid *stale_handler_oid);
 static bool plv8_is_js_language(Oid lang_oid);
-static char *plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *ndeps, plv8_proc *proc);
+static char *plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *ndeps, plv8_proc *proc, bool *preserve_numeric_out = NULL);
 static bool plv8_extract_hoisted_imports(const char *src, std::string *imports_out, std::string *body_out);
 static Local<Object> plv8_compile_and_eval_anon_module(Local<Context> context, const char *name, const char *mod_src);
 static void plv8_sync_tle_module_cache(plv8_context *ctx);
@@ -1426,13 +1428,18 @@ plv8_call_handler(PG_FUNCTION_ARGS)
 		plv8_proc_cache *cache = proc->cache;
 		struct PassUserTypesScope {
 			bool prev;
-			explicit PassUserTypesScope(bool val) : prev(plv8_pass_user_types_as_bytes) {
+			bool prev_numeric;
+			PassUserTypesScope(bool val, bool numeric_val)
+				: prev(plv8_pass_user_types_as_bytes),
+				  prev_numeric(plv8_preserve_numeric_precision) {
 				plv8_pass_user_types_as_bytes = val;
+				plv8_preserve_numeric_precision = numeric_val;
 			}
 			~PassUserTypesScope() {
 				plv8_pass_user_types_as_bytes = prev;
+				plv8_preserve_numeric_precision = prev_numeric;
 			}
-		} user_types_scope(cache->pass_user_types_as_bytes);
+		} user_types_scope(cache->pass_user_types_as_bytes, cache->preserve_numeric_precision);
 
 		if (is_trigger)
 			return CallTrigger(fcinfo, proc->xenv);
@@ -1488,6 +1495,7 @@ DisposePlv8ContextHandles(plv8_context *ctx)
 				cache->function.Reset();
 				cache->nhandlers = 0;
 				cache->pass_user_types_as_bytes = false;
+				cache->preserve_numeric_precision = false;
 			}
 			cache = (plv8_proc_cache *) hash_seq_search(&status);
 		}
@@ -1558,6 +1566,7 @@ KillIsolateAndAllContexts(void)
 			cache->function.Reset();
 			cache->nhandlers = 0;
 			cache->pass_user_types_as_bytes = false;
+			cache->preserve_numeric_precision = false;
 		}
 	}
 
@@ -2106,15 +2115,26 @@ plv8_inline_handler(PG_FUNCTION_ARGS)
 		CurrentContextScope	context_scope(context);
 		Isolate::Scope		scope(context->isolate);
 		HandleScope			handle_scope(context->isolate);
+		bool				preserve_numeric = false;
 		char			   *source_text = plv8_transpile_src(
 										codeblock->source_text,
 										codeblock->langOid,
-										NULL, NULL, NULL);
+										NULL, NULL, NULL,
+										&preserve_numeric);
 
 		Local<Function>	function = CompileFunction(context,
 										NULL, 0, NULL,
 										source_text, false, false);
 		plv8_exec_env	   *xenv = CreateExecEnv(function, context);
+		struct PreserveNumericScope {
+			bool prev;
+			explicit PreserveNumericScope(bool val) : prev(plv8_preserve_numeric_precision) {
+				plv8_preserve_numeric_precision = val;
+			}
+			~PreserveNumericScope() {
+				plv8_preserve_numeric_precision = prev;
+			}
+		} numeric_scope(preserve_numeric);
 		return CallFunction(fcinfo, xenv, 0, NULL, NULL);
 	}
 	catch (js_error& e)
@@ -2876,7 +2896,7 @@ plv8_is_js_language(Oid lang_oid)
  * palloc'd C string in CurrentMemoryContext containing the transpiled JS code.
  */
 static char *
-plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *ndeps, plv8_proc *proc)
+plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *ndeps, plv8_proc *proc, bool *preserve_numeric_out)
 {
 	Oid				plv8_lang_oid = InvalidOid;
 	Oid				lang_handler_oid = InvalidOid;
@@ -2957,7 +2977,12 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 	if (result_cstr != NULL)
 	{
 		if (proc != NULL && proc->cache != NULL)
+		{
 			proc->cache->pass_user_types_as_bytes = false;
+			proc->cache->preserve_numeric_precision = false;
+		}
+		if (preserve_numeric_out != NULL)
+			*preserve_numeric_out = false;
 		return result_cstr;
 	}
 
@@ -2987,11 +3012,17 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 	Local<v8::Value> args[2];
 	args[0] = ToString(src);
 	int call_argc = 1;
-	Local<Object> meta;
+	/*
+	 * The handler always receives a meta object as arguments[1]; for inline
+	 * code blocks (DO) it only carries { inline: true } so the handler can
+	 * still report per-routine options such as preserve_numeric_precision.
+	 */
+	Local<Object> meta = Object::New(isolate);
+	args[1] = meta;
+	call_argc = 2;
 	if (proc != NULL && proc->cache != NULL)
 	{
 		plv8_proc_cache *cache = proc->cache;
-		meta = Object::New(isolate);
 		meta->Set(context, ToString("fn_oid"), Uint32::NewFromUnsigned(isolate, cache->fn_oid)).Check();
 		meta->Set(context, ToString("proname"), ToString(cache->proname)).Check();
 		meta->Set(context, ToString("rettype_oid"), Uint32::NewFromUnsigned(isolate, proc->rettype.typid)).Check();
@@ -3018,8 +3049,10 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 		meta->Set(context, ToString("argtype_oids"), arg_oids).Check();
 		meta->Set(context, ToString("argtype_categories"), arg_cats).Check();
 		meta->Set(context, ToString("argtype_lens"), arg_lens).Check();
-		args[1] = meta;
-		call_argc = 2;
+	}
+	else
+	{
+		meta->Set(context, ToString("inline"), v8::Boolean::New(isolate, true)).Check();
 	}
 
 	Local<v8::Value> transpiled = DoCall(context, fn, recv, call_argc, args, false);
@@ -3041,19 +3074,32 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 		PG_END_TRY();
 	}
 
-	if (proc != NULL && proc->cache != NULL)
 	{
 		bool pass_bytes = is_wasm_lang;
-		if (!meta.IsEmpty())
+		bool preserve_numeric = false;
+		Local<v8::Value> opt_val;
+		if (meta->Get(context, ToString("pass_user_types_as_bytes")).ToLocal(&opt_val) &&
+			!opt_val.IsEmpty() && opt_val->BooleanValue(isolate))
 		{
-			Local<v8::Value> opt_val;
-			if (meta->Get(context, ToString("pass_user_types_as_bytes")).ToLocal(&opt_val) &&
-				!opt_val.IsEmpty() && opt_val->BooleanValue(isolate))
-			{
-				pass_bytes = true;
-			}
+			pass_bytes = true;
 		}
-		proc->cache->pass_user_types_as_bytes = pass_bytes;
+		/*
+		 * preserve_numeric_precision: numeric values that cannot round-trip
+		 * through a JS double are converted to their exact text form instead
+		 * of a lossy Number (see ToScalarValue in plv8_type.cc).
+		 */
+		if (meta->Get(context, ToString("preserve_numeric_precision")).ToLocal(&opt_val) &&
+			!opt_val.IsEmpty() && opt_val->BooleanValue(isolate))
+		{
+			preserve_numeric = true;
+		}
+		if (proc != NULL && proc->cache != NULL)
+		{
+			proc->cache->pass_user_types_as_bytes = pass_bytes;
+			proc->cache->preserve_numeric_precision = preserve_numeric;
+		}
+		if (preserve_numeric_out != NULL)
+			*preserve_numeric_out = preserve_numeric;
 	}
 
 	CString str(transpiled);
@@ -3133,6 +3179,7 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate,
 			cache->function.Reset();
 			cache->nhandlers = 0;
 			cache->pass_user_types_as_bytes = false;
+			cache->preserve_numeric_precision = false;
 		}
 		else
 		{
@@ -3145,6 +3192,7 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate,
 		cache->prosrc = NULL;
 		cache->nhandlers = 0;
 		cache->pass_user_types_as_bytes = false;
+		cache->preserve_numeric_precision = false;
 	}
 
 	if (cache->function.IsEmpty())
@@ -4102,6 +4150,8 @@ Converter::ToValue(HeapTuple tuple)
 	Isolate		   *isolate = Isolate::GetCurrent();
     Local<Context>  context = isolate->GetCurrentContext();
 	Local<Object>	obj = Object::New(isolate);
+	Local<Array>	numeric_cols;
+	uint32_t		nnumeric = 0;
 
 	for (int c = 0; c < m_tupdesc->natts; c++)
 	{
@@ -4114,7 +4164,23 @@ Converter::ToValue(HeapTuple tuple)
 		datum = heap_getattr(tuple, c + 1, m_tupdesc, &isnull);
 
 		obj->Set(context, m_colnames[c], ::ToValue(datum, isnull, &m_coltypes[c])).Check();
+
+		/*
+		 * In preserve_numeric_precision mode numeric columns may be delivered
+		 * as exact text; record which columns are numeric in a hidden,
+		 * non-enumerable property so callers can tell them from strings.
+		 */
+		if (plv8_preserve_numeric_precision && m_coltypes[c].typid == NUMERICOID)
+		{
+			if (numeric_cols.IsEmpty())
+				numeric_cols = Array::New(isolate);
+			numeric_cols->Set(context, nnumeric++, m_colnames[c]).Check();
+		}
 	}
+
+	if (!numeric_cols.IsEmpty())
+		obj->DefineOwnProperty(context, ToString("__numeric_columns"), numeric_cols,
+							   static_cast<PropertyAttribute>(ReadOnly | DontEnum | DontDelete)).Check();
 
 	return obj;
 }

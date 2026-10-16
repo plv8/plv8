@@ -8533,24 +8533,124 @@ plv8_append_rtable_to_lateral_json(StringInfo lat_buf, List *rtable,
 
 		if (rte == skip_rte || rte->eref == NULL || rte->eref->aliasname == NULL)
 			continue;
-
-		PG_TRY();
-		{
+		if (rte->rtekind == RTE_SUBQUERY && rte->subquery == NULL)
+			continue;
+		if (rte->rtekind == RTE_JOIN &&
+			(rte->joinaliasvars == NIL ||
+			 list_length(rte->eref->colnames) != list_length(rte->joinaliasvars)))
+			continue;
+		if (rte->rtekind == RTE_RESULT
 #if PG_VERSION_NUM >= 180000
-			expandRTE(rte, rtindex, sublevels_up, VAR_RETURNING_DEFAULT, -1,
-					  false, &colnames, &colvars);
-#else
-			expandRTE(rte, rtindex, sublevels_up, -1,
-					  false, &colnames, &colvars);
+			|| rte->rtekind == RTE_GROUP
 #endif
-		}
-		PG_CATCH();
+			)
+			continue;
+
+		if (rte->rtekind == RTE_FUNCTION)
 		{
-			FlushErrorState();
-			colnames = NIL;
-			colvars = NIL;
+			bool can_expand = true;
+			ListCell *flc;
+
+			foreach(flc, rte->functions)
+			{
+				RangeTblFunction *rtfunc = (RangeTblFunction *) lfirst(flc);
+				if (rtfunc->funccolnames == NIL)
+				{
+					Oid funcrettype = InvalidOid;
+					TupleDesc tupdesc = NULL;
+					TypeFuncClass functypclass =
+						get_expr_result_type(rtfunc->funcexpr, &funcrettype, &tupdesc);
+
+					if (functypclass == TYPEFUNC_COMPOSITE ||
+						functypclass == TYPEFUNC_COMPOSITE_DOMAIN)
+					{
+						if (tupdesc == NULL || rtfunc->funccolcount > tupdesc->natts)
+						{
+							can_expand = false;
+							break;
+						}
+					}
+					else if (functypclass == TYPEFUNC_RECORD)
+					{
+						if (list_length(rtfunc->funccoltypes) != rtfunc->funccolcount)
+						{
+							can_expand = false;
+							break;
+						}
+					}
+					else if (functypclass != TYPEFUNC_SCALAR)
+					{
+						can_expand = false;
+						break;
+					}
+				}
+			}
+
+			if (!can_expand)
+			{
+				if (list_length(rte->functions) == 1)
+				{
+					RangeTblFunction *rtfunc = (RangeTblFunction *) linitial(rte->functions);
+					if (rtfunc->funcexpr != NULL && IsA(rtfunc->funcexpr, FuncExpr))
+					{
+						FuncExpr *fe = (FuncExpr *) rtfunc->funcexpr;
+						int fnargs = list_length(fe->args);
+						if (fnargs >= 1)
+						{
+							bool src_first = (fnargs == 1 ||
+											  plv8_is_source_type_node((Node *) linitial(fe->args)));
+							Node *snode = src_first
+								? (Node *) linitial(fe->args)
+								: (fnargs >= 2 ? (Node *) lsecond(fe->args) : NULL);
+							char *rsrc = plv8_extract_const_string(snode);
+							Plv8InferredEntry *inf = plv8_find_inferred_columns(rsrc);
+							if (inf != NULL &&
+								inf->ncols == list_length(rte->eref->colnames))
+							{
+								ListCell *clc;
+								int cidx = 0;
+								foreach(clc, rte->eref->colnames)
+								{
+									const char *cn = plv8_node_strval(lfirst(clc));
+									colnames = lappend(colnames, makeString(pstrdup(cn)));
+									colvars = lappend(colvars,
+													  makeVar(rtindex,
+															  cidx + 1,
+															  inf->cols[cidx].type_oid,
+															  inf->cols[cidx].typmod,
+															  inf->cols[cidx].collation_oid,
+															  sublevels_up));
+									cidx++;
+								}
+							}
+						}
+					}
+				}
+				if (colnames == NIL || colvars == NIL)
+					continue;
+			}
 		}
-		PG_END_TRY();
+
+		if (colnames == NIL || colvars == NIL)
+		{
+			PG_TRY();
+			{
+#if PG_VERSION_NUM >= 180000
+				expandRTE(rte, rtindex, sublevels_up, VAR_RETURNING_DEFAULT, -1,
+						  false, &colnames, &colvars);
+#else
+				expandRTE(rte, rtindex, sublevels_up, -1,
+						  false, &colnames, &colvars);
+#endif
+			}
+			PG_CATCH();
+			{
+				FlushErrorState();
+				colnames = NIL;
+				colvars = NIL;
+			}
+			PG_END_TRY();
+		}
 
 		if (colnames == NIL || colvars == NIL)
 			continue;

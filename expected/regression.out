@@ -53,3 +53,13 @@ SELECT test_array_buffer_int32_offset();
  \x090000000c000000
 (1 row)
 
+CREATE FUNCTION test_int4array_typed_return(a plv8_int4array) RETURNS plv8_int4array AS $$
+	return new Int32Array([a[0] + 1, a[1] + 1, a[2] + 1]);
+$$ LANGUAGE plv8;
+SELECT test_int4array_typed_return(ARRAY[10, 20, 30]);
+ test_int4array_typed_return 
+-----------------------------
+ {11,21,31}
+(1 row)
+
+DROP FUNCTION test_int4array_typed_return(plv8_int4array);

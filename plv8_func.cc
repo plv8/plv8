@@ -143,7 +143,7 @@ SetCallback(Handle<ObjectTemplate> obj, const char *name,
 	Isolate* isolate = Isolate::GetCurrent();
 	obj->Set(isolate, name,
 				FunctionTemplate::New(isolate, plv8_FunctionInvoker,
-					WrapCallback(func)));
+					WrapCallback(func)), attr);
 }
 
 class SubTranBlock
@@ -151,6 +151,7 @@ class SubTranBlock
 private:
 	ResourceOwner		m_resowner;
 	MemoryContext		m_mcontext;
+	bool				m_entered;
 public:
 	SubTranBlock();
 	void enter();
@@ -203,7 +204,7 @@ SPIResultToValue(int status)
 		Local<Array>	rows = Array::New(isolate, nrows);
 
 		for (int r = 0; r < nrows; r++)
-			rows->Set(context, r, conv.ToValue(SPI_tuptable->vals[r])).Check();
+			rows->CreateDataProperty(context, r, conv.ToValue(SPI_tuptable->vals[r])).Check();
 
 		result = rows;
 		break;
@@ -217,12 +218,14 @@ SPIResultToValue(int status)
 }
 
 SubTranBlock::SubTranBlock()
+	: m_resowner(NULL),
+	  m_mcontext(NULL),
+	  m_entered(false)
 {}
 
 void
 SubTranBlock::enter()
 {
-
 	if (!IsTransactionOrTransactionBlock())
 		throw js_error("out of transaction");
 
@@ -230,12 +233,16 @@ SubTranBlock::enter()
 	m_mcontext = CurrentMemoryContext;
 	BeginInternalSubTransaction(NULL);
 	MemoryContextSwitchTo(m_mcontext);
+	m_entered = true;
 }
 
 void
 SubTranBlock::exit(bool success)
 {
+	if (!m_entered)
+		return;
 
+	m_entered = false;
 	if (success)
 		ReleaseCurrentSubTransaction();
 	else
@@ -250,10 +257,16 @@ JSONObject::JSONObject()
 	Isolate* isolate = v8::Isolate::GetCurrent();
 	Handle<Context> context = isolate->GetCurrentContext();
 	Handle<Object> global = context->Global();
-	MaybeLocal<v8::Object> maybeJson = global->Get(context, v8::String::NewFromUtf8(isolate, "JSON").ToLocalChecked()).ToLocalChecked()->ToObject(isolate->GetCurrentContext());
-	if (maybeJson.IsEmpty())
+	TryCatch try_catch(isolate);
+	Local<v8::Value> json_val;
+	if (!global->Get(context, v8::String::NewFromUtf8Literal(isolate, "JSON")).ToLocal(&json_val) ||
+		json_val.IsEmpty() || !json_val->IsObject())
+	{
+		if (try_catch.HasCaught())
+			throw js_error(try_catch);
 		throw js_error("JSON not found");
-	m_json = maybeJson.ToLocalChecked();
+	}
+	m_json = Local<v8::Object>::Cast(json_val);
 }
 
 /*
@@ -264,13 +277,17 @@ JSONObject::Parse(Handle<v8::Value> str)
 {
 	Isolate* isolate = v8::Isolate::GetCurrent();
 	Handle<Context> context = isolate->GetCurrentContext();
-	Handle<Function> parse_func =
-		Handle<Function>::Cast(m_json->Get(context, v8::String::NewFromUtf8(isolate, "parse").ToLocalChecked()).ToLocalChecked());
-
-	if (parse_func.IsEmpty())
-		throw js_error("JSON.parse() not found");
-
 	TryCatch try_catch(isolate);
+	Local<v8::Value> parse_val;
+	if (!m_json->Get(context, v8::String::NewFromUtf8Literal(isolate, "parse")).ToLocal(&parse_val) ||
+		parse_val.IsEmpty() || !parse_val->IsFunction())
+	{
+		if (try_catch.HasCaught())
+			throw js_error(try_catch);
+		throw js_error("JSON.parse() not found");
+	}
+	Handle<Function> parse_func = Handle<Function>::Cast(parse_val);
+
 	MaybeLocal<v8::Value> value = parse_func->Call(context, m_json, 1, &str);
 	if (value.IsEmpty())
 		throw js_error(try_catch);
@@ -285,14 +302,18 @@ JSONObject::Stringify(Handle<v8::Value> val)
 {
 	Isolate* isolate = v8::Isolate::GetCurrent();
 	Handle<Context> context = isolate->GetCurrentContext();
-	Handle<Function> stringify_func =
-		Handle<Function>::Cast(m_json->Get(context, v8::String::NewFromUtf8(isolate, "stringify").ToLocalChecked()).ToLocalChecked());
-
-	if (stringify_func.IsEmpty())
-		throw js_error("JSON.stringify() not found");
-
 	TryCatch try_catch(isolate);
-	MaybeLocal<v8::Value> value = stringify_func->Call(isolate->GetCurrentContext(), m_json, 1, &val);
+	Local<v8::Value> stringify_val;
+	if (!m_json->Get(context, v8::String::NewFromUtf8Literal(isolate, "stringify")).ToLocal(&stringify_val) ||
+		stringify_val.IsEmpty() || !stringify_val->IsFunction())
+	{
+		if (try_catch.HasCaught())
+			throw js_error(try_catch);
+		throw js_error("JSON.stringify() not found");
+	}
+	Handle<Function> stringify_func = Handle<Function>::Cast(stringify_val);
+
+	MaybeLocal<v8::Value> value = stringify_func->Call(context, m_json, 1, &val);
 	if (value.IsEmpty())
 		throw js_error(try_catch);
 	return value.ToLocalChecked();
@@ -310,7 +331,7 @@ plv8_CompileWasmCached(const FunctionCallbackInfo<v8::Value>& args)
 	Local<v8::Value> bytes_arg;
 	if (args.Length() >= 2 && args[0]->IsString())
 	{
-		v8::String::Utf8Value key_utf8(isolate, args[0]->ToString(context).ToLocalChecked());
+		v8::String::Utf8Value key_utf8(isolate, args[0]);
 		if (*key_utf8 == nullptr || key_utf8.length() == 0)
 			throw js_error("plv8.compile_wasm_cached cache_key must be non-empty");
 		bytes_arg = args[1];
@@ -436,44 +457,52 @@ SetupGlobalFunctions(Handle<ObjectTemplate> global)
 void
 SetupPrepFunctions(Handle<ObjectTemplate> templ)
 {
-	templ->SetInternalFieldCount(2);
-	SetCallback(templ, "cursor", plv8_PlanCursor);
-	SetCallback(templ, "execute", plv8_PlanExecute);
-	SetCallback(templ, "free", plv8_PlanFree);
+	PropertyAttribute attrFull =
+		PropertyAttribute(ReadOnly | DontEnum | DontDelete);
+
+	templ->SetInternalFieldCount(3);
+	SetCallback(templ, "cursor", plv8_PlanCursor, attrFull);
+	SetCallback(templ, "execute", plv8_PlanExecute, attrFull);
+	SetCallback(templ, "free", plv8_PlanFree, attrFull);
 }
 
 void
 SetupCursorFunctions(Handle<ObjectTemplate> templ)
 {
+	PropertyAttribute attrFull =
+		PropertyAttribute(ReadOnly | DontEnum | DontDelete);
+
 	templ->SetInternalFieldCount(1);
-	SetCallback(templ, "fetch", plv8_CursorFetch);
-	SetCallback(templ, "move", plv8_CursorMove);
-	SetCallback(templ, "close", plv8_CursorClose);
+	SetCallback(templ, "fetch", plv8_CursorFetch, attrFull);
+	SetCallback(templ, "move", plv8_CursorMove, attrFull);
+	SetCallback(templ, "close", plv8_CursorClose, attrFull);
 }
 
 void
 SetupWindowFunctions(Handle<ObjectTemplate> templ)
 {
 	Isolate *isolate = Isolate::GetCurrent();
+	PropertyAttribute attrFull =
+		PropertyAttribute(ReadOnly | DontEnum | DontDelete);
 
 	/* We store fcinfo here. */
 	templ->SetInternalFieldCount(1);
 
 	/* Functions. */
-	SetCallback(templ, "get_partition_local", plv8_WinGetPartitionLocal);
-	SetCallback(templ, "set_partition_local", plv8_WinSetPartitionLocal);
-	SetCallback(templ, "get_current_position", plv8_WinGetCurrentPosition);
-	SetCallback(templ, "get_partition_row_count", plv8_WinGetPartitionRowCount);
-	SetCallback(templ, "set_mark_position", plv8_WinSetMarkPosition);
-	SetCallback(templ, "rows_are_peers", plv8_WinRowsArePeers);
-	SetCallback(templ, "get_func_arg_in_partition", plv8_WinGetFuncArgInPartition);
-	SetCallback(templ, "get_func_arg_in_frame", plv8_WinGetFuncArgInFrame);
-	SetCallback(templ, "get_func_arg_current", plv8_WinGetFuncArgCurrent);
+	SetCallback(templ, "get_partition_local", plv8_WinGetPartitionLocal, attrFull);
+	SetCallback(templ, "set_partition_local", plv8_WinSetPartitionLocal, attrFull);
+	SetCallback(templ, "get_current_position", plv8_WinGetCurrentPosition, attrFull);
+	SetCallback(templ, "get_partition_row_count", plv8_WinGetPartitionRowCount, attrFull);
+	SetCallback(templ, "set_mark_position", plv8_WinSetMarkPosition, attrFull);
+	SetCallback(templ, "rows_are_peers", plv8_WinRowsArePeers, attrFull);
+	SetCallback(templ, "get_func_arg_in_partition", plv8_WinGetFuncArgInPartition, attrFull);
+	SetCallback(templ, "get_func_arg_in_frame", plv8_WinGetFuncArgInFrame, attrFull);
+	SetCallback(templ, "get_func_arg_current", plv8_WinGetFuncArgCurrent, attrFull);
 
 	/* Constants for get_func_in_XXX() */
-	templ->Set(v8::String::NewFromUtf8(isolate, "SEEK_CURRENT").ToLocalChecked(), Int32::New(isolate, WINDOW_SEEK_CURRENT));
-	templ->Set(v8::String::NewFromUtf8(isolate, "SEEK_HEAD").ToLocalChecked(), Int32::New(isolate, WINDOW_SEEK_HEAD));
-	templ->Set(v8::String::NewFromUtf8(isolate, "SEEK_TAIL").ToLocalChecked(), Int32::New(isolate, WINDOW_SEEK_TAIL));
+	templ->Set(v8::String::NewFromUtf8(isolate, "SEEK_CURRENT").ToLocalChecked(), Int32::New(isolate, WINDOW_SEEK_CURRENT), attrFull);
+	templ->Set(v8::String::NewFromUtf8(isolate, "SEEK_HEAD").ToLocalChecked(), Int32::New(isolate, WINDOW_SEEK_HEAD), attrFull);
+	templ->Set(v8::String::NewFromUtf8(isolate, "SEEK_TAIL").ToLocalChecked(), Int32::New(isolate, WINDOW_SEEK_TAIL), attrFull);
 }
 
 /*
@@ -562,13 +591,14 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 {
 	MemoryContext	ctx = CurrentMemoryContext;
 	Isolate *		isolate = args.GetIsolate();
+	Local<Context>	context = isolate->GetCurrentContext();
 
 	if (args.Length() < 2) {
 		args.GetReturnValue().Set(isolate->ThrowException(v8::String::NewFromUtf8(args.GetIsolate(), "usage: plv8.elog(elevel, ...)").ToLocalChecked()));
 		return;
 	}
 
-	int	elevel = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+	int	elevel = Plv8ToInt32(isolate, context, args[0]);
 	switch (elevel)
 	{
 	case DEBUG5:
@@ -599,8 +629,7 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 			args.GetReturnValue().Set(Undefined(isolate));
 			return;
 		}
-		
-		CString::toStdString(args[i],buf);
+
 		msg += buf;
 	}
 
@@ -637,7 +666,7 @@ plv8_Elog(const FunctionCallbackInfo<v8::Value>& args)
 static Datum
 value_get_datum(Handle<v8::Value> value, Oid typid, char *isnull)
 {
-	if (value->IsUndefined() || value->IsNull())
+	if (value.IsEmpty() || value->IsUndefined() || value->IsNull())
 	{
 		*isnull = 'n';
 		return (Datum) 0;
@@ -645,19 +674,56 @@ value_get_datum(Handle<v8::Value> value, Oid typid, char *isnull)
 	else
 	{
 		plv8_type	typinfo = { 0 };
-		bool		IsNull;
-		Datum		datum;
+		bool		IsNull = false;
+		Datum		datum = (Datum) 0;
+		bool		has_js_err = false;
+		bool		has_pg_err = false;
+		js_error	js_err;
+		pg_error	pg_err;
 
 		plv8_fill_type(&typinfo, typid);
 		try
 		{
 			datum = ToDatum(value, &IsNull, &typinfo);
 		}
-		catch (js_error& e){ e.rethrow(); }
-		catch (pg_error& e){ e.rethrow(); }
+		catch (js_error& e)
+		{
+			js_err = e;
+			has_js_err = true;
+		}
+		catch (pg_error& e)
+		{
+			pg_err = e;
+			has_pg_err = true;
+		}
+		if (has_js_err)
+			js_err.rethrow();
+		if (has_pg_err)
+			pg_err.rethrow();
 		*isnull = (IsNull ?  'n' : ' ');
 		return datum;
 	}
+}
+
+static Handle<v8::Value>
+param_get_element(Isolate *isolate, Local<Context> context, Handle<Array> params, int index)
+{
+	Handle<v8::Value>	param;
+	bool				has_js_err = false;
+	js_error			js_err;
+
+	try
+	{
+		param = Plv8GetElement(isolate, context, params, index);
+	}
+	catch (js_error& e)
+	{
+		js_err = e;
+		has_js_err = true;
+	}
+	if (has_js_err)
+		js_err.rethrow();
+	return param;
 }
 
 static int
@@ -688,7 +754,7 @@ plv8_execute_params(const char *sql, Handle<Array> params)
 				parstate.numParams, nparam);
 	for (int i = 0; i < nparam; i++)
 	{
-		Handle<v8::Value>	param = params->Get(context, i).ToLocalChecked();
+		Handle<v8::Value>	param = param_get_element(isolate, context, params, i);
 		values[i] = value_get_datum(param,
 								  parstate.paramTypes[i], &nulls[i]);
 	}
@@ -708,7 +774,7 @@ convertArgsToArray(const FunctionCallbackInfo<v8::Value> &args, int start, int d
 	Local<Array> result = Array::New(args.GetIsolate(), args.Length() - start);
 	for (int i = start; i < args.Length(); i++)
 	{
-		result->Set(context, i - downshift, args[i]).Check();
+		result->CreateDataProperty(context, i - downshift, args[i]).Check();
 	}
 	return result;
 }
@@ -789,7 +855,7 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 
 	for (int i = 0; i < arraylen; i++)
 	{
-		CString			typestr(array->Get(context, i).ToLocalChecked());
+		CString			typestr(Plv8GetElement(isolate, context, array, i));
 		typestrs[i] = pstrdup(typestr);
 	}
 
@@ -834,9 +900,46 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 	Local<v8::Object> result = templ->NewInstance(isolate->GetCurrentContext()).ToLocalChecked();
 	result->SetInternalField(0, External::New(isolate, saved, v8::kExternalPointerTypeTagDefault));
 	result->SetInternalField(1, External::New(isolate, parstate, v8::kExternalPointerTypeTagDefault));
+	result->SetInternalField(2, Int32::New(isolate, 0));
 
 	args.GetReturnValue().Set(result);
 }
+
+static void
+check_plan_this(const FunctionCallbackInfo<v8::Value> &args)
+{
+	Isolate *isolate = args.GetIsolate();
+	Handle<v8::Object> self = args.This();
+
+	if (current_context == nullptr || current_context->plan_ftmpl.IsEmpty() ||
+		self.IsEmpty() || !current_context->plan_ftmpl.Get(isolate)->HasInstance(self) ||
+		self->InternalFieldCount() < 3 ||
+		!self->GetInternalField(0).As<v8::Value>()->IsExternal() ||
+		!self->GetInternalField(1).As<v8::Value>()->IsExternal())
+	{
+		throw js_error("unexpected type");
+	}
+}
+
+class PlanInUseGuard
+{
+private:
+	Isolate *m_isolate;
+	Local<v8::Object> m_self;
+
+public:
+	PlanInUseGuard(Isolate *isolate, Local<v8::Object> self)
+		: m_isolate(isolate), m_self(self)
+	{
+		int32_t in_use = m_self->GetInternalField(2).As<v8::Int32>()->Value();
+		m_self->SetInternalField(2, Int32::New(m_isolate, in_use + 1));
+	}
+	~PlanInUseGuard()
+	{
+		int32_t in_use = m_self->GetInternalField(2).As<v8::Int32>()->Value();
+		m_self->SetInternalField(2, Int32::New(m_isolate, in_use - 1));
+	}
+};
 
 /*
  * plan.cursor(args, ...)
@@ -854,6 +957,9 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 	Handle<Array>		params;
 	Portal				cursor;
 	plv8_param_state   *parstate = NULL;
+
+	check_plan_this(args);
+	PlanInUseGuard		in_use_guard(isolate, self);
 
 	plan = static_cast<SPIPlanPtr>(
 			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
@@ -910,7 +1016,7 @@ plv8_PlanCursor(const FunctionCallbackInfo<v8::Value> &args)
 		subtran.enter();
 		for (int i = 0; i < nparam; i++)
 		{
-			Handle<v8::Value>	param = params->Get(context, i).ToLocalChecked();
+			Handle<v8::Value>	param = param_get_element(isolate, context, params, i);
 			Oid					typid;
 
 			if (parstate)
@@ -966,6 +1072,8 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 	Isolate *		isolate = args.GetIsolate();
 	Local<Context>		context = isolate->GetCurrentContext();
 
+	check_plan_this(args);
+	PlanInUseGuard		in_use_guard(isolate, self);
 
 	plan = static_cast<SPIPlanPtr>(
 			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
@@ -1001,6 +1109,11 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 		throw js_error(pstrdup(buf.data));
 	}
 
+	if (plan == NULL)
+	{
+		throw js_error("plan unexpectedly null");
+	}
+
 	if (nparam > 0)
 	{
 		values = (Datum *) palloc(sizeof(Datum) * nparam);
@@ -1012,7 +1125,7 @@ plv8_PlanExecute(const FunctionCallbackInfo<v8::Value> &args)
 		subtran.enter();
 		for (int i = 0; i < nparam; i++)
 		{
-			Handle<v8::Value>	param = params->Get(context, i).ToLocalChecked();
+			Handle<v8::Value>	param = param_get_element(isolate, context, params, i);
 			Oid					typid;
 
 			if (parstate)
@@ -1057,6 +1170,10 @@ plv8_PlanFree(const FunctionCallbackInfo<v8::Value> &args)
 	plv8_param_state   *parstate;
 	int					status = 0;
 
+	check_plan_this(args);
+	if (self->GetInternalField(2).As<v8::Int32>()->Value() != 0)
+		throw js_error("cannot free a plan in use");
+
 	plan = static_cast<SPIPlanPtr>(
 			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
@@ -1075,6 +1192,20 @@ plv8_PlanFree(const FunctionCallbackInfo<v8::Value> &args)
 	args.GetReturnValue().Set(Int32::New(isolate, status));
 }
 
+static void
+check_cursor_this(const FunctionCallbackInfo<v8::Value> &args)
+{
+	Isolate *isolate = args.GetIsolate();
+	Handle<v8::Object> self = args.This();
+
+	if (current_context == nullptr || current_context->cursor_ftmpl.IsEmpty() ||
+		self.IsEmpty() || !current_context->cursor_ftmpl.Get(isolate)->HasInstance(self) ||
+		self->InternalFieldCount() < 1)
+	{
+		throw js_error("cannot find cursor");
+	}
+}
+
 /*
  * cursor.fetch([n])
  */
@@ -1085,9 +1216,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 	Handle<Context> context = isolate->GetCurrentContext();
 	Handle<v8::Object>	self = args.This();
 
-	if (self->InternalFieldCount() == 0) {
-		throw js_error("cannot find cursor");
-	}
+	check_cursor_this(args);
 
 	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
@@ -1101,7 +1230,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 	if (args.Length() >= 1)
 	{
 		wantarray = true;
-		nfetch = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+		nfetch = Plv8ToInt32(isolate, context, args[0]);
 
 		if (nfetch < 0)
 		{
@@ -1139,7 +1268,7 @@ plv8_CursorFetch(const FunctionCallbackInfo<v8::Value> &args)
 		{
 			Handle<Array> array = Array::New(isolate);
 			for (unsigned int i = 0; i < SPI_processed; i++)
-				array->Set(context, i, conv.ToValue(SPI_tuptable->vals[i])).Check();
+				array->CreateDataProperty(context, i, conv.ToValue(SPI_tuptable->vals[i])).Check();
 			args.GetReturnValue().Set(array);
 			SPI_freetuptable(SPI_tuptable);
 			return;
@@ -1157,7 +1286,11 @@ static void
 plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate*			isolate = args.GetIsolate();
+	Local<Context>		context = isolate->GetCurrentContext();
 	Handle<v8::Object>	self = args.This();
+
+	check_cursor_this(args);
+
 	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
 	int					nmove = 1;
@@ -1172,7 +1305,7 @@ plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args)
 		return;
 	}
 
-	nmove = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+	nmove = Plv8ToInt32(isolate, context, args[0]);
 	if (nmove < 0)
 	{
 		nmove = -nmove;
@@ -1203,6 +1336,9 @@ static void
 plv8_CursorClose(const FunctionCallbackInfo<v8::Value> &args)
 {
 	Handle<v8::Object>	self = args.This();
+
+	check_cursor_this(args);
+
 	CString				cname(self->GetInternalField(0).As<v8::Value>());
 	Portal				cursor = SPI_cursor_find(cname);
 	SubTranBlock		subtran;
@@ -1227,23 +1363,39 @@ plv8_CursorClose(const FunctionCallbackInfo<v8::Value> &args)
 	args.GetReturnValue().Set(Int32::New(args.GetIsolate(), cursor ? 1 : 0));
 }
 
+static bool
+is_valid_plv8_this(Isolate *isolate, Handle<v8::Object> self)
+{
+	if (self.IsEmpty() || self->InternalFieldCount() < PLV8_INTNL_MAX)
+		return false;
+	if (current_context != nullptr && !current_context->plv8_obj.IsEmpty())
+		return self->StrictEquals(current_context->plv8_obj.Get(isolate));
+	return true;
+}
+
 /*
  * plv8.return_next(retval)
  */
 static void
 plv8_ReturnNext(const FunctionCallbackInfo<v8::Value>& args)
 {
+	Isolate *isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
-	Handle<v8::Value>	conv_value = self->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
 
-	if (!conv_value->IsExternal())
+	if (!is_valid_plv8_this(isolate, self))
+		throw js_error("return_next called in context that cannot accept a set");
+
+	Handle<v8::Value>	conv_value = self->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
+	Handle<v8::Value>	tupstore_value = self->GetInternalField(PLV8_INTNL_TUPSTORE).As<v8::Value>();
+
+	if (!conv_value->IsExternal() || !tupstore_value->IsExternal())
 		throw js_error("return_next called in context that cannot accept a set");
 
 	Converter *conv = static_cast<Converter *>(
 			Handle<External>::Cast(conv_value)->Value(v8::kExternalPointerTypeTagDefault));
 
 	Tuplestorestate *tupstore = static_cast<Tuplestorestate *>(
-			self->GetInternalField(PLV8_INTNL_TUPSTORE).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
+			Handle<External>::Cast(tupstore_value)->Value(v8::kExternalPointerTypeTagDefault));
 
 	conv->ToDatum(args[0], tupstore);
 
@@ -1371,6 +1523,10 @@ plv8_GetWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate*			isolate = args.GetIsolate();
 	Handle<v8::Object>	self = args.This();
+
+	if (!is_valid_plv8_this(isolate, self))
+		throw js_error("get_window_object called in wrong context");
+
 	Handle<v8::Value>	fcinfo_value =
 			self->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>();
 
@@ -1384,23 +1540,53 @@ plv8_GetWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 	args.GetReturnValue().Set(js_winobj);
 }
 
+static FunctionCallInfo
+check_window_this(const FunctionCallbackInfo<v8::Value>& args)
+{
+	Isolate *isolate = args.GetIsolate();
+	Handle<v8::Object> self = args.This();
+
+	if (current_context == nullptr || current_context->window_ftmpl.IsEmpty() ||
+		self.IsEmpty() || !current_context->window_ftmpl.Get(isolate)->HasInstance(self) ||
+		self->InternalFieldCount() < 1)
+	{
+		throw js_error("window function api called with wrong object");
+	}
+
+	Handle<v8::Value> field0 = self->GetInternalField(0).As<v8::Value>();
+	if (field0.IsEmpty() || !field0->IsExternal())
+		throw js_error("window function api called with wrong object");
+
+	if (!current_context->plv8_obj.IsEmpty())
+	{
+		Local<v8::Object> plv8_obj = current_context->plv8_obj.Get(isolate);
+		if (plv8_obj->InternalFieldCount() < PLV8_INTNL_MAX ||
+			!field0->StrictEquals(plv8_obj->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>()))
+		{
+			throw js_error("window function api called with wrong object");
+		}
+	}
+
+	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
+		field0.As<External>()->Value(v8::kExternalPointerTypeTagDefault));
+	if (fcinfo == NULL)
+		throw js_error("window function api called with wrong object");
+
+	return fcinfo;
+}
+
 /*
  * Short-cut routine for window function API
  */
 static inline WindowObject
 plv8_MyWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 {
-	Handle<v8::Object>	self = args.This();
 	/* fcinfo is embedded in the internal field.  See plv8_GetWindowObject() */
-	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
-			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
-
-	if (fcinfo == NULL)
-		throw js_error("window function api called with wrong object");
+	FunctionCallInfo fcinfo = check_window_this(args);
 
 	WindowObject winobj = PG_WINDOW_OBJECT();
 
-	if (!winobj)
+	if (!WindowObjectIsValid(winobj))
 		throw js_error("window function api called with wrong object");
 	return winobj;
 }
@@ -1413,12 +1599,7 @@ plv8_MyWindowObject(const FunctionCallbackInfo<v8::Value>& args)
 static inline plv8_type *
 plv8_MyArgType(const FunctionCallbackInfo<v8::Value>& args, int argno)
 {
-	Handle<v8::Object>	self = args.This();
-	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
-			self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
-
-	if (fcinfo == NULL)
-		throw js_error("window function api called with wrong object");
+	FunctionCallInfo fcinfo = check_window_this(args);
 
 	/* This is safe to call in C++ context (without PG_TRY). */
 	return get_plv8_type(fcinfo, argno);
@@ -1433,6 +1614,7 @@ static void
 plv8_WinGetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate*		isolate = args.GetIsolate();
+	Local<Context>	context = isolate->GetCurrentContext();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	size_t			size;
 	window_storage *storage;
@@ -1440,7 +1622,7 @@ plv8_WinGetPartitionLocal(const FunctionCallbackInfo<v8::Value>& args)
 	if (args.Length() < 1)
 		size = 1000; /* default 1K */
 	else {
-		const int input_size = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+		const int input_size = Plv8ToInt32(isolate, context, args[0]);
 		if (input_size < 0) {
 			args.GetReturnValue().Set(isolate->ThrowException(v8::String::NewFromUtf8(args.GetIsolate(), "allocation size cannot be negative").ToLocalChecked()));
 			return;
@@ -1577,12 +1759,13 @@ static void
 plv8_WinSetMarkPosition(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate*		isolate = args.GetIsolate();
+	Local<Context>	context = isolate->GetCurrentContext();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	if (args.Length() < 1) {
                 args.GetReturnValue().Set(Undefined(isolate));
 		return;
         }
-	int64		markpos = args[0]->IntegerValue(isolate->GetCurrentContext()).ToChecked();
+	int64		markpos = Plv8ToInteger(isolate, context, args[0]);
 
 	PG_TRY();
 	{
@@ -1604,13 +1787,14 @@ static void
 plv8_WinRowsArePeers(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate*		isolate = args.GetIsolate();
+	Local<Context>	context = isolate->GetCurrentContext();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	if (args.Length() < 2) {
                 args.GetReturnValue().Set(Undefined(isolate));
 		return;
 	}
-	int64		pos1 = args[0]->IntegerValue(isolate->GetCurrentContext()).ToChecked();
-	int64		pos2 = args[1]->IntegerValue(isolate->GetCurrentContext()).ToChecked();
+	int64		pos1 = Plv8ToInteger(isolate, context, args[0]);
+	int64		pos2 = Plv8ToInteger(isolate, context, args[1]);
 	bool		res = false;
 
 	PG_TRY();
@@ -1633,13 +1817,14 @@ static void
 plv8_WinGetFuncArgInPartition(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate*		isolate = args.GetIsolate();
+	Local<Context>	context = isolate->GetCurrentContext();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	/* Since we return undefined in "isout" case, throw if arg isn't enough. */
 	if (args.Length() < 4)
 		throw js_error("argument not enough");
-	int			argno = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
-	int			relpos = args[1]->Int32Value(isolate->GetCurrentContext()).ToChecked();
-	int			seektype = args[2]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+	int			argno = Plv8ToInt32(isolate, context, args[0]);
+	int			relpos = Plv8ToInt32(isolate, context, args[1]);
+	int			seektype = Plv8ToInt32(isolate, context, args[2]);
 	bool		set_mark = args[3]->BooleanValue(isolate);
 	bool		isnull, isout;
 	Datum		res;
@@ -1678,13 +1863,14 @@ static void
 plv8_WinGetFuncArgInFrame(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate*		isolate = args.GetIsolate();
+	Local<Context>	context = isolate->GetCurrentContext();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	/* Since we return undefined in "isout" case, throw if arg isn't enough. */
 	if (args.Length() < 4)
 		throw js_error("argument not enough");
-	int			argno = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
-	int			relpos = args[1]->Int32Value(isolate->GetCurrentContext()).ToChecked();
-	int			seektype = args[2]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+	int			argno = Plv8ToInt32(isolate, context, args[0]);
+	int			relpos = Plv8ToInt32(isolate, context, args[1]);
+	int			seektype = Plv8ToInt32(isolate, context, args[2]);
 	bool		set_mark = args[3]->BooleanValue(isolate);
 	bool		isnull, isout;
 	Datum		res;
@@ -1723,12 +1909,13 @@ static void
 plv8_WinGetFuncArgCurrent(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate*		isolate = args.GetIsolate();
+	Local<Context>	context = isolate->GetCurrentContext();
 	WindowObject	winobj = plv8_MyWindowObject(args);
 	if (args.Length() < 1) {
                 args.GetReturnValue().Set(Undefined(isolate));
 		return;
         }
-	int			argno = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
+	int			argno = Plv8ToInt32(isolate, context, args[0]);
 	bool		isnull;
 	Datum		res;
 
@@ -1909,6 +2096,13 @@ plv8_ExpectedColumns(const FunctionCallbackInfo<v8::Value>& args)
 	Isolate *isolate = args.GetIsolate();
 	Local<Context> context = isolate->GetCurrentContext();
 	Handle<v8::Object> self = args.This();
+
+	if (!is_valid_plv8_this(isolate, self))
+	{
+		args.GetReturnValue().Set(Null(isolate));
+		return;
+	}
+
 	Handle<v8::Value> conv_value = self->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
 
 	if (!conv_value->IsExternal())
@@ -1949,13 +2143,13 @@ plv8_ExpectedColumns(const FunctionCallbackInfo<v8::Value>& args)
 		PG_END_TRY();
 
 		Local<Object> col_obj = Object::New(isolate);
-		col_obj->Set(context, ToString("name"), ToString(NameStr(attr->attname))).Check();
-		col_obj->Set(context, ToString("type_oid"), Uint32::NewFromUnsigned(isolate, attr->atttypid)).Check();
-		col_obj->Set(context, ToString("typmod"), Int32::New(isolate, attr->atttypmod)).Check();
-		col_obj->Set(context, ToString("collation_oid"), Uint32::NewFromUnsigned(isolate, attr->attcollation)).Check();
-		col_obj->Set(context, ToString("type_sql"), ToString(type_sql ? type_sql : "text")).Check();
+		col_obj->CreateDataProperty(context, ToString("name"), ToString(NameStr(attr->attname))).Check();
+		col_obj->CreateDataProperty(context, ToString("type_oid"), Uint32::NewFromUnsigned(isolate, attr->atttypid)).Check();
+		col_obj->CreateDataProperty(context, ToString("typmod"), Int32::New(isolate, attr->atttypmod)).Check();
+		col_obj->CreateDataProperty(context, ToString("collation_oid"), Uint32::NewFromUnsigned(isolate, attr->attcollation)).Check();
+		col_obj->CreateDataProperty(context, ToString("type_sql"), ToString(type_sql ? type_sql : "text")).Check();
 
-		arr->Set(context, out_idx++, col_obj).Check();
+		arr->CreateDataProperty(context, out_idx++, col_obj).Check();
 	}
 
 	args.GetReturnValue().Set(arr);
@@ -1973,9 +2167,14 @@ plv8_ReturnQuery(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate *isolate = args.GetIsolate();
 	Handle<v8::Object> self = args.This();
-	Handle<v8::Value> conv_value = self->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
 
-	if (!conv_value->IsExternal())
+	if (!is_valid_plv8_this(isolate, self))
+		throw js_error("return_query called in context that cannot accept a set");
+
+	Handle<v8::Value> conv_value = self->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
+	Handle<v8::Value> tupstore_value = self->GetInternalField(PLV8_INTNL_TUPSTORE).As<v8::Value>();
+
+	if (!conv_value->IsExternal() || !tupstore_value->IsExternal())
 		throw js_error("return_query called in context that cannot accept a set");
 
 	if (args.Length() < 1 || args[0]->IsUndefined() || args[0]->IsNull())
@@ -1984,7 +2183,7 @@ plv8_ReturnQuery(const FunctionCallbackInfo<v8::Value>& args)
 	Converter *conv = static_cast<Converter *>(
 		Handle<External>::Cast(conv_value)->Value(v8::kExternalPointerTypeTagDefault));
 	Tuplestorestate *tupstore = static_cast<Tuplestorestate *>(
-		self->GetInternalField(PLV8_INTNL_TUPSTORE).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
+		Handle<External>::Cast(tupstore_value)->Value(v8::kExternalPointerTypeTagDefault));
 
 	CString sql(args[0]);
 	Handle<Array> params;

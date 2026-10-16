@@ -74,6 +74,90 @@ public:
 	void log(int elevel, const char *msg_format = nullptr) noexcept;
 };
 
+static inline int32_t
+Plv8ToInt32(v8::Isolate *isolate, v8::Local<v8::Context> context, v8::Local<v8::Value> val)
+{
+	v8::TryCatch try_catch(isolate);
+	int32_t out = 0;
+	if (val.IsEmpty() || !val->Int32Value(context).To(&out))
+	{
+		if (try_catch.HasCaught())
+			throw js_error(try_catch);
+		throw js_error("failed to convert value to int32");
+	}
+	return out;
+}
+
+static inline uint32_t
+Plv8ToUint32(v8::Isolate *isolate, v8::Local<v8::Context> context, v8::Local<v8::Value> val)
+{
+	v8::TryCatch try_catch(isolate);
+	uint32_t out = 0;
+	if (val.IsEmpty() || !val->Uint32Value(context).To(&out))
+	{
+		if (try_catch.HasCaught())
+			throw js_error(try_catch);
+		throw js_error("failed to convert value to uint32");
+	}
+	return out;
+}
+
+static inline int64_t
+Plv8ToInteger(v8::Isolate *isolate, v8::Local<v8::Context> context, v8::Local<v8::Value> val)
+{
+	v8::TryCatch try_catch(isolate);
+	int64_t out = 0;
+	if (val.IsEmpty() || !val->IntegerValue(context).To(&out))
+	{
+		if (try_catch.HasCaught())
+			throw js_error(try_catch);
+		throw js_error("failed to convert value to integer");
+	}
+	return out;
+}
+
+static inline double
+Plv8ToNumber(v8::Isolate *isolate, v8::Local<v8::Context> context, v8::Local<v8::Value> val)
+{
+	v8::TryCatch try_catch(isolate);
+	double out = 0.0;
+	if (val.IsEmpty() || !val->NumberValue(context).To(&out))
+	{
+		if (try_catch.HasCaught())
+			throw js_error(try_catch);
+		throw js_error("failed to convert value to number");
+	}
+	return out;
+}
+
+static inline v8::Local<v8::Value>
+Plv8GetElement(v8::Isolate *isolate, v8::Local<v8::Context> context, v8::Local<v8::Object> obj, uint32_t index)
+{
+	v8::TryCatch try_catch(isolate);
+	v8::Local<v8::Value> out;
+	if (obj.IsEmpty() || !obj->Get(context, index).ToLocal(&out))
+	{
+		if (try_catch.HasCaught())
+			throw js_error(try_catch);
+		throw js_error("failed to get array element");
+	}
+	return out;
+}
+
+static inline v8::Local<v8::Value>
+Plv8GetProperty(v8::Isolate *isolate, v8::Local<v8::Context> context, v8::Local<v8::Object> obj, v8::Local<v8::Value> key)
+{
+	v8::TryCatch try_catch(isolate);
+	v8::Local<v8::Value> out;
+	if (obj.IsEmpty() || key.IsEmpty() || !obj->Get(context, key).ToLocal(&out))
+	{
+		if (try_catch.HasCaught())
+			throw js_error(try_catch);
+		throw js_error("failed to get object property");
+	}
+	return out;
+}
+
 /*
  * pg_error represents ERROR in postgres.
  * Instances of the class should be thrown only in PG_CATCH block.
@@ -129,9 +213,13 @@ typedef struct plv8_context
 	v8::Persistent<v8::Context>			context;
 	v8::Persistent<v8::ObjectTemplate>	recv_templ;
 	v8::Persistent<v8::Context>			compile_context;
+	v8::Persistent<v8::FunctionTemplate> plan_ftmpl;
 	v8::Persistent<v8::ObjectTemplate>  plan_template;
+	v8::Persistent<v8::FunctionTemplate> cursor_ftmpl;
 	v8::Persistent<v8::ObjectTemplate>  cursor_template;
+	v8::Persistent<v8::FunctionTemplate> window_ftmpl;
 	v8::Persistent<v8::ObjectTemplate>  window_template;
+	v8::Persistent<v8::Object>          plv8_obj;
 	v8::Local<v8::Context> localContext() { return v8::Local<v8::Context>::New(isolate, context) ; }
 	bool 						is_dead;
 	bool						interrupted;
@@ -233,12 +321,15 @@ public:
 		if (WindowObjectIsValid(m_winobj))
 		{
 			v8::Isolate *isolate = v8::Isolate::GetCurrent();
-			m_plv8obj = v8::Handle<v8::Object>::Cast(
-					context->Global()->Get(context, v8::String::NewFromUtf8Literal(
-						isolate,
-						"plv8",
-						v8::NewStringType::kInternalized)).ToLocalChecked());
-			if (m_plv8obj.IsEmpty())
+			v8::Local<v8::Value> val;
+			if (!context->Global()->Get(context, v8::String::NewFromUtf8Literal(
+					isolate,
+					"plv8",
+					v8::NewStringType::kInternalized)).ToLocal(&val) ||
+				val.IsEmpty() || !val->IsObject())
+				throw js_error("plv8 object not found");
+			m_plv8obj = v8::Handle<v8::Object>::Cast(val);
+			if (m_plv8obj->InternalFieldCount() < PLV8_INTNL_MAX)
 				throw js_error("plv8 object not found");
 			/* Stash the current item, just in case of nested call */
 			m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>();
@@ -251,7 +342,8 @@ public:
 	~WindowFunctionSupport()
 	{
 		/* Restore the previous fcinfo if we saved. */
-		if (WindowObjectIsValid(m_winobj))
+		if (WindowObjectIsValid(m_winobj) && !m_plv8obj.IsEmpty() &&
+			m_plv8obj->InternalFieldCount() >= PLV8_INTNL_MAX)
 		{
 			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO, m_prev_fcinfo);
 		}
@@ -273,14 +365,17 @@ public:
 	SRFSupport(v8::Handle<v8::Context> context,
 			   Converter *conv, Tuplestorestate *tupstore)
 	{
-	    v8::Isolate *isolate = v8::Isolate::GetCurrent();
-	    v8::Local<v8::Value> m_val;
-	    if (!context->Global()->Get(context, v8::String::NewFromUtf8Literal(
-                isolate,
-                "plv8",
-                v8::NewStringType::kInternalized)).ToLocal(&m_val))
-            throw js_error("plv8 object not found");
-	    m_plv8obj = v8::Handle<v8::Object>::Cast(m_val);
+		v8::Isolate *isolate = v8::Isolate::GetCurrent();
+		v8::Local<v8::Value> m_val;
+		if (!context->Global()->Get(context, v8::String::NewFromUtf8Literal(
+				isolate,
+				"plv8",
+				v8::NewStringType::kInternalized)).ToLocal(&m_val) ||
+			m_val.IsEmpty() || !m_val->IsObject())
+			throw js_error("plv8 object not found");
+		m_plv8obj = v8::Handle<v8::Object>::Cast(m_val);
+		if (m_plv8obj->InternalFieldCount() < PLV8_INTNL_MAX)
+			throw js_error("plv8 object not found");
 		m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
 		m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE).As<v8::Value>();
 		m_plv8obj->SetInternalField(PLV8_INTNL_CONV,
@@ -291,8 +386,11 @@ public:
 	~SRFSupport()
 	{
 		/* Restore the previous items. */
-		m_plv8obj->SetInternalField(PLV8_INTNL_CONV, m_prev_conv);
-		m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, m_prev_tupstore);
+		if (!m_plv8obj.IsEmpty() && m_plv8obj->InternalFieldCount() >= PLV8_INTNL_MAX)
+		{
+			m_plv8obj->SetInternalField(PLV8_INTNL_CONV, m_prev_conv);
+			m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, m_prev_tupstore);
+		}
 	}
 };
 
@@ -330,18 +428,22 @@ public:
 				v8::NewStringType::kInternalized)).ToLocal(&val) &&
 			!val.IsEmpty() && val->IsObject())
 		{
-			m_plv8obj = v8::Local<v8::Object>::Cast(val);
-			m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
-			m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE).As<v8::Value>();
-			m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>();
-			m_plv8obj->SetInternalField(PLV8_INTNL_CONV, v8::Undefined(isolate));
-			m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, v8::Undefined(isolate));
-			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO, v8::Undefined(isolate));
+			v8::Local<v8::Object> obj = v8::Local<v8::Object>::Cast(val);
+			if (obj->InternalFieldCount() >= PLV8_INTNL_MAX)
+			{
+				m_plv8obj = obj;
+				m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
+				m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE).As<v8::Value>();
+				m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>();
+				m_plv8obj->SetInternalField(PLV8_INTNL_CONV, v8::Undefined(isolate));
+				m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, v8::Undefined(isolate));
+				m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO, v8::Undefined(isolate));
+			}
 		}
 	}
 	~HandlerExecutionScope()
 	{
-		if (!m_plv8obj.IsEmpty())
+		if (!m_plv8obj.IsEmpty() && m_plv8obj->InternalFieldCount() >= PLV8_INTNL_MAX)
 		{
 			m_plv8obj->SetInternalField(PLV8_INTNL_CONV, m_prev_conv);
 			m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE, m_prev_tupstore);

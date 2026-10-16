@@ -1926,9 +1926,13 @@ DisposePlv8ContextHandles(plv8_context *ctx)
 	ctx->context.Reset();
 	ctx->compile_context.Reset();
 	ctx->recv_templ.Reset();
+	ctx->plan_ftmpl.Reset();
 	ctx->plan_template.Reset();
+	ctx->cursor_ftmpl.Reset();
 	ctx->cursor_template.Reset();
+	ctx->window_ftmpl.Reset();
 	ctx->window_template.Reset();
+	ctx->plv8_obj.Reset();
 	ctx->microtask_queue = nullptr;
 }
 
@@ -3038,7 +3042,7 @@ CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		// return an array of records.
 		int	length = array->Length();
 		for (int i = 0; i < length; i++)
-			conv.ToDatum(array->Get(context, i).ToLocalChecked(), tupstore);
+			conv.ToDatum(Plv8GetElement(xenv->isolate, context, array, i), tupstore);
 	}
 	else
 	{
@@ -4459,6 +4463,7 @@ GetPlv8Context() {
 				my_context->microtask_queue);
 		}
 
+		new(&my_context->plv8_obj) Persistent<Object>();
 		{
 			Context::Scope role_cs(role_ctx);
 			char sec_buf[64];
@@ -4466,6 +4471,15 @@ GetPlv8Context() {
 			Local<v8::String> sec_tok = v8::String::NewFromUtf8(
 				isolate, sec_buf, NewStringType::kInternalized).ToLocalChecked();
 			role_ctx->SetSecurityToken(sec_tok);
+			Local<v8::Value> plv8_val;
+			if (role_ctx->Global()->Get(
+					role_ctx,
+					v8::String::NewFromUtf8Literal(
+						isolate, "plv8", NewStringType::kInternalized)).ToLocal(&plv8_val) &&
+				!plv8_val.IsEmpty() && plv8_val->IsObject())
+			{
+				my_context->plv8_obj.Reset(isolate, Local<Object>::Cast(plv8_val));
+			}
 		}
 
 		new(&my_context->context) Persistent<Context>();
@@ -4485,6 +4499,7 @@ GetPlv8Context() {
 		auto toStringAttr = static_cast<PropertyAttribute>(v8::ReadOnly | v8::DontEnum);
 		auto toStringSymbol = v8::Symbol::GetToStringTag(isolate);
 
+		new(&my_context->plan_ftmpl) Persistent<FunctionTemplate>();
 		new(&my_context->plan_template) Persistent<ObjectTemplate>();
 		Local<FunctionTemplate> base = FunctionTemplate::New(isolate);
 		Local<v8::String> planClassName = v8::String::NewFromUtf8Literal(isolate, "PreparedPlan",
@@ -4493,8 +4508,10 @@ GetPlv8Context() {
 		base->PrototypeTemplate()->Set(toStringSymbol, planClassName, toStringAttr);
 		templ = base->InstanceTemplate();
 		SetupPrepFunctions(templ);
+		my_context->plan_ftmpl.Reset(isolate, base);
 		my_context->plan_template.Reset(isolate, templ);
 
+		new(&my_context->cursor_ftmpl) Persistent<FunctionTemplate>();
 		new(&my_context->cursor_template) Persistent<ObjectTemplate>();
 		base = FunctionTemplate::New(isolate);
 		Local<v8::String> cursorClassName = v8::String::NewFromUtf8Literal(isolate, "Cursor",
@@ -4503,8 +4520,10 @@ GetPlv8Context() {
 		base->PrototypeTemplate()->Set(toStringSymbol, cursorClassName, toStringAttr);
 		templ = base->InstanceTemplate();
 		SetupCursorFunctions(templ);
+		my_context->cursor_ftmpl.Reset(isolate, base);
 		my_context->cursor_template.Reset(isolate, templ);
 
+		new(&my_context->window_ftmpl) Persistent<FunctionTemplate>();
 		new(&my_context->window_template) Persistent<ObjectTemplate>();
 		base = FunctionTemplate::New(isolate);
 		Local<v8::String> windowClassName = v8::String::NewFromUtf8Literal(isolate, "WindowObject",
@@ -4513,6 +4532,7 @@ GetPlv8Context() {
 		base->PrototypeTemplate()->Set(toStringSymbol, windowClassName, toStringAttr);
 		templ = base->InstanceTemplate();
 		SetupWindowFunctions(templ);
+		my_context->window_ftmpl.Reset(isolate, base);
 		my_context->window_template.Reset(isolate, templ);
 		/*
 		 * Need to register it before running any code, as the code
@@ -4648,12 +4668,14 @@ GetGlobalObjectTemplate(Isolate *isolate)
 
 	SetupPlv8Functions(plv8);
 	SetupGlobalFunctions(templ);
+	PropertyAttribute attrFull =
+		static_cast<PropertyAttribute>(v8::ReadOnly | v8::DontEnum | v8::DontDelete);
 	plv8->Set(v8::String::NewFromUtf8Literal(isolate, "version", NewStringType::kInternalized),
-			  v8::String::NewFromUtf8Literal(isolate, PLV8_VERSION));
+			  v8::String::NewFromUtf8Literal(isolate, PLV8_VERSION), attrFull);
 	plv8->Set(v8::String::NewFromUtf8Literal(isolate, "v8_version", NewStringType::kInternalized),
-			  v8::String::NewFromUtf8Literal(isolate, V8_VERSION_STRING));
+			  v8::String::NewFromUtf8Literal(isolate, V8_VERSION_STRING), attrFull);
 
-	templ->Set(v8::String::NewFromUtf8Literal(isolate, "plv8", NewStringType::kInternalized), plv8);
+	templ->Set(v8::String::NewFromUtf8Literal(isolate, "plv8", NewStringType::kInternalized), plv8, attrFull);
 
 	return handle_scope.Escape(templ);
 }
@@ -4664,7 +4686,11 @@ GetGlobalObjectTemplate(Isolate *isolate)
 plv8_type *
 get_plv8_type(PG_FUNCTION_ARGS, int argno)
 {
+	if (fcinfo == NULL || fcinfo->flinfo == NULL || fcinfo->flinfo->fn_extra == NULL)
+		throw js_error("window function api called with wrong object");
 	plv8_proc *proc = (plv8_proc *) fcinfo->flinfo->fn_extra;
+	if (proc->cache == NULL || argno < 0 || argno >= proc->cache->nargs)
+		throw js_error("argument number out of range");
 	return &proc->argtypes[argno];
 }
 
@@ -4764,7 +4790,13 @@ Converter::ToValue(HeapTuple tuple)
 
 		datum = heap_getattr(tuple, c + 1, m_tupdesc, &isnull);
 
-		obj->Set(context, m_colnames[c], ::ToValue(datum, isnull, &m_coltypes[c])).Check();
+		TryCatch try_catch(isolate);
+		if (!obj->CreateDataProperty(context, m_colnames[c], ::ToValue(datum, isnull, &m_coltypes[c])).FromMaybe(false))
+		{
+			if (try_catch.HasCaught())
+				throw js_error(try_catch);
+			throw js_error("failed to set tuple property");
+		}
 
 		/*
 		 * In preserve_numeric_precision mode numeric columns may be delivered
@@ -4775,7 +4807,7 @@ Converter::ToValue(HeapTuple tuple)
 		{
 			if (numeric_cols.IsEmpty())
 				numeric_cols = Array::New(isolate);
-			numeric_cols->Set(context, nnumeric++, m_colnames[c]).Check();
+			numeric_cols->CreateDataProperty(context, nnumeric++, m_colnames[c]).Check();
 		}
 	}
 
@@ -4797,24 +4829,21 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 
 	if (!m_is_scalar)
 	{
-		if (!value->IsObject())
+		if (value.IsEmpty() || !value->IsObject())
 			throw js_error("argument must be an object");
 		obj = Handle<Object>::Cast(value);
 		if (obj.IsEmpty())
 			throw js_error(try_catch);
-	}
 
-	/*
-	 * Use vector<char> instead of vector<bool> because <bool> version is
-	 * s specialized and different from bool[].
-	 */
-	Datum  *values = (Datum *) palloc(sizeof(Datum) * m_tupdesc->natts);
-	bool   *nulls = (bool *) palloc(sizeof(bool) * m_tupdesc->natts);
+		Handle<Array> names;
+		if (!obj->GetPropertyNames(context).ToLocal(&names))
+		{
+			if (try_catch.HasCaught())
+				throw js_error(try_catch);
+			throw js_error("failed to get property names");
+		}
 
-	if (!m_is_scalar)
-	{
-		Handle<Array> names = obj->GetPropertyNames(isolate->GetCurrentContext()).ToLocalChecked();
-
+		uint32_t nnames = names->Length();
 		for (int c = 0; c < m_tupdesc->natts; c++)
 		{
 			if (TupleDescAttr(m_tupdesc, c)->attisdropped)
@@ -4822,9 +4851,9 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 
 			bool found = false;
 			CString  colname(m_colnames[c]);
-			for (int d = 0; d < m_tupdesc->natts; d++)
+			for (uint32_t d = 0; d < (uint32_t) m_tupdesc->natts && d < nnames; d++)
 			{
-				CString fname(names->Get(context, d).ToLocalChecked());
+				CString fname(Plv8GetElement(isolate, context, names, d));
 				if (strcmp(colname, fname) == 0)
 				{
 					found = true;
@@ -4836,20 +4865,36 @@ Converter::ToDatum(Handle<v8::Value> value, Tuplestorestate *tupstore)
 		}
 	}
 
-	for (int c = 0; c < m_tupdesc->natts; c++)
-	{
-		/* Make sure dropped columns are skipped by backend code. */
-		if (TupleDescAttr(m_tupdesc, c)->attisdropped)
-		{
-			nulls[c] = true;
-			continue;
-		}
+	/*
+	 * Use vector<char> instead of vector<bool> because <bool> version is
+	 * s specialized and different from bool[].
+	 */
+	Datum  *values = (Datum *) palloc(sizeof(Datum) * m_tupdesc->natts);
+	bool   *nulls = (bool *) palloc(sizeof(bool) * m_tupdesc->natts);
 
-		Handle<v8::Value> attr = m_is_scalar ? value : obj->Get(context, m_colnames[c]).ToLocalChecked();
-		if (attr.IsEmpty() || attr->IsUndefined() || attr->IsNull())
-			nulls[c] = true;
-		else
-			values[c] = ::ToDatum(attr, &nulls[c], &m_coltypes[c]);
+	try
+	{
+		for (int c = 0; c < m_tupdesc->natts; c++)
+		{
+			/* Make sure dropped columns are skipped by backend code. */
+			if (TupleDescAttr(m_tupdesc, c)->attisdropped)
+			{
+				nulls[c] = true;
+				continue;
+			}
+
+			Handle<v8::Value> attr = m_is_scalar ? value : Plv8GetProperty(isolate, context, obj, m_colnames[c]);
+			if (attr.IsEmpty() || attr->IsUndefined() || attr->IsNull())
+				nulls[c] = true;
+			else
+				values[c] = ::ToDatum(attr, &nulls[c], &m_coltypes[c]);
+		}
+	}
+	catch (...)
+	{
+		pfree(values);
+		pfree(nulls);
+		throw;
 	}
 
 	if (tupstore)

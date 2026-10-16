@@ -49,6 +49,15 @@ plv8_int_option(struct config_generic *record) {
 	return *conf->variable;
 }
 
+bool
+plv8_bool_option(struct config_generic *record) {
+	if (record->vartype != PGC_BOOL)
+		elog(ERROR, "'%s' is not a bool", record->name);
+
+	auto *conf = (struct config_bool *) record;
+	return *conf->variable;
+}
+
 /*
  * Look up option NAME.  If it exists, return a pointer to its record,
  * else return NULL.

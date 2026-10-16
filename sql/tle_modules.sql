@@ -3,10 +3,8 @@
 
 SET client_min_messages = warning;
 DROP EXTENSION IF EXISTS plv8 CASCADE;
-DROP EXTENSION IF EXISTS pg_tle CASCADE;
 RESET client_min_messages;
 
-CREATE EXTENSION pg_tle;
 CREATE EXTENSION plv8;
 
 -- 1. Install versioned ES module packages in plv8.packages & plv8.modules (including multi-digit semver 1.9.0 vs 1.10.0)
@@ -260,9 +258,75 @@ SELECT plv8_call_admin_mod();
 SELECT plv8_req_admin_mod();
 \set ON_ERROR_STOP on
 RESET ROLE;
+
+-- 13. Test Row-Level Security (RLS) and SELECT privilege enforcement on plv8.modules
+INSERT INTO plv8.modules (path, source, is_trusted) VALUES
+    ('rls_public_mod', $$ export function pubVal() { return 'rls-public-ok'; } $$, true),
+    ('rls_hidden_mod', $$ export function hidVal() { return 'rls-hidden-secret'; } $$, true);
+
+CREATE FUNCTION plv8_call_rls_public() RETURNS text AS $$
+    const m = require('rls_public_mod');
+    return m.pubVal();
+$$ LANGUAGE plv8;
+
+CREATE FUNCTION plv8_call_rls_hidden() RETURNS text AS $$
+    const m = require('rls_hidden_mod');
+    return m.hidVal();
+$$ LANGUAGE plv8;
+
+GRANT EXECUTE ON FUNCTION plv8_call_rls_public() TO plv8_unpriv_tester;
+GRANT EXECUTE ON FUNCTION plv8_call_rls_hidden() TO plv8_unpriv_tester;
+
+ALTER TABLE plv8.modules ENABLE ROW LEVEL SECURITY;
+CREATE POLICY plv8_modules_rls_pol ON plv8.modules
+    FOR SELECT TO plv8_unpriv_tester
+    USING (path <> 'rls_hidden_mod');
+
+SET ROLE plv8_unpriv_tester;
+SELECT plv8_call_rls_public();
+\set ON_ERROR_STOP off
+SELECT plv8_call_rls_hidden();
+\set ON_ERROR_STOP on
+RESET ROLE;
+
+DROP POLICY plv8_modules_rls_pol ON plv8.modules;
+ALTER TABLE plv8.modules DISABLE ROW LEVEL SECURITY;
+
+-- Verify revoking SELECT on plv8.modules blocks module resolution for unprivileged user
+REVOKE SELECT ON plv8.modules FROM PUBLIC, plv8_unpriv_tester;
+DELETE FROM plv8.modules WHERE path = 'rls_public_mod';
+INSERT INTO plv8.modules (path, source, is_trusted) VALUES
+    ('rls_public_mod', $$ export function pubVal() { return 'rls-public-v2'; } $$, true);
+
+SET ROLE plv8_unpriv_tester;
+\set ON_ERROR_STOP off
+SELECT plv8_call_rls_public();
+\set ON_ERROR_STOP on
+RESET ROLE;
+
+GRANT SELECT ON plv8.modules TO PUBLIC;
 REVOKE ALL ON plv8.modules, plv8.packages FROM plv8_unpriv_tester;
 REVOKE ALL ON SCHEMA plv8 FROM plv8_unpriv_tester;
 REVOKE ALL ON FUNCTION plv8_call_admin_mod() FROM plv8_unpriv_tester;
 REVOKE ALL ON FUNCTION plv8_req_admin_mod() FROM plv8_unpriv_tester;
+REVOKE ALL ON FUNCTION plv8_call_rls_public() FROM plv8_unpriv_tester;
+REVOKE ALL ON FUNCTION plv8_call_rls_hidden() FROM plv8_unpriv_tester;
 REVOKE ALL ON FUNCTION plv8_test_esm_v1(int, int) FROM plv8_unpriv_tester;
 DROP ROLE plv8_unpriv_tester;
+
+-- 14. Test 1-argument content-addressed plv8.compile_wasm_cached(wasm_bytes)
+CREATE FUNCTION plv8_test_wasm_1arg(a int, b int) RETURNS int AS $$
+    const wasmBytes = new Uint8Array([
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
+        0x03, 0x02, 0x01, 0x00,
+        0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00,
+        0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b
+    ]);
+    const mod = plv8.compile_wasm_cached(wasmBytes);
+    const inst = new WebAssembly.Instance(mod);
+    return inst.exports.add(a, b);
+$$ LANGUAGE plv8;
+
+SELECT plv8_test_wasm_1arg(19, 23);
+

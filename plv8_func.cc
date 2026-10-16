@@ -292,38 +292,47 @@ plv8_CompileWasmCached(const FunctionCallbackInfo<v8::Value>& args)
 	Isolate *isolate = args.GetIsolate();
 	Local<Context> context = isolate->GetCurrentContext();
 
-	if (args.Length() < 2 || !args[0]->IsString())
-		throw js_error("plv8.compile_wasm_cached(cache_key, wasm_bytes) requires a string key and byte buffer");
+	if (args.Length() < 1)
+		throw js_error("plv8.compile_wasm_cached([cache_key, ]wasm_bytes) requires a byte buffer");
+
+	Local<v8::Value> bytes_arg;
+	if (args.Length() >= 2 && args[0]->IsString())
+	{
+		v8::String::Utf8Value key_utf8(isolate, args[0]->ToString(context).ToLocalChecked());
+		if (*key_utf8 == nullptr || key_utf8.length() == 0)
+			throw js_error("plv8.compile_wasm_cached cache_key must be non-empty");
+		bytes_arg = args[1];
+	}
+	else
+	{
+		bytes_arg = args[0];
+	}
 
 	const uint8_t *wire_ptr = nullptr;
 	size_t wire_len = 0;
 
-	if (args[1]->IsArrayBufferView())
+	if (bytes_arg->IsArrayBufferView())
 	{
-		Local<ArrayBufferView> view = Local<ArrayBufferView>::Cast(args[1]);
+		Local<ArrayBufferView> view = Local<ArrayBufferView>::Cast(bytes_arg);
 		wire_ptr = static_cast<const uint8_t *>(view->Buffer()->GetBackingStore()->Data()) + view->ByteOffset();
 		wire_len = view->ByteLength();
 	}
-	else if (args[1]->IsArrayBuffer())
+	else if (bytes_arg->IsArrayBuffer())
 	{
-		Local<ArrayBuffer> ab = Local<ArrayBuffer>::Cast(args[1]);
+		Local<ArrayBuffer> ab = Local<ArrayBuffer>::Cast(bytes_arg);
 		wire_ptr = static_cast<const uint8_t *>(ab->GetBackingStore()->Data());
 		wire_len = ab->ByteLength();
 	}
 	else
 	{
-		throw js_error("plv8.compile_wasm_cached second argument must be an ArrayBuffer or ArrayBufferView");
+		throw js_error("plv8.compile_wasm_cached requires an ArrayBuffer or ArrayBufferView");
 	}
 
 	if (wire_ptr == nullptr || wire_len == 0)
 		throw js_error("plv8.compile_wasm_cached received empty WebAssembly wire bytes");
 
-	v8::String::Utf8Value key_utf8(isolate, args[0]->ToString(context).ToLocalChecked());
-	if (*key_utf8 == nullptr || key_utf8.length() == 0)
-		throw js_error("plv8.compile_wasm_cached cache_key must be non-empty");
-
 	std::vector<uint8_t> cached_compiled_bytes;
-	if (plv8_wasm_cache_lookup(*key_utf8, &cached_compiled_bytes) &&
+	if (plv8_wasm_cache_lookup(wire_ptr, wire_len, &cached_compiled_bytes) &&
 		!cached_compiled_bytes.empty())
 	{
 		v8::WasmModuleCompilation compilation;
@@ -365,7 +374,7 @@ plv8_CompileWasmCached(const FunctionCallbackInfo<v8::Value>& args)
 	v8::OwnedBuffer serialized = compiled.Serialize();
 	if (serialized.buffer && serialized.size > 0)
 	{
-		plv8_wasm_cache_store(*key_utf8, serialized.buffer.get(), serialized.size);
+		plv8_wasm_cache_store(wire_ptr, wire_len, serialized.buffer.get(), serialized.size);
 	}
 
 	args.GetReturnValue().Set(mod_obj);

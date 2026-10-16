@@ -142,6 +142,7 @@ typedef struct plv8_context
 	std::unordered_map<std::string, v8::Global<v8::Module>> tle_module_map;
 	std::unordered_map<int, std::string> tle_module_id_to_spec;
 	uint64						tle_modules_fp;
+	std::vector<v8::Global<v8::Function>> snapshot_functions;
 } plv8_context;
 
 /*
@@ -401,9 +402,10 @@ extern void HandleUnhandledPromiseRejections();
 extern void GetMemoryInfo(v8::Local<v8::Object> obj);
 
 extern bool plv8_pass_user_types_as_bytes;
+extern bool plv8_allow_raw_user_types;
 extern bool plv8_preserve_numeric_precision;
-extern bool plv8_wasm_cache_lookup(const char *key, std::vector<uint8_t> *out);
-extern bool plv8_wasm_cache_store(const char *key, const uint8_t *bytes, size_t len);
+extern bool plv8_wasm_cache_lookup(const uint8_t *wire_bytes, size_t wire_len, std::vector<uint8_t> *out);
+extern bool plv8_wasm_cache_store(const uint8_t *wire_bytes, size_t wire_len, const uint8_t *code_bytes, size_t code_len);
 extern uint64 plv8_tle_modules_fingerprint(void);
 extern void plv8_Require(const v8::FunctionCallbackInfo<v8::Value>& args);
 extern void plv8_Import(const v8::FunctionCallbackInfo<v8::Value>& args);
@@ -427,6 +429,7 @@ extern void plv8_HostInitializeImportMetaObjectCallback(
 extern struct config_generic *plv8_find_option(const char *name);
 char *plv8_string_option(struct config_generic * record);
 int plv8_int_option(struct config_generic * record);
+bool plv8_bool_option(struct config_generic * record);
 
 extern bool is_main_pg_thread(void);
 extern void plv8_assert_main_pg_thread(const char *api_name);

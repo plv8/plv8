@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sstream>
+#include <thread>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -26,29 +27,37 @@
 
 
 extern "C" {
-#define String PG_Node_String
 #include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/xact.h"
+#include "catalog/indexing.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_type.h"
 #include "commands/trigger.h"
+#include "common/cryptohash.h"
 #include "common/hashfn.h"
 #include "executor/spi.h"
 #include "funcapi.h"
 #include "lib/dshash.h"
 #include "miscadmin.h"
+#include "parser/parse_type.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
 #include "storage/proc.h"
 #include "storage/shmem.h"
+#include "tcop/tcopprot.h"
+#include "utils/acl.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/catcache.h"
 #include "utils/dsa.h"
+#include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/guc_tables.h"
 #include "utils/inval.h"
@@ -56,6 +65,7 @@ extern "C" {
 #include "utils/memutils.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/rls.h"
 #include "utils/syscache.h"
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
@@ -94,7 +104,6 @@ PGDLLEXPORT void _PG_init(void);
 PGDLLEXPORT Datum	plv8_inline_handler(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(plv8_inline_handler);
-#undef String
 } // extern "C"
 
 using namespace v8;
@@ -188,6 +197,10 @@ typedef struct plv8_proc_cache
 	Oid						user_id;
 	uint64					tle_modules_fp;
 
+	Oid						proowner;
+	Oid						prolang;
+	bool					prosecdef;
+
 	int						nhandlers;
 	plv8_handler_dep		handlers[PLV8_MAX_LANG_HANDLER_DEPTH];
 	bool					pass_user_types_as_bytes;
@@ -204,6 +217,7 @@ static v8::Isolate *current_isolate = nullptr;
 static ArrayAllocator *current_allocator = nullptr;
 static bool plv8_isolate_oom_killed = false;
 bool plv8_pass_user_types_as_bytes = false;
+bool plv8_allow_raw_user_types = true;
 bool plv8_preserve_numeric_precision = false;
 static uint64 next_context_id = 1;
 size_t plv8_memory_limit = 256;
@@ -214,8 +228,10 @@ static char *plv8_boot_script_file = NULL;
 static char *plv8_snapshot_file = NULL;
 static int plv8_execution_timeout = 300;
 
-#define PLV8_SNAPSHOT_MAGIC "PLV8SN01"
-#define PLV8_SNAPSHOT_VERSION 1
+#define PLV8_SNAPSHOT_MAGIC "PLV8SN02"
+#define PLV8_SNAPSHOT_VERSION 2
+#define PLV8_MAX_SNAPSHOT_FUNCTIONS 65536
+#define PLV8_MAX_SNAPSHOT_BLOB_SIZE (256ULL * 1024ULL * 1024ULL)
 
 struct Plv8SnapshotHeader
 {
@@ -223,6 +239,9 @@ struct Plv8SnapshotHeader
 	uint32		version;
 	uint32		num_functions;
 	uint64		blob_size;
+	Oid			db_oid;
+	char		v8_version[32];
+	uint8		sha256[32];
 };
 
 struct Plv8SnapshotSlot
@@ -230,20 +249,24 @@ struct Plv8SnapshotSlot
 	Oid					fn_oid;
 	TransactionId		fn_xmin;
 	ItemPointerData		fn_tid;
+	Oid					proowner;
+	Oid					prolang;
+	bool				prosecdef;
+	bool				pass_user_types_as_bytes;
+	bool				preserve_numeric_precision;
 	int					nhandlers;
 	plv8_handler_dep	handlers[PLV8_MAX_LANG_HANDLER_DEPTH];
 };
 
 static v8::StartupData plv8_active_snapshot_blob = { nullptr, 0 };
 static std::vector<Plv8SnapshotSlot> plv8_snapshot_slots;
+static Oid plv8_snapshot_db_oid = InvalidOid;
 static bool plv8_snapshot_is_mmap = false;
 static void *plv8_snapshot_mmap_addr = nullptr;
 static size_t plv8_snapshot_mmap_len = 0;
 static uint64 plv8_snapshot_functions_restored = 0;
 static char plv8_snapshot_source[256] = "none";
 static bool plv8_bypass_snapshot_restore = false;
-
-#define PLV8_WASM_KEY_MAX_LEN 128
 
 struct Plv8SharedState
 {
@@ -257,22 +280,41 @@ struct Plv8SharedState
 	pg_atomic_uint64	hits;
 	pg_atomic_uint64	misses;
 	pg_atomic_uint64	stores;
+	pg_atomic_uint64	access_seq;
+};
+
+struct Plv8WasmCacheKey
+{
+	Oid					db_oid;
+	Oid					role_oid;
+	uint8				wire_sha256[32];
 };
 
 struct Plv8WasmCacheEntry
 {
-	char				key[PLV8_WASM_KEY_MAX_LEN];
+	Plv8WasmCacheKey	key;
 	dsa_pointer			code_ptr;
 	uint32				code_size;
+	uint64				last_used_seq;
 };
 
 static Plv8SharedState *plv8_shared_state = nullptr;
 static dsa_area *local_wasm_dsa = nullptr;
 static dshash_table *local_wasm_dshash = nullptr;
 
+#ifndef DSA_HANDLE_INVALID
+#define DSA_HANDLE_INVALID 0
+#endif
+#ifndef DSHASH_HANDLE_INVALID
+#define DSHASH_HANDLE_INVALID 0
+#endif
+
+#if PG_VERSION_NUM >= 150000
 static shmem_request_hook_type prev_shmem_request_hook = nullptr;
+#endif
 static shmem_startup_hook_type prev_shmem_startup_hook = nullptr;
 
+#if PG_VERSION_NUM >= 150000
 static void
 plv8_shmem_request(void)
 {
@@ -282,6 +324,7 @@ plv8_shmem_request(void)
 	RequestAddinShmemSpace(MAXALIGN(sizeof(Plv8SharedState)));
 	RequestNamedLWLockTranche("plv8_wasm_cache", 1);
 }
+#endif
 
 static void
 plv8_shmem_startup(void)
@@ -313,6 +356,7 @@ plv8_shmem_startup(void)
 		pg_atomic_init_u64(&plv8_shared_state->hits, 0);
 		pg_atomic_init_u64(&plv8_shared_state->misses, 0);
 		pg_atomic_init_u64(&plv8_shared_state->stores, 0);
+		pg_atomic_init_u64(&plv8_shared_state->access_seq, 0);
 	}
 	LWLockRelease(AddinShmemInitLock);
 }
@@ -327,11 +371,13 @@ plv8_get_wasm_dshash()
 		return local_wasm_dshash;
 
 	dshash_parameters params = {
-		PLV8_WASM_KEY_MAX_LEN,
+		sizeof(Plv8WasmCacheKey),
 		sizeof(Plv8WasmCacheEntry),
 		dshash_memcmp,
 		dshash_memhash,
+#if PG_VERSION_NUM >= 170000
 		dshash_memcpy,
+#endif
 		plv8_shared_state->dshash_tranche_id
 	};
 
@@ -350,7 +396,7 @@ plv8_get_wasm_dshash()
 			dsa_pin(local_wasm_dsa);
 			dsa_pin_mapping(local_wasm_dsa);
 			dsa_set_size_limit(local_wasm_dsa,
-							   (size_t) plv8_wasm_cache_size * 1024ULL * 1024ULL);
+							   ((size_t) plv8_wasm_cache_size + 8) * 1024ULL * 1024ULL);
 			plv8_shared_state->wasm_dsa_handle = dsa_get_handle(local_wasm_dsa);
 
 			local_wasm_dshash = dshash_create(local_wasm_dsa, &params, nullptr);
@@ -378,20 +424,47 @@ plv8_get_wasm_dshash()
 	return local_wasm_dshash;
 }
 
+static bool
+plv8_wasm_compute_key(const uint8_t *wire_bytes, size_t wire_len, Plv8WasmCacheKey *out_key)
+{
+	if (out_key == nullptr || (wire_bytes == nullptr && wire_len > 0))
+		return false;
+
+	memset(out_key, 0, sizeof(*out_key));
+	out_key->db_oid = MyDatabaseId;
+	out_key->role_oid = GetUserId();
+
+	const char *v8_ver = v8::V8::GetVersion();
+	pg_cryptohash_ctx *ctx = pg_cryptohash_create(PG_SHA256);
+	if (ctx == nullptr)
+		return false;
+
+	if (pg_cryptohash_init(ctx) < 0 ||
+		pg_cryptohash_update(ctx, reinterpret_cast<const uint8 *>(v8_ver), strlen(v8_ver) + 1) < 0 ||
+		(wire_len > 0 && pg_cryptohash_update(ctx, reinterpret_cast<const uint8 *>(wire_bytes), wire_len) < 0) ||
+		pg_cryptohash_final(ctx, out_key->wire_sha256, sizeof(out_key->wire_sha256)) < 0)
+	{
+		pg_cryptohash_free(ctx);
+		return false;
+	}
+	pg_cryptohash_free(ctx);
+	return true;
+}
+
 bool
-plv8_wasm_cache_lookup(const char *key, std::vector<uint8_t> *out_bytes)
+plv8_wasm_cache_lookup(const uint8_t *wire_bytes, size_t wire_len, std::vector<uint8_t> *out_bytes)
 {
 	PLV8_ASSERT_MAIN_PG_THREAD();
 	dshash_table *ht = plv8_get_wasm_dshash();
 	if (ht == nullptr)
 		return false;
 
-	char padded_key[PLV8_WASM_KEY_MAX_LEN];
-	memset(padded_key, 0, sizeof(padded_key));
-	strncpy(padded_key, key, PLV8_WASM_KEY_MAX_LEN - 1);
+	Plv8WasmCacheKey key;
+	if (!plv8_wasm_compute_key(wire_bytes, wire_len, &key))
+		return false;
 
 	Plv8WasmCacheEntry *entry = static_cast<Plv8WasmCacheEntry *>(
-		dshash_find(ht, padded_key, false));
+		dshash_find(ht, &key, false));
 	if (entry == nullptr)
 	{
 		pg_atomic_fetch_add_u64(&plv8_shared_state->misses, 1);
@@ -403,6 +476,7 @@ plv8_wasm_cache_lookup(const char *key, std::vector<uint8_t> *out_bytes)
 		const uint8_t *src = static_cast<const uint8_t *>(
 			dsa_get_address(local_wasm_dsa, entry->code_ptr));
 		out_bytes->assign(src, src + entry->code_size);
+		entry->last_used_seq = pg_atomic_fetch_add_u64(&plv8_shared_state->access_seq, 1) + 1;
 		dshash_release_lock(ht, entry);
 		pg_atomic_fetch_add_u64(&plv8_shared_state->hits, 1);
 		return true;
@@ -414,7 +488,7 @@ plv8_wasm_cache_lookup(const char *key, std::vector<uint8_t> *out_bytes)
 }
 
 bool
-plv8_wasm_cache_store(const char *key, const uint8_t *bytes, size_t len)
+plv8_wasm_cache_store(const uint8_t *wire_bytes, size_t wire_len, const uint8_t *bytes, size_t len)
 {
 	PLV8_ASSERT_MAIN_PG_THREAD();
 	if (bytes == nullptr || len == 0)
@@ -425,22 +499,123 @@ plv8_wasm_cache_store(const char *key, const uint8_t *bytes, size_t len)
 		return false;
 
 	size_t max_bytes = (size_t) plv8_wasm_cache_size * 1024ULL * 1024ULL;
-	if (pg_atomic_read_u64(&plv8_shared_state->bytes_used) + len > max_bytes)
+	/* Do not allow a single entry to exceed 25% of the total cache */
+	if (len > max_bytes / 4)
 		return false;
 
-	char padded_key[PLV8_WASM_KEY_MAX_LEN];
-	memset(padded_key, 0, sizeof(padded_key));
-	strncpy(padded_key, key, PLV8_WASM_KEY_MAX_LEN - 1);
+	Plv8WasmCacheKey key;
+	if (!plv8_wasm_compute_key(wire_bytes, wire_len, &key))
+		return false;
+
+	Plv8WasmCacheEntry *existing = static_cast<Plv8WasmCacheEntry *>(
+		dshash_find(ht, &key, true));
+	if (existing != nullptr)
+	{
+		if (DsaPointerIsValid(existing->code_ptr) && existing->code_size > 0)
+		{
+			existing->last_used_seq = pg_atomic_fetch_add_u64(&plv8_shared_state->access_seq, 1) + 1;
+			dshash_release_lock(ht, existing);
+			return true;
+		}
+		dshash_delete_entry(ht, existing);
+	}
+
+	size_t role_cap = superuser() ? max_bytes : (max_bytes / 4);
+
+	LWLockAcquire(plv8_shared_state->lock, LW_EXCLUSIVE);
+#if PG_VERSION_NUM >= 150000
+	for (int iter = 0; iter < 64; iter++)
+	{
+		size_t role_used = 0;
+		bool has_role_victim = false;
+		uint64 role_min_seq = UINT64_MAX;
+		Plv8WasmCacheKey role_victim_key;
+
+		bool has_global_victim = false;
+		uint64 global_min_seq = UINT64_MAX;
+		Plv8WasmCacheKey global_victim_key;
+
+		dshash_seq_status seq;
+		dshash_seq_init(&seq, ht, false);
+		Plv8WasmCacheEntry *cur;
+		while ((cur = static_cast<Plv8WasmCacheEntry *>(dshash_seq_next(&seq))) != nullptr)
+		{
+			if (!DsaPointerIsValid(cur->code_ptr))
+				continue;
+			if (!has_global_victim || cur->last_used_seq < global_min_seq)
+			{
+				global_min_seq = cur->last_used_seq;
+				global_victim_key = cur->key;
+				has_global_victim = true;
+			}
+			if (cur->key.db_oid == key.db_oid && cur->key.role_oid == key.role_oid)
+			{
+				role_used += cur->code_size;
+				if (!has_role_victim || cur->last_used_seq < role_min_seq)
+				{
+					role_min_seq = cur->last_used_seq;
+					role_victim_key = cur->key;
+					has_role_victim = true;
+				}
+			}
+		}
+		dshash_seq_term(&seq);
+
+		bool over_role = (role_used + len > role_cap);
+		bool over_global = (pg_atomic_read_u64(&plv8_shared_state->bytes_used) + len > max_bytes);
+		if (!over_role && !over_global)
+			break;
+
+		Plv8WasmCacheKey victim_key;
+		if (over_role && has_role_victim)
+			victim_key = role_victim_key;
+		else if (has_global_victim)
+			victim_key = global_victim_key;
+		else
+			break;
+
+		Plv8WasmCacheEntry *victim = static_cast<Plv8WasmCacheEntry *>(
+			dshash_find(ht, &victim_key, true));
+		if (victim != nullptr)
+		{
+			if (DsaPointerIsValid(victim->code_ptr))
+			{
+				dsa_free(local_wasm_dsa, victim->code_ptr);
+				uint64 prev_used = pg_atomic_read_u64(&plv8_shared_state->bytes_used);
+				if (prev_used >= victim->code_size)
+					pg_atomic_fetch_sub_u64(&plv8_shared_state->bytes_used, victim->code_size);
+				else
+					pg_atomic_write_u64(&plv8_shared_state->bytes_used, 0);
+				uint64 prev_cnt = pg_atomic_read_u64(&plv8_shared_state->entries_count);
+				if (prev_cnt > 0)
+					pg_atomic_fetch_sub_u64(&plv8_shared_state->entries_count, 1);
+			}
+			dshash_delete_entry(ht, victim);
+		}
+	}
+#else
+	(void) role_cap;
+#endif
+
+	if (pg_atomic_read_u64(&plv8_shared_state->bytes_used) + len > max_bytes)
+	{
+		LWLockRelease(plv8_shared_state->lock);
+		return false;
+	}
 
 	bool found = false;
 	Plv8WasmCacheEntry *entry = static_cast<Plv8WasmCacheEntry *>(
-		dshash_find_or_insert(ht, padded_key, &found));
+		dshash_find_or_insert(ht, &key, &found));
 	if (entry == nullptr)
+	{
+		LWLockRelease(plv8_shared_state->lock);
 		return false;
+	}
 
 	if (found && DsaPointerIsValid(entry->code_ptr))
 	{
 		dshash_release_lock(ht, entry);
+		LWLockRelease(plv8_shared_state->lock);
 		return true;
 	}
 
@@ -448,6 +623,7 @@ plv8_wasm_cache_store(const char *key, const uint8_t *bytes, size_t len)
 	if (!DsaPointerIsValid(dp))
 	{
 		dshash_delete_entry(ht, entry);
+		LWLockRelease(plv8_shared_state->lock);
 		return false;
 	}
 
@@ -455,11 +631,13 @@ plv8_wasm_cache_store(const char *key, const uint8_t *bytes, size_t len)
 	memcpy(dst, bytes, len);
 	entry->code_ptr = dp;
 	entry->code_size = static_cast<uint32>(len);
+	entry->last_used_seq = pg_atomic_fetch_add_u64(&plv8_shared_state->access_seq, 1) + 1;
 	dshash_release_lock(ht, entry);
 
 	pg_atomic_fetch_add_u64(&plv8_shared_state->bytes_used, len);
 	pg_atomic_fetch_add_u64(&plv8_shared_state->entries_count, 1);
 	pg_atomic_fetch_add_u64(&plv8_shared_state->stores, 1);
+	LWLockRelease(plv8_shared_state->lock);
 	return true;
 }
 
@@ -506,6 +684,7 @@ static bool plv8_extract_hoisted_imports(const char *src, std::string *imports_o
 static Local<Object> plv8_compile_and_eval_anon_module(Local<Context> context, const char *name, const char *mod_src);
 static void plv8_sync_tle_module_cache(plv8_context *ctx);
 static bool plv8_try_restore_function_from_snapshot(plv8_proc_cache *cache, plv8_context *global_context, const char *raw_prosrc);
+static void plv8_append_json_string(StringInfo buf, const char *str);
 
 /*
  * lower_case_functions are postgres-like C functions.
@@ -714,56 +893,137 @@ plv8_init_v8_engine(void)
 static bool
 LoadPlv8SnapshotFileInPreload(const char *path)
 {
+	if (!process_shared_preload_libraries_in_progress)
+		return false;
+
 	if (path == nullptr || path[0] == '\0')
 		return false;
 
-	int fd = open(path, O_RDONLY);
+	int fd = open(path, O_RDONLY | O_NOFOLLOW);
 	if (fd < 0)
 	{
-		elog(WARNING, "plv8: could not open snapshot_file \"%s\": %m",
-			 path);
-		return false;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("plv8: could not open snapshot_file \"%s\": %m", path)));
 	}
 
 	struct stat st;
-	if (fstat(fd, &st) < 0 || (size_t) st.st_size < sizeof(Plv8SnapshotHeader))
+	const size_t max_file_size = sizeof(Plv8SnapshotHeader) +
+		(size_t) PLV8_MAX_SNAPSHOT_FUNCTIONS * sizeof(Plv8SnapshotSlot) +
+		PLV8_MAX_SNAPSHOT_BLOB_SIZE;
+	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) ||
+		(size_t) st.st_size < sizeof(Plv8SnapshotHeader) ||
+		(size_t) st.st_size > max_file_size)
 	{
 		close(fd);
-		elog(WARNING, "plv8: snapshot_file \"%s\" is invalid or too small", path);
-		return false;
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("plv8: snapshot_file \"%s\" is invalid, not a regular file, or out of size bounds", path)));
 	}
 
 	size_t map_len = (size_t) st.st_size;
-	void *addr = mmap(nullptr, map_len, PROT_READ, MAP_SHARED, fd, 0);
-	close(fd);
+	void *addr = mmap(nullptr, map_len, PROT_READ | PROT_WRITE,
+					  MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (addr == MAP_FAILED)
 	{
-		elog(WARNING, "plv8: mmap failed for snapshot_file \"%s\": %m",
-			 path);
-		return false;
+		close(fd);
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("plv8: anonymous mmap failed for snapshot_file \"%s\": %m", path)));
 	}
+
+	char *dst = static_cast<char *>(addr);
+	size_t rem = map_len;
+	while (rem > 0)
+	{
+		ssize_t r = read(fd, dst, rem);
+		if (r <= 0)
+		{
+			if (r < 0 && errno == EINTR)
+				continue;
+			close(fd);
+			munmap(addr, map_len);
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("plv8: failed to read snapshot_file \"%s\"", path)));
+		}
+		dst += r;
+		rem -= (size_t) r;
+	}
+	close(fd);
 
 	const Plv8SnapshotHeader *hdr = static_cast<const Plv8SnapshotHeader *>(addr);
 	if (memcmp(hdr->magic, PLV8_SNAPSHOT_MAGIC, 8) != 0 ||
 		hdr->version != PLV8_SNAPSHOT_VERSION)
 	{
 		munmap(addr, map_len);
-		elog(WARNING, "plv8: snapshot_file \"%s\" header magic/version mismatch", path);
-		return false;
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("plv8: snapshot_file \"%s\" header magic/version mismatch", path)));
+	}
+
+	if (hdr->num_functions > PLV8_MAX_SNAPSHOT_FUNCTIONS ||
+		hdr->blob_size == 0 ||
+		hdr->blob_size > PLV8_MAX_SNAPSHOT_BLOB_SIZE)
+	{
+		munmap(addr, map_len);
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("plv8: snapshot_file \"%s\" header bounds out of range", path)));
 	}
 
 	size_t slots_bytes = (size_t) hdr->num_functions * sizeof(Plv8SnapshotSlot);
 	size_t header_total = sizeof(Plv8SnapshotHeader) + slots_bytes;
-	if (header_total + hdr->blob_size > map_len || hdr->blob_size == 0)
+	if (header_total > map_len || hdr->blob_size != map_len - header_total)
 	{
 		munmap(addr, map_len);
-		elog(WARNING, "plv8: snapshot_file \"%s\" size corrupt", path);
-		return false;
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("plv8: snapshot_file \"%s\" size corrupt", path)));
 	}
+
+	if (strncmp(hdr->v8_version, v8::V8::GetVersion(), sizeof(hdr->v8_version) - 1) != 0)
+	{
+		munmap(addr, map_len);
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("plv8: snapshot_file \"%s\" V8 version mismatch (snapshot=\"%.*s\", runtime=\"%s\")",
+						path, (int) (sizeof(hdr->v8_version) - 1), hdr->v8_version,
+						v8::V8::GetVersion())));
+	}
+
+	uint8_t digest[32];
+	pg_cryptohash_ctx *hash_ctx = pg_cryptohash_create(PG_SHA256);
+	if (hash_ctx == NULL ||
+		pg_cryptohash_init(hash_ctx) < 0 ||
+		pg_cryptohash_update(hash_ctx,
+							 static_cast<const uint8_t *>(addr) + sizeof(Plv8SnapshotHeader),
+							 map_len - sizeof(Plv8SnapshotHeader)) < 0 ||
+		pg_cryptohash_final(hash_ctx, digest, sizeof(digest)) < 0)
+	{
+		if (hash_ctx != NULL)
+			pg_cryptohash_free(hash_ctx);
+		munmap(addr, map_len);
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("plv8: failed to compute SHA-256 for snapshot_file \"%s\"", path)));
+	}
+	pg_cryptohash_free(hash_ctx);
+
+	if (memcmp(digest, hdr->sha256, sizeof(digest)) != 0)
+	{
+		munmap(addr, map_len);
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("plv8: snapshot_file \"%s\" SHA-256 checksum mismatch", path)));
+	}
+
+	mprotect(addr, map_len, PROT_READ);
 
 	const Plv8SnapshotSlot *slots_ptr = reinterpret_cast<const Plv8SnapshotSlot *>(
 		static_cast<const char *>(addr) + sizeof(Plv8SnapshotHeader));
 	plv8_snapshot_slots.assign(slots_ptr, slots_ptr + hdr->num_functions);
+	plv8_snapshot_db_oid = hdr->db_oid;
 
 	plv8_active_snapshot_blob.data =
 		static_cast<const char *>(addr) + header_total;
@@ -778,28 +1038,50 @@ LoadPlv8SnapshotFileInPreload(const char *path)
 static bool
 BuildBootScriptSnapshotInPreload(const char *script_path)
 {
+	if (!process_shared_preload_libraries_in_progress)
+		return false;
+
 	if (script_path == nullptr || script_path[0] == '\0')
 		return false;
 
-	int fd = open(script_path, O_RDONLY);
+	int fd = open(script_path, O_RDONLY | O_NOFOLLOW);
 	if (fd < 0)
 	{
-		elog(WARNING, "plv8: could not open boot_script_file \"%s\": %m",
-			 script_path);
-		return false;
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("plv8: could not open boot_script_file \"%s\": %m",
+						script_path)));
 	}
 	struct stat st;
-	if (fstat(fd, &st) < 0 || st.st_size <= 0)
+	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) ||
+		st.st_size <= 0 || st.st_size > 16 * 1024 * 1024)
 	{
 		close(fd);
-		elog(WARNING, "plv8: boot_script_file \"%s\" is empty or unreadable", script_path);
-		return false;
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("plv8: boot_script_file \"%s\" is empty, not a regular file, or exceeds 16 MB",
+						script_path)));
 	}
 	std::string script_src((size_t) st.st_size, '\0');
-	ssize_t nread = read(fd, &script_src[0], (size_t) st.st_size);
+	char *dst = &script_src[0];
+	size_t rem = (size_t) st.st_size;
+	while (rem > 0)
+	{
+		ssize_t r = read(fd, dst, rem);
+		if (r <= 0)
+		{
+			if (r < 0 && errno == EINTR)
+				continue;
+			close(fd);
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("plv8: failed to read boot_script_file \"%s\"",
+							script_path)));
+		}
+		dst += r;
+		rem -= (size_t) r;
+	}
 	close(fd);
-	if (nread != st.st_size)
-		return false;
 
 	/*
 	 * Compile the boot script snapshot in a short-lived forked child process
@@ -807,18 +1089,30 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 	 * This guarantees the postmaster process itself never spawns any V8
 	 * background threads before forking PostgreSQL backends.
 	 */
-	size_t max_shared_blob = 64 * 1024 * 1024;
+	size_t max_shared_blob = PLV8_MAX_SNAPSHOT_BLOB_SIZE;
 	void *shared_mem = mmap(nullptr, max_shared_blob,
 							PROT_READ | PROT_WRITE,
 							MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (shared_mem == MAP_FAILED)
-		return false;
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("plv8: anonymous mmap failed for boot_script_file \"%s\": %m",
+						script_path)));
+	}
+
+	int timeout_sec = (plv8_execution_timeout > 0 && plv8_execution_timeout <= 300)
+		? plv8_execution_timeout
+		: 30;
 
 	pid_t pid = fork();
 	if (pid < 0)
 	{
 		munmap(shared_mem, max_shared_blob);
-		return false;
+		ereport(ERROR,
+				(errcode(ERRCODE_SYSTEM_ERROR),
+				 errmsg("plv8: fork failed while compiling boot_script_file \"%s\": %m",
+						script_path)));
 	}
 
 	if (pid == 0)
@@ -834,6 +1128,17 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 			create_params.external_references = plv8_external_references;
 			v8::SnapshotCreator creator(create_params);
 			v8::Isolate *iso = creator.GetIsolate();
+			std::atomic<bool> script_done{false};
+			std::thread watchdog([iso, &script_done, timeout_sec]() {
+				for (int ms = 0; ms < timeout_sec * 1000; ms += 25)
+				{
+					if (script_done.load(std::memory_order_acquire))
+						return;
+					pg_usleep(25000L);
+				}
+				if (!script_done.load(std::memory_order_acquire))
+					iso->TerminateExecution();
+			});
 			{
 				v8::HandleScope hs(iso);
 				v8::Local<v8::Context> def_ctx = v8::Context::New(iso);
@@ -851,9 +1156,13 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 					if (!v8::Script::Compile(ctx, src).ToLocal(&compiled) ||
 						compiled->Run(ctx).IsEmpty())
 					{
+						script_done.store(true, std::memory_order_release);
+						watchdog.join();
 						_exit(2);
 					}
 				}
+				script_done.store(true, std::memory_order_release);
+				watchdog.join();
 				creator.AddContext(ctx);
 			}
 			v8::StartupData blob = creator.CreateBlob(
@@ -874,16 +1183,38 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 	}
 
 	int status = 0;
-	while (waitpid(pid, &status, 0) < 0)
+	bool child_exited = false;
+	int max_wait_ms = (timeout_sec + 5) * 1000;
+	for (int waited_ms = 0; waited_ms < max_wait_ms; waited_ms += 10)
 	{
-		if (errno != EINTR)
+		pid_t w = waitpid(pid, &status, WNOHANG);
+		if (w == pid)
+		{
+			child_exited = true;
 			break;
+		}
+		if (w < 0 && errno != EINTR)
+			break;
+		pg_usleep(10000L);
+	}
+	if (!child_exited)
+	{
+		kill(pid, SIGKILL);
+		while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+		munmap(shared_mem, max_shared_blob);
+		ereport(ERROR,
+				(errcode(ERRCODE_QUERY_CANCELED),
+				 errmsg("plv8: timed out compiling boot_script_file \"%s\"",
+						script_path)));
 	}
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
 	{
+		int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 		munmap(shared_mem, max_shared_blob);
-		elog(WARNING, "plv8: failed to build boot snapshot from \"%s\"", script_path);
-		return false;
+		ereport(ERROR,
+				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+				 errmsg("plv8: failed to build boot snapshot from \"%s\" (exit code %d)",
+						script_path, code)));
 	}
 
 	uint64 blob_sz = 0;
@@ -891,7 +1222,9 @@ BuildBootScriptSnapshotInPreload(const char *script_path)
 	if (blob_sz == 0 || sizeof(uint64) + blob_sz > max_shared_blob)
 	{
 		munmap(shared_mem, max_shared_blob);
-		return false;
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("plv8: invalid boot snapshot size from \"%s\"", script_path)));
 	}
 
 	mprotect(shared_mem, max_shared_blob, PROT_READ);
@@ -1052,12 +1385,6 @@ EnsureSharedIsolate(void)
 	if (current_isolate != nullptr)
 	{
 		KillIsolateAndAllContexts();
-	}
-
-	if (!plv8_snapshot_is_mmap &&
-		plv8_snapshot_file != NULL && plv8_snapshot_file[0] != '\0')
-	{
-		LoadPlv8SnapshotFileInPreload(plv8_snapshot_file);
 	}
 
 	ScopedSignalBlockerForV8Workers sig_blocker;
@@ -1224,6 +1551,23 @@ _PG_init(void)
     }
 #undef THREAD_POOL_SIZE_VAR
 
+#define ALLOW_RAW_USER_TYPES_VAR "plv8.allow_raw_user_types"
+    guc_value = plv8_find_option(ALLOW_RAW_USER_TYPES_VAR);
+    if (guc_value != NULL) {
+        plv8_allow_raw_user_types = plv8_bool_option(guc_value);
+    } else {
+        DefineCustomBoolVariable(ALLOW_RAW_USER_TYPES_VAR,
+                                 gettext_noop("Allow superuser-owned language handlers to pass user-defined types as raw byte buffers."),
+                                 NULL,
+                                 &plv8_allow_raw_user_types,
+                                 true,
+                                 PGC_SUSET, 0,
+                                 NULL,
+                                 NULL,
+                                 NULL);
+    }
+#undef ALLOW_RAW_USER_TYPES_VAR
+
     GucContext preload_guc_context = process_shared_preload_libraries_in_progress
         ? PGC_POSTMASTER
         : PGC_SUSET;
@@ -1238,7 +1582,7 @@ _PG_init(void)
                                    NULL,
                                    &plv8_boot_script_file,
                                    NULL,
-                                   preload_guc_context, 0,
+                                   preload_guc_context, GUC_SUPERUSER_ONLY,
                                    NULL,
                                    NULL,
                                    NULL);
@@ -1255,7 +1599,7 @@ _PG_init(void)
                                    NULL,
                                    &plv8_snapshot_file,
                                    NULL,
-                                   preload_guc_context, 0,
+                                   preload_guc_context, GUC_SUPERUSER_ONLY,
                                    NULL,
                                    NULL,
                                    NULL);
@@ -1298,19 +1642,29 @@ _PG_init(void)
 
 	if (process_shared_preload_libraries_in_progress)
 	{
+#if PG_VERSION_NUM >= 150000
 		prev_shmem_request_hook = shmem_request_hook;
 		shmem_request_hook = plv8_shmem_request;
+#else
+		RequestAddinShmemSpace(MAXALIGN(sizeof(Plv8SharedState)));
+		RequestNamedLWLockTranche("plv8_wasm_cache", 1);
+#endif
 		prev_shmem_startup_hook = shmem_startup_hook;
 		shmem_startup_hook = plv8_shmem_startup;
 
-		plv8_init_v8_engine();
 		if (plv8_snapshot_file != NULL && plv8_snapshot_file[0] != '\0')
 		{
+			plv8_init_v8_engine();
 			LoadPlv8SnapshotFileInPreload(plv8_snapshot_file);
 		}
 		else if (plv8_boot_script_file != NULL && plv8_boot_script_file[0] != '\0')
 		{
 			BuildBootScriptSnapshotInPreload(plv8_boot_script_file);
+			plv8_init_v8_engine();
+		}
+		else
+		{
+			plv8_init_v8_engine();
 		}
 	}
 
@@ -1439,7 +1793,10 @@ plv8_call_handler(PG_FUNCTION_ARGS)
 				plv8_pass_user_types_as_bytes = prev;
 				plv8_preserve_numeric_precision = prev_numeric;
 			}
-		} user_types_scope(cache->pass_user_types_as_bytes, cache->preserve_numeric_precision);
+		} user_types_scope(cache->pass_user_types_as_bytes &&
+						   plv8_allow_raw_user_types &&
+						   superuser_arg(cache->proowner),
+						   cache->preserve_numeric_precision);
 
 		if (is_trigger)
 			return CallTrigger(fcinfo, proc->xenv);
@@ -1525,6 +1882,11 @@ DisposePlv8ContextHandles(plv8_context *ctx)
 	ctx->tle_module_id_to_spec.clear();
 	ctx->tle_module_map.~unordered_map();
 	ctx->tle_module_id_to_spec.~unordered_map();
+
+	for (auto &fn_glob : ctx->snapshot_functions)
+		fn_glob.Reset();
+	ctx->snapshot_functions.clear();
+	ctx->snapshot_functions.~vector();
 
 	ctx->context.Reset();
 	ctx->compile_context.Reset();
@@ -1675,12 +2037,17 @@ plv8_info(PG_FUNCTION_ARGS)
 		if (i > 0)
 			appendStringInfoChar(&roles_buf, ',');
 		char *username = GetUserNameFromId(ContextVector[i]->user_id, false);
+		appendStringInfoString(&roles_buf, "{\"user\":");
+		plv8_append_json_string(&roles_buf, username ? username : "unknown");
 		appendStringInfo(&roles_buf,
-						 "{\"user\":\"%s\",\"total_heap_size\":%zu,\"used_heap_size\":%zu,\"external_memory\":%zu}",
-						 username ? username : "unknown",
+						 ",\"total_heap_size\":%zu,\"used_heap_size\":%zu,\"external_memory\":%zu}",
 						 total_heap, used_heap, ext_mem);
 	}
 	appendStringInfoChar(&roles_buf, ']');
+
+	StringInfoData src_json_buf;
+	initStringInfo(&src_json_buf);
+	plv8_append_json_string(&src_json_buf, plv8_snapshot_source);
 
 	StringInfoData buf;
 	initStringInfo(&buf);
@@ -1698,11 +2065,11 @@ plv8_info(PG_FUNCTION_ARGS)
 		"\"thread_pool_size\":%d,"
 		"\"active_worker_threads\":%d,"
 		"\"snapshot_active\":%s,"
-		"\"snapshot_source\":\"%s\","
+		"\"snapshot_source\":%s,"
 		"\"snapshot_blob_bytes\":%d,"
 		"\"snapshot_fn_count\":%zu,"
 		"\"snapshot_functions_restored\":%llu,"
-		"\"snapshot\":{\"loaded\":%s,\"bytes\":%d,\"functions_count\":%zu,\"functions_restored\":%llu,\"source\":\"%s\"},"
+		"\"snapshot\":{\"loaded\":%s,\"bytes\":%d,\"functions_count\":%zu,\"functions_restored\":%llu,\"source\":%s},"
 		"\"wasm_cache\":{\"enabled\":%s,\"entries\":%llu,\"bytes_used\":%llu,\"hits\":%llu,\"misses\":%llu,\"stores\":%llu}}",
 		(int) getpid(),
 		all_same_isolate ? "true" : "false",
@@ -1716,7 +2083,7 @@ plv8_info(PG_FUNCTION_ARGS)
 		plv8_thread_pool_size,
 		v8_platform ? v8_platform->ActiveWorkerCount() : 0,
 		snap_loaded ? "true" : "false",
-		plv8_snapshot_source,
+		src_json_buf.data,
 		plv8_active_snapshot_blob.raw_size,
 		plv8_snapshot_slots.size(),
 		(unsigned long long) plv8_snapshot_functions_restored,
@@ -1724,7 +2091,7 @@ plv8_info(PG_FUNCTION_ARGS)
 		plv8_active_snapshot_blob.raw_size,
 		plv8_snapshot_slots.size(),
 		(unsigned long long) plv8_snapshot_functions_restored,
-		plv8_snapshot_source,
+		src_json_buf.data,
 		wasm_cache_enabled ? "true" : "false",
 		(unsigned long long) wasm_entries,
 		(unsigned long long) wasm_bytes,
@@ -1733,6 +2100,7 @@ plv8_info(PG_FUNCTION_ARGS)
 		(unsigned long long) wasm_stores);
 
 	pfree(roles_buf.data);
+	pfree(src_json_buf.data);
 	Datum res = DirectFunctionCall1(jsonb_in, CStringGetDatum(buf.data));
 	pfree(buf.data);
 	PG_RETURN_DATUM(res);
@@ -1775,6 +2143,12 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 		}
 	}
 
+	if (target_oids.size() > PLV8_MAX_SNAPSHOT_FUNCTIONS)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("cannot snapshot more than %d functions",
+						PLV8_MAX_SNAPSHOT_FUNCTIONS)));
+
 	NameData plv8_lang_name = {"plv8"};
 	HeapTuple langTup = SearchSysCache1(LANGNAME, NameGetDatum(&plv8_lang_name));
 	if (!HeapTupleIsValid(langTup))
@@ -1815,6 +2189,8 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 
 		Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
 		Oid prolang = procStruct->prolang;
+		Oid proowner = procStruct->proowner;
+		bool prosecdef = procStruct->prosecdef;
 		if (!plv8_is_js_language(prolang))
 		{
 			ReleaseSysCache(procTup);
@@ -1863,6 +2239,9 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 		item.slot.fn_oid = fn_oid;
 		item.slot.fn_xmin = fn_xmin;
 		item.slot.fn_tid = fn_tid;
+		item.slot.proowner = proowner;
+		item.slot.prolang = prolang;
+		item.slot.prosecdef = prosecdef;
 		item.proname = proname;
 
 		if (prolang != plv8_lang_oid)
@@ -1882,6 +2261,10 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 				{
 					prosrc_cstr = pstrdup(compiled_proc->cache->prosrc);
 					item.slot.nhandlers = compiled_proc->cache->nhandlers;
+					item.slot.pass_user_types_as_bytes =
+						compiled_proc->cache->pass_user_types_as_bytes;
+					item.slot.preserve_numeric_precision =
+						compiled_proc->cache->preserve_numeric_precision;
 					if (item.slot.nhandlers > 0)
 					{
 						memcpy(item.slot.handlers, compiled_proc->cache->handlers,
@@ -1926,8 +2309,50 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 		pending_fns.push_back(std::move(item));
 	}
 
+	std::string boot_script_src;
+	if (plv8_boot_script_file != NULL && plv8_boot_script_file[0] != '\0')
+	{
+		int bfd = open(plv8_boot_script_file, O_RDONLY | O_NOFOLLOW);
+		if (bfd < 0)
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not open boot_script_file \"%s\": %m",
+							plv8_boot_script_file)));
+		struct stat bst;
+		if (fstat(bfd, &bst) < 0 || !S_ISREG(bst.st_mode) ||
+			bst.st_size <= 0 || bst.st_size > 16 * 1024 * 1024)
+		{
+			close(bfd);
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("boot_script_file \"%s\" is empty, not a regular file, or exceeds 16 MB",
+							plv8_boot_script_file)));
+		}
+		boot_script_src.resize((size_t) bst.st_size, '\0');
+		char *bdst = &boot_script_src[0];
+		size_t brem = (size_t) bst.st_size;
+		while (brem > 0)
+		{
+			ssize_t r = read(bfd, bdst, brem);
+			if (r <= 0)
+			{
+				if (r < 0 && errno == EINTR)
+					continue;
+				close(bfd);
+				ereport(ERROR,
+						(errcode_for_file_access(),
+						 errmsg("failed to read boot_script_file \"%s\"",
+								plv8_boot_script_file)));
+			}
+			bdst += r;
+			brem -= (size_t) r;
+		}
+		close(bfd);
+	}
+
 	std::vector<Plv8SnapshotSlot> compiled_slots;
 	v8::StartupData blob = { nullptr, 0 };
+	std::string snap_compile_error;
 
 	{
 		ScopedSignalBlockerForV8Workers sig_blocker;
@@ -1941,6 +2366,22 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 			v8::Isolate *snap_isolate = creator.GetIsolate();
 			snap_isolate->SetHostImportModuleDynamicallyCallback(plv8_HostImportModuleDynamicallyCallback);
 			snap_isolate->SetHostInitializeImportMetaObjectCallback(plv8_HostInitializeImportMetaObjectCallback);
+
+			int timeout_sec = (plv8_execution_timeout > 0 && plv8_execution_timeout <= 300)
+				? plv8_execution_timeout
+				: 30;
+			std::atomic<bool> snap_done{false};
+			std::thread watchdog([snap_isolate, &snap_done, timeout_sec]() {
+				for (int ms = 0; ms < timeout_sec * 1000; ms += 25)
+				{
+					if (snap_done.load(std::memory_order_acquire))
+						return;
+					pg_usleep(25000L);
+				}
+				if (!snap_done.load(std::memory_order_acquire))
+					snap_isolate->TerminateExecution();
+			});
+
 			{
 				v8::HandleScope handle_scope(snap_isolate);
 				v8::Local<v8::Context> default_ctx = v8::Context::New(snap_isolate);
@@ -1951,35 +2392,23 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 				{
 					v8::Context::Scope context_scope(context);
 
-					if (plv8_boot_script_file != NULL && plv8_boot_script_file[0] != '\0')
+					if (!boot_script_src.empty())
 					{
-						int bfd = open(plv8_boot_script_file, O_RDONLY);
-						if (bfd >= 0)
+						v8::TryCatch tc(snap_isolate);
+						v8::Local<v8::String> s = v8::String::NewFromUtf8(
+							snap_isolate, boot_script_src.data(),
+							v8::NewStringType::kNormal,
+							(int) boot_script_src.size()).ToLocalChecked();
+						v8::Local<v8::Script> sc;
+						v8::Local<v8::Value> unused_res;
+						if (!v8::Script::Compile(context, s).ToLocal(&sc) ||
+							!sc->Run(context).ToLocal(&unused_res))
 						{
-							struct stat bst;
-							if (fstat(bfd, &bst) == 0 && bst.st_size > 0)
-							{
-								std::string bsrc((size_t) bst.st_size, '\0');
-								if (read(bfd, &bsrc[0], (size_t) bst.st_size) == bst.st_size)
-								{
-									v8::TryCatch tc(snap_isolate);
-									v8::Local<v8::String> s = v8::String::NewFromUtf8(
-										snap_isolate, bsrc.data(),
-										v8::NewStringType::kNormal,
-										(int) bsrc.size()).ToLocalChecked();
-									v8::Local<v8::Script> sc;
-									if (v8::Script::Compile(context, s).ToLocal(&sc))
-									{
-										v8::Local<v8::Value> unused_res;
-										if (!sc->Run(context).ToLocal(&unused_res)) {}
-									}
-								}
-							}
-							close(bfd);
+							snap_compile_error = "failed to compile or run boot_script_file in snapshot";
 						}
 					}
 
-					for (size_t idx = 0; idx < pending_fns.size(); idx++)
+					for (size_t idx = 0; snap_compile_error.empty() && idx < pending_fns.size(); idx++)
 					{
 						const PendingSnapFn &item = pending_fns[idx];
 						v8::TryCatch tc(snap_isolate);
@@ -1997,9 +2426,10 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 							!script->Run(context).ToLocal(&fn_val) ||
 							!fn_val->IsFunction())
 						{
-							ereport(ERROR,
-									(errmsg("failed to compile function \"%s\" (%u) into V8 snapshot",
-											item.proname.c_str(), item.slot.fn_oid)));
+							snap_compile_error = "failed to compile function \"" +
+								item.proname + "\" (" + std::to_string(item.slot.fn_oid) +
+								") into V8 snapshot";
+							break;
 						}
 
 						char prop_buf[64];
@@ -2017,23 +2447,45 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 				}
 				creator.AddContext(context);
 			}
-			blob = creator.CreateBlob(
-				v8::SnapshotCreator::FunctionCodeHandling::kKeep);
+			snap_done.store(true, std::memory_order_release);
+			watchdog.join();
+
+			if (snap_compile_error.empty())
+			{
+				blob = creator.CreateBlob(
+					v8::SnapshotCreator::FunctionCodeHandling::kKeep);
+			}
 		}
 		delete snap_allocator;
 	}
 
-	if (blob.data == nullptr || blob.raw_size <= 0)
-		ereport(ERROR, (errmsg("v8::SnapshotCreator::CreateBlob() failed")));
+	if (!snap_compile_error.empty())
+		ereport(ERROR, (errmsg("%s", snap_compile_error.c_str())));
 
-	std::string tmp_path = std::string(out_path) + ".tmp";
-	int fd = open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (blob.data == nullptr || blob.raw_size <= 0 ||
+		(size_t) blob.raw_size > PLV8_MAX_SNAPSHOT_BLOB_SIZE)
+	{
+		delete[] blob.data;
+		ereport(ERROR, (errmsg("v8::SnapshotCreator::CreateBlob() failed or exceeded size limit")));
+	}
+
+	struct stat out_st;
+	if (lstat(out_path, &out_st) == 0 && S_ISLNK(out_st.st_mode))
+	{
+		delete[] blob.data;
+		ereport(ERROR,
+				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+				 errmsg("refusing to write snapshot to symlink \"%s\"", out_path)));
+	}
+
+	std::string tmp_path = std::string(out_path) + ".tmp." + std::to_string((long) MyProcPid);
+	int fd = open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
 	if (fd < 0)
 	{
 		delete[] blob.data;
 		ereport(ERROR,
 				(errcode_for_file_access(),
-				 errmsg("could not open snapshot output file \"%s\": %m",
+				 errmsg("could not open snapshot temporary file \"%s\": %m",
 						tmp_path.c_str())));
 	}
 
@@ -2043,14 +2495,45 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 	hdr.version = PLV8_SNAPSHOT_VERSION;
 	hdr.num_functions = static_cast<uint32>(compiled_slots.size());
 	hdr.blob_size = static_cast<uint64>(blob.raw_size);
+	hdr.db_oid = MyDatabaseId;
+	strlcpy(hdr.v8_version, v8::V8::GetVersion(), sizeof(hdr.v8_version));
+
+	size_t slots_bytes = compiled_slots.size() * sizeof(Plv8SnapshotSlot);
+	pg_cryptohash_ctx *hash_ctx = pg_cryptohash_create(PG_SHA256);
+	bool hash_ok = (hash_ctx != NULL && pg_cryptohash_init(hash_ctx) >= 0);
+	if (hash_ok && slots_bytes > 0)
+	{
+		if (pg_cryptohash_update(hash_ctx,
+								 reinterpret_cast<const uint8_t *>(compiled_slots.data()),
+								 slots_bytes) < 0)
+			hash_ok = false;
+	}
+	if (hash_ok)
+	{
+		if (pg_cryptohash_update(hash_ctx,
+								 reinterpret_cast<const uint8_t *>(blob.data),
+								 (size_t) blob.raw_size) < 0 ||
+			pg_cryptohash_final(hash_ctx, hdr.sha256, sizeof(hdr.sha256)) < 0)
+			hash_ok = false;
+	}
+	if (hash_ctx != NULL)
+		pg_cryptohash_free(hash_ctx);
+	if (!hash_ok)
+	{
+		delete[] blob.data;
+		close(fd);
+		unlink(tmp_path.c_str());
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to compute SHA-256 checksum for snapshot file")));
+	}
 
 	bool write_ok = true;
 	if (write(fd, &hdr, sizeof(hdr)) != (ssize_t) sizeof(hdr))
 		write_ok = false;
 
-	if (write_ok && !compiled_slots.empty())
+	if (write_ok && slots_bytes > 0)
 	{
-		size_t slots_bytes = compiled_slots.size() * sizeof(Plv8SnapshotSlot);
 		if (write(fd, compiled_slots.data(), slots_bytes) != (ssize_t) slots_bytes)
 			write_ok = false;
 	}
@@ -2064,6 +2547,8 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 			ssize_t w = write(fd, p, rem);
 			if (w <= 0)
 			{
+				if (w < 0 && errno == EINTR)
+					continue;
 				write_ok = false;
 				break;
 			}
@@ -2072,9 +2557,13 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 		}
 	}
 
+	if (write_ok && fsync(fd) != 0)
+		write_ok = false;
+
 	int raw_size = blob.raw_size;
 	delete[] blob.data;
-	close(fd);
+	if (close(fd) != 0)
+		write_ok = false;
 
 	if (!write_ok || rename(tmp_path.c_str(), out_path) != 0)
 	{
@@ -2086,15 +2575,17 @@ plv8_save_snapshot(PG_FUNCTION_ARGS)
 
 	StringInfoData buf;
 	initStringInfo(&buf);
+	appendStringInfoString(&buf, "{\"status\":\"ok\",\"path\":");
+	plv8_append_json_string(&buf, out_path);
 	appendStringInfo(&buf,
-					 "{\"status\":\"ok\",\"path\":\"%s\",\"bytes\":%d,\"bytes_written\":%zu,\"functions_compiled\":%zu,\"snapshotted_js_functions\":%zu,\"prewarmed_wasm_functions\":%d,\"v8_version\":\"%s\"}",
-					 out_path,
+					 ",\"bytes\":%d,\"bytes_written\":%zu,\"functions_compiled\":%zu,\"snapshotted_js_functions\":%zu,\"prewarmed_wasm_functions\":%d,\"v8_version\":",
 					 raw_size,
-					 sizeof(hdr) + compiled_slots.size() * sizeof(Plv8SnapshotSlot) + (size_t) raw_size,
+					 sizeof(hdr) + slots_bytes + (size_t) raw_size,
 					 compiled_slots.size(),
 					 compiled_slots.size(),
-					 prewarmed_wasm_fns,
-					 v8::V8::GetVersion());
+					 prewarmed_wasm_fns);
+	plv8_append_json_string(&buf, v8::V8::GetVersion());
+	appendStringInfoChar(&buf, '}');
 
 	Datum jsonb_res = DirectFunctionCall1(jsonb_in, CStringGetDatum(buf.data));
 	pfree(buf.data);
@@ -2187,7 +2678,11 @@ plv8_timeout_handler(void)
 		plv8_timeout_expired = 1;
 		current_isolate->TerminateExecution();
 		disable_timeout(plv8_timeout_id, false);
+		return;
 	}
+#if PG_VERSION_NUM < 150000
+	enable_timeout_after(plv8_timeout_id, 25);
+#endif
 }
 
 static void
@@ -2217,9 +2712,13 @@ public:
 			plv8_deadline_tz = TimestampTzPlusMilliseconds(
 				GetCurrentTimestamp(), (int64) timeout_sec * 1000LL);
 			plv8_in_js_execution = 1;
+#if PG_VERSION_NUM >= 150000
 			enable_timeout_every(plv8_timeout_id,
 								 TimestampTzPlusMilliseconds(GetCurrentTimestamp(), 25),
 								 25);
+#else
+			enable_timeout_after(plv8_timeout_id, 25);
+#endif
 		}
 	}
 
@@ -2429,7 +2928,13 @@ CreateTupleStore(PG_FUNCTION_ARGS, TupleDesc *tupdesc)
 		/* Build a tuple descriptor for our result type */
 		if (proc->rettype.typid == RECORDOID)
 		{
-			if (proc->functypclass != TYPEFUNC_COMPOSITE)
+			bool has_concrete_expected_desc =
+				(rsinfo->expectedDesc != NULL &&
+				 rsinfo->expectedDesc->natts > 0 &&
+				 TupleDescAttr(rsinfo->expectedDesc, 0)->atttypid != RECORDOID);
+			if (proc->functypclass != TYPEFUNC_COMPOSITE &&
+				proc->functypclass != TYPEFUNC_COMPOSITE_DOMAIN &&
+				!has_concrete_expected_desc)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("function returning record called in context "
@@ -2902,6 +3407,7 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 	Oid				lang_handler_oid = InvalidOid;
 	char		   *result_cstr = NULL;
 	bool			is_wasm_lang = false;
+	bool			all_handlers_superuser = true;
 
 	if (ndeps != NULL)
 		*ndeps = 0;
@@ -2939,6 +3445,8 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 				Form_pg_language langStruct = (Form_pg_language) GETSTRUCT(langTup);
 				if (strcmp(NameStr(langStruct->lanname), "pl/v8-wasm") == 0)
 					is_wasm_lang = true;
+				if (!superuser_arg(langStruct->lanowner))
+					all_handlers_superuser = false;
 				Oid handler_oid = langStruct->lanplcallfoid;
 				ReleaseSysCache(langTup);
 
@@ -2954,6 +3462,8 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 				TransactionId handler_xmin = HeapTupleHeaderGetXmin(procTup->t_data);
 				ItemPointerData handler_tid = procTup->t_self;
 				Form_pg_proc procStruct = (Form_pg_proc) GETSTRUCT(procTup);
+				if (!superuser_arg(procStruct->proowner))
+					all_handlers_superuser = false;
 				cur_lang_oid = procStruct->prolang;
 				ReleaseSysCache(procTup);
 
@@ -3075,14 +3585,33 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 	}
 
 	{
-		bool pass_bytes = is_wasm_lang;
+		bool explicit_pass_bytes = false;
 		bool preserve_numeric = false;
 		Local<v8::Value> opt_val;
 		if (meta->Get(context, ToString("pass_user_types_as_bytes")).ToLocal(&opt_val) &&
 			!opt_val.IsEmpty() && opt_val->BooleanValue(isolate))
 		{
-			pass_bytes = true;
+			explicit_pass_bytes = true;
 		}
+		bool owner_is_superuser = all_handlers_superuser &&
+			(proc == NULL || proc->cache == NULL || superuser_arg(proc->cache->proowner));
+		if (explicit_pass_bytes && (!plv8_allow_raw_user_types || !owner_is_superuser))
+		{
+			PG_TRY();
+			{
+				ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("must be superuser to enable pass_user_types_as_bytes")));
+			}
+			PG_CATCH();
+			{
+				throw pg_error();
+			}
+			PG_END_TRY();
+		}
+		bool pass_bytes = (is_wasm_lang || explicit_pass_bytes) &&
+						  plv8_allow_raw_user_types &&
+						  owner_is_superuser;
 		/*
 		 * preserve_numeric_precision: numeric values that cannot round-trip
 		 * through a JS double are converted to their exact text form instead
@@ -3145,6 +3674,7 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate,
 	if (found)
 	{
 		bool	uptodate;
+		Form_pg_proc curProcStruct = (Form_pg_proc) GETSTRUCT(procTup);
 
 		/*
 		 * We need to check user id and dispose it if it's different from
@@ -3156,6 +3686,9 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate,
 			cache->fn_xmin == HeapTupleHeaderGetXmin(procTup->t_data) &&
 			ItemPointerEquals(&cache->fn_tid, &procTup->t_self) &&
 			cache->user_id == current_context->user_id &&
+			cache->proowner == curProcStruct->proowner &&
+			cache->prolang == curProcStruct->prolang &&
+			cache->prosecdef == curProcStruct->prosecdef &&
 			cache->tle_modules_fp == cur_tle_fp);
 
 		if (uptodate && cache->nhandlers > 0)
@@ -3215,6 +3748,9 @@ plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo, bool validate,
 		cache->fn_xmin = HeapTupleHeaderGetXmin(procTup->t_data);
 		cache->fn_tid = procTup->t_self;
 		cache->user_id = current_context->user_id;
+		cache->proowner = procStruct->proowner;
+		cache->prolang = procStruct->prolang;
+		cache->prosecdef = procStruct->prosecdef;
 		cache->tle_modules_fp = cur_tle_fp;
 		if (prolang_out != NULL)
 			*prolang_out = procStruct->prolang;
@@ -3411,7 +3947,8 @@ plv8_try_restore_function_from_snapshot(plv8_proc_cache *cache,
 	if (plv8_bypass_snapshot_restore ||
 		plv8_active_snapshot_blob.data == nullptr ||
 		plv8_active_snapshot_blob.raw_size <= 0 ||
-		plv8_snapshot_slots.empty())
+		plv8_snapshot_slots.empty() ||
+		(OidIsValid(plv8_snapshot_db_oid) && plv8_snapshot_db_oid != MyDatabaseId))
 	{
 		return false;
 	}
@@ -3423,13 +3960,24 @@ plv8_try_restore_function_from_snapshot(plv8_proc_cache *cache,
 			continue;
 
 		if (!TransactionIdEquals(slot.fn_xmin, cache->fn_xmin) ||
-			!ItemPointerEquals(const_cast<ItemPointer>(&slot.fn_tid), &cache->fn_tid))
+			!ItemPointerEquals(const_cast<ItemPointer>(&slot.fn_tid), &cache->fn_tid) ||
+			slot.proowner != cache->proowner ||
+			slot.prolang != cache->prolang ||
+			slot.prosecdef != cache->prosecdef)
+		{
+			return false;
+		}
+
+		if (idx >= global_context->snapshot_functions.size() ||
+			global_context->snapshot_functions[idx].IsEmpty())
 		{
 			return false;
 		}
 
 		if (slot.nhandlers > 0)
 		{
+			if (slot.nhandlers > PLV8_MAX_LANG_HANDLER_DEPTH)
+				return false;
 			cache->nhandlers = slot.nhandlers;
 			memcpy(cache->handlers, slot.handlers,
 				   sizeof(plv8_handler_dep) * slot.nhandlers);
@@ -3444,24 +3992,18 @@ plv8_try_restore_function_from_snapshot(plv8_proc_cache *cache,
 			Isolate *isolate = global_context->isolate;
 			Isolate::Scope scope(isolate);
 			HandleScope handle_scope(isolate);
-			Local<Context> context = Local<Context>::New(isolate, global_context->context);
-			Context::Scope context_scope(context);
-
-			char prop_buf[64];
-			snprintf(prop_buf, sizeof(prop_buf), "__plv8_snap_fn_%zu", idx);
-			Local<v8::String> prop_name = v8::String::NewFromUtf8(
-				isolate, prop_buf, v8::NewStringType::kInternalized).ToLocalChecked();
-			Local<v8::Value> fn_val;
-			if (!context->Global()->Get(context, prop_name).ToLocal(&fn_val) ||
-				fn_val.IsEmpty() || !fn_val->IsFunction())
+			Local<Function> fn = global_context->snapshot_functions[idx].Get(isolate);
+			if (fn.IsEmpty())
 			{
 				cache->nhandlers = 0;
 				return false;
 			}
-
-			cache->function.Reset(isolate, Local<Function>::Cast(fn_val));
+			cache->function.Reset(isolate, fn);
 		}
 
+		cache->pass_user_types_as_bytes = slot.pass_user_types_as_bytes &&
+			plv8_allow_raw_user_types && superuser_arg(cache->proowner);
+		cache->preserve_numeric_precision = slot.preserve_numeric_precision;
 		plv8_replace_snapshot_prosrc(cache, raw_prosrc);
 		plv8_snapshot_functions_restored++;
 		return true;
@@ -3834,6 +4376,7 @@ GetPlv8Context() {
 		new(&my_context->unhandled_promises) std::vector<std::tuple<v8::Global<v8::Promise>, v8::Global<v8::Message>, v8::Global<v8::Value>>>();
 		new(&my_context->tle_module_map) std::unordered_map<std::string, v8::Global<v8::Module>>();
 		new(&my_context->tle_module_id_to_spec) std::unordered_map<int, std::string>();
+		new(&my_context->snapshot_functions) std::vector<v8::Global<v8::Function>>();
 		my_context->tle_modules_fp = 0;
 		my_context->microtask_queue =
 			v8::MicrotaskQueue::New(isolate, v8::MicrotasksPolicy::kAuto);
@@ -3846,7 +4389,30 @@ GetPlv8Context() {
 				isolate, 0, v8::DeserializeInternalFieldsCallback(),
 				nullptr, MaybeLocal<v8::Value>(), my_context->microtask_queue);
 			if (!snap_ctx.IsEmpty())
+			{
 				role_ctx = snap_ctx.ToLocalChecked();
+				if (!plv8_snapshot_slots.empty())
+				{
+					Context::Scope snap_cs(role_ctx);
+					Local<Object> global_obj = role_ctx->Global();
+					my_context->snapshot_functions.resize(plv8_snapshot_slots.size());
+					for (size_t sidx = 0; sidx < plv8_snapshot_slots.size(); sidx++)
+					{
+						char prop_buf[64];
+						snprintf(prop_buf, sizeof(prop_buf), "__plv8_snap_fn_%zu", sidx);
+						Local<v8::String> prop_name = v8::String::NewFromUtf8(
+							isolate, prop_buf, v8::NewStringType::kInternalized).ToLocalChecked();
+						Local<v8::Value> fn_val;
+						if (global_obj->Get(role_ctx, prop_name).ToLocal(&fn_val) &&
+							!fn_val.IsEmpty() && fn_val->IsFunction())
+						{
+							my_context->snapshot_functions[sidx].Reset(
+								isolate, Local<Function>::Cast(fn_val));
+						}
+						(void) global_obj->Delete(role_ctx, prop_name).FromMaybe(false);
+					}
+				}
+			}
 		}
 		if (role_ctx.IsEmpty())
 		{
@@ -4615,8 +5181,18 @@ static uint64 plv8_fnv1a64(uint64 h, const void* data, size_t len) {
   return h;
 }
 
+static AclResult plv8_namespace_aclcheck(Oid nspoid, Oid userid, AclMode mode) {
+#if PG_VERSION_NUM >= 160000
+  return object_aclcheck(NamespaceRelationId, nspoid, userid, mode);
+#else
+  return pg_namespace_aclcheck(nspoid, userid, mode);
+#endif
+}
+
 static uint64 plv8_hash_catalog_table(Oid relid) {
   if (!OidIsValid(relid)) return 0;
+  if (pg_class_aclcheck(relid, GetUserId(), ACL_SELECT) != ACLCHECK_OK)
+    return 0;
 
   uint64 fp = 0;
   Relation rel = table_open(relid, AccessShareLock);
@@ -4680,10 +5256,22 @@ uint64 plv8_tle_modules_fingerprint(void) {
   plv8_cached_modules_relid = mod_relid;
   plv8_cached_packages_relid = pkg_relid;
 
+  Oid user_id = GetUserId();
+  if (plv8_namespace_aclcheck(nspoid, user_id, ACL_USAGE) != ACLCHECK_OK ||
+      pg_class_aclcheck(mod_relid, user_id, ACL_SELECT) != ACLCHECK_OK) {
+    return 0;
+  }
+
   uint64 fp = 14695981039346656037ULL;
   fp ^= plv8_hash_catalog_table(mod_relid);
-  if (OidIsValid(pkg_relid)) {
+  if (OidIsValid(pkg_relid) &&
+      pg_class_aclcheck(pkg_relid, user_id, ACL_SELECT) == ACLCHECK_OK) {
     fp ^= (plv8_hash_catalog_table(pkg_relid) * 1099511628211ULL);
+  }
+  if (check_enable_rls(mod_relid, InvalidOid, true) == RLS_ENABLED ||
+      (OidIsValid(pkg_relid) &&
+       check_enable_rls(pkg_relid, InvalidOid, true) == RLS_ENABLED)) {
+    fp = plv8_fnv1a64(fp, &user_id, sizeof(user_id));
   }
   if (fp == 0) fp = 1;
   return fp;
@@ -4695,7 +5283,7 @@ static void plv8_sync_tle_module_cache(plv8_context* ctx) {
   if (!ctx) return;
 
   cur_fp = plv8_tle_modules_fingerprint();
-  if (ctx->tle_modules_fp != cur_fp) {
+  if (cur_fp == 0 || ctx->tle_modules_fp != cur_fp) {
     for (auto& kv : ctx->tle_module_map) kv.second.Reset();
     ctx->tle_module_map.clear();
     ctx->tle_module_id_to_spec.clear();
@@ -5316,6 +5904,16 @@ static bool plv8_fetch_tle_module(const std::string& raw_spec,
     return false;
   }
 
+  Oid user_id = GetUserId();
+  if (plv8_namespace_aclcheck(nspoid, user_id, ACL_USAGE) != ACLCHECK_OK) {
+    err_msg = "permission denied for schema plv8";
+    return false;
+  }
+  if (pg_class_aclcheck(mod_relid, user_id, ACL_SELECT) != ACLCHECK_OK) {
+    err_msg = "permission denied for table modules";
+    return false;
+  }
+
   Plv8ModuleId importer;
   bool has_importer = false;
   if (!base_spec.empty()) {
@@ -5357,11 +5955,14 @@ static bool plv8_fetch_tle_module(const std::string& raw_spec,
   bool imp_has_requires = false;
   std::vector<std::string> imp_requires;
 
+  Relation volatile open_rel = NULL;
+  TableScanDesc volatile open_scan = NULL;
+  volatile bool spi_connected = false;
+
   PG_TRY();
   {
     caller_is_super = superuser();
 
-    // 1. If we have an importer or package table, read packages catalog first
     struct PkgEntry {
       std::string name;
       std::string version;
@@ -5370,62 +5971,87 @@ static bool plv8_fetch_tle_module(const std::string& raw_spec,
     };
     std::vector<PkgEntry> packages;
 
-    if (OidIsValid(pkg_relid)) {
-      Relation pkg_rel = table_open(pkg_relid, AccessShareLock);
-      TupleDesc pkg_desc = RelationGetDescr(pkg_rel);
-      TableScanDesc pkg_scan = table_beginscan_catalog(pkg_rel, 0, NULL);
-      HeapTuple pkg_tup;
+    auto extract_pkg_tuple = [&](HeapTuple pkg_tup, TupleDesc pkg_desc) {
+      bool n_name = false, n_ver = false, n_ep = false, n_deps = false;
+      Datum d_name = heap_getattr(pkg_tup, 1, pkg_desc, &n_name);
+      Datum d_ver = heap_getattr(pkg_tup, 2, pkg_desc, &n_ver);
+      Datum d_ep = heap_getattr(pkg_tup, 3, pkg_desc, &n_ep);
+      if (n_name || n_ver) return;
 
-      while ((pkg_tup = heap_getnext(pkg_scan, ForwardScanDirection)) != NULL) {
-        CHECK_FOR_INTERRUPTS();
-        bool n_name = false, n_ver = false, n_ep = false, n_deps = false;
-        Datum d_name = heap_getattr(pkg_tup, 1, pkg_desc, &n_name);
-        Datum d_ver = heap_getattr(pkg_tup, 2, pkg_desc, &n_ver);
-        Datum d_ep = heap_getattr(pkg_tup, 3, pkg_desc, &n_ep);
-        if (n_name || n_ver) continue;
+      PkgEntry pe;
+      char* c_name = TextDatumGetCString(d_name);
+      char* c_ver = TextDatumGetCString(d_ver);
+      pe.name.assign(c_name);
+      pe.version.assign(c_ver);
+      pfree(c_name);
+      pfree(c_ver);
 
-        PkgEntry pe;
-        char* c_name = TextDatumGetCString(d_name);
-        char* c_ver = TextDatumGetCString(d_ver);
-        pe.name.assign(c_name);
-        pe.version.assign(c_ver);
-        pfree(c_name);
-        pfree(c_ver);
-
-        if (!n_ep) {
-          char* c_ep = TextDatumGetCString(d_ep);
-          pe.entry_point.assign(c_ep);
-          pfree(c_ep);
-        } else {
-          pe.entry_point = "index.js";
-        }
-
-        if (pkg_desc->natts >= 4) {
-          Datum d_deps = heap_getattr(pkg_tup, 4, pkg_desc, &n_deps);
-          if (!n_deps) {
-            Jsonb* jb = DatumGetJsonbP(d_deps);
-            JsonbIterator* it = JsonbIteratorInit(&jb->root);
-            JsonbValue v;
-            JsonbIteratorToken r;
-            std::string cur_key;
-            while ((r = JsonbIteratorNext(&it, &v, true)) != WJB_DONE) {
-              if (r == WJB_KEY && v.type == jbvString) {
-                cur_key.assign(v.val.string.val, v.val.string.len);
-              } else if (r == WJB_VALUE && v.type == jbvString &&
-                         !cur_key.empty()) {
-                pe.deps[cur_key] =
-                    std::string(v.val.string.val, v.val.string.len);
-                cur_key.clear();
-              }
-            }
-            if ((Pointer)jb != DatumGetPointer(d_deps)) pfree(jb);
-          }
-        }
-        packages.push_back(std::move(pe));
+      if (!n_ep) {
+        char* c_ep = TextDatumGetCString(d_ep);
+        pe.entry_point.assign(c_ep);
+        pfree(c_ep);
+      } else {
+        pe.entry_point = "index.js";
       }
 
-      table_endscan(pkg_scan);
-      table_close(pkg_rel, AccessShareLock);
+      if (pkg_desc->natts >= 4) {
+        Datum d_deps = heap_getattr(pkg_tup, 4, pkg_desc, &n_deps);
+        if (!n_deps) {
+          Jsonb* jb = DatumGetJsonbP(d_deps);
+          JsonbIterator* it = JsonbIteratorInit(&jb->root);
+          JsonbValue v;
+          JsonbIteratorToken r;
+          std::string cur_key;
+          while ((r = JsonbIteratorNext(&it, &v, true)) != WJB_DONE) {
+            if (r == WJB_KEY && v.type == jbvString) {
+              cur_key.assign(v.val.string.val, v.val.string.len);
+            } else if (r == WJB_VALUE && v.type == jbvString &&
+                       !cur_key.empty()) {
+              pe.deps[cur_key] =
+                  std::string(v.val.string.val, v.val.string.len);
+              cur_key.clear();
+            }
+          }
+          if ((Pointer)jb != DatumGetPointer(d_deps)) pfree(jb);
+        }
+      }
+      packages.push_back(std::move(pe));
+    };
+
+    if (OidIsValid(pkg_relid) &&
+        pg_class_aclcheck(pkg_relid, user_id, ACL_SELECT) == ACLCHECK_OK) {
+      if (check_enable_rls(pkg_relid, InvalidOid, true) == RLS_ENABLED) {
+        if (SPI_connect() == SPI_OK_CONNECT) {
+          spi_connected = true;
+          if (SPI_execute("SELECT * FROM plv8.packages", true, 0) ==
+                  SPI_OK_SELECT &&
+              SPI_tuptable != NULL) {
+            TupleDesc spi_desc = SPI_tuptable->tupdesc;
+            for (uint64 r = 0; r < SPI_processed; r++) {
+              CHECK_FOR_INTERRUPTS();
+              extract_pkg_tuple(SPI_tuptable->vals[r], spi_desc);
+            }
+          }
+          SPI_finish();
+          spi_connected = false;
+        }
+      } else {
+        open_rel = table_open(pkg_relid, AccessShareLock);
+        TupleDesc pkg_desc = RelationGetDescr(open_rel);
+        open_scan = table_beginscan_catalog(open_rel, 0, NULL);
+        HeapTuple pkg_tup;
+
+        while ((pkg_tup = heap_getnext(open_scan, ForwardScanDirection)) !=
+               NULL) {
+          CHECK_FOR_INTERRUPTS();
+          extract_pkg_tuple(pkg_tup, pkg_desc);
+        }
+
+        table_endscan(open_scan);
+        open_scan = NULL;
+        table_close(open_rel, AccessShareLock);
+        open_rel = NULL;
+      }
     }
 
     // 2. Scan plv8.modules
@@ -5443,18 +6069,12 @@ static bool plv8_fetch_tle_module(const std::string& raw_spec,
     };
     std::vector<ModRow> modules;
 
-    Relation mod_rel = table_open(mod_relid, AccessShareLock);
-    TupleDesc mod_desc = RelationGetDescr(mod_rel);
-    TableScanDesc mod_scan = table_beginscan_catalog(mod_rel, 0, NULL);
-    HeapTuple mod_tup;
-
-    while ((mod_tup = heap_getnext(mod_scan, ForwardScanDirection)) != NULL) {
-      CHECK_FOR_INTERRUPTS();
+    auto extract_mod_tuple = [&](HeapTuple mod_tup, TupleDesc mod_desc) {
       bool n_path = false, n_src = false, n_pkg = false, n_ver = false;
       bool n_sloppy = false, n_bc = false, n_req = false, n_trust = false;
 
       Datum d_path = heap_getattr(mod_tup, 1, mod_desc, &n_path);
-      if (n_path) continue;
+      if (n_path) return;
 
       ModRow mr;
       char* c_path = TextDatumGetCString(d_path);
@@ -5530,7 +6150,7 @@ static bool plv8_fetch_tle_module(const std::string& raw_spec,
         if (!n_trust) mr.is_trusted = DatumGetBool(d_trust);
       }
 
-      if (mr.source.empty() && mr.bytecode.empty()) continue;
+      if (mr.source.empty() && mr.bytecode.empty()) return;
 
       if (has_importer && mr.is_pkg == importer.is_package &&
           mr.path == importer.path &&
@@ -5541,10 +6161,40 @@ static bool plv8_fetch_tle_module(const std::string& raw_spec,
       }
 
       modules.push_back(std::move(mr));
-    }
+    };
 
-    table_endscan(mod_scan);
-    table_close(mod_rel, AccessShareLock);
+    if (check_enable_rls(mod_relid, InvalidOid, true) == RLS_ENABLED) {
+      if (SPI_connect() == SPI_OK_CONNECT) {
+        spi_connected = true;
+        if (SPI_execute("SELECT * FROM plv8.modules", true, 0) ==
+                SPI_OK_SELECT &&
+            SPI_tuptable != NULL) {
+          TupleDesc spi_desc = SPI_tuptable->tupdesc;
+          for (uint64 r = 0; r < SPI_processed; r++) {
+            CHECK_FOR_INTERRUPTS();
+            extract_mod_tuple(SPI_tuptable->vals[r], spi_desc);
+          }
+        }
+        SPI_finish();
+        spi_connected = false;
+      }
+    } else {
+      open_rel = table_open(mod_relid, AccessShareLock);
+      TupleDesc mod_desc = RelationGetDescr(open_rel);
+      open_scan = table_beginscan_catalog(open_rel, 0, NULL);
+      HeapTuple mod_tup;
+
+      while ((mod_tup = heap_getnext(open_scan, ForwardScanDirection)) !=
+             NULL) {
+        CHECK_FOR_INTERRUPTS();
+        extract_mod_tuple(mod_tup, mod_desc);
+      }
+
+      table_endscan(open_scan);
+      open_scan = NULL;
+      table_close(open_rel, AccessShareLock);
+      open_rel = NULL;
+    }
 
     auto populate_from_row = [&](const ModRow& mr) {
       mod_out->id.is_package = mr.is_pkg;
@@ -5648,8 +6298,25 @@ static bool plv8_fetch_tle_module(const std::string& raw_spec,
   }
   PG_CATCH();
   {
+    ErrorData* edata = CopyErrorData();
+    if (edata && edata->message)
+      err_msg = edata->message;
+    else
+      err_msg = "failed to scan plv8.modules catalog";
+    if (edata) FreeErrorData(edata);
     FlushErrorState();
-    err_msg = "failed to scan plv8.modules catalog";
+    if (open_scan != NULL) {
+      table_endscan(open_scan);
+      open_scan = NULL;
+    }
+    if (open_rel != NULL) {
+      table_close(open_rel, AccessShareLock);
+      open_rel = NULL;
+    }
+    if (spi_connected) {
+      SPI_finish();
+      spi_connected = false;
+    }
     return false;
   }
   PG_END_TRY();
@@ -5775,10 +6442,8 @@ static MaybeLocal<Module> plv8_load_tle_module(Local<Context> context,
       wasm_js << (unsigned int)bytecode[i];
     }
     wasm_js << "]);\n";
-    wasm_js << "const __cache_key = " << "\"plv8:" << canonical_key << ":"
-            << bytecode.size() << "\";\n";
     wasm_js << "const __mod = (typeof plv8.compile_wasm_cached === 'function') "
-            << "? plv8.compile_wasm_cached(__cache_key, __wasm_bytes) "
+            << "? plv8.compile_wasm_cached(__wasm_bytes) "
             << ": new WebAssembly.Module(__wasm_bytes);\n";
     wasm_js << "if (typeof globalThis.__plv8_wasm_polyfills_loaded === 'undefined') {\n"
             << "  try { plv8.find_function('public.plv8_wasm_bootstrap_polyfills')(); } catch (_e) {}\n"
@@ -6364,5 +7029,57 @@ void plv8_CompileBytecode(const FunctionCallbackInfo<v8::Value>& args) {
   Local<ArrayBuffer> ab = v8::ArrayBuffer::New(isolate, std::move(bs));
   Local<Uint8Array> u8 = v8::Uint8Array::New(ab, 0, total_len);
   args.GetReturnValue().Set(u8);
+}
+
+/*
+ * Append a C string as a JSON string literal.
+ */
+static void
+plv8_append_json_string(StringInfo buf, const char *str)
+{
+	if (str == NULL)
+	{
+		appendStringInfoString(buf, "null");
+		return;
+	}
+
+	appendStringInfoChar(buf, '"');
+	for (const unsigned char *p = (const unsigned char *) str; *p != '\0'; p++)
+	{
+		unsigned char c = *p;
+
+		CHECK_FOR_INTERRUPTS();
+		switch (c)
+		{
+			case '"':
+				appendStringInfoString(buf, "\\\"");
+				break;
+			case '\\':
+				appendStringInfoString(buf, "\\\\");
+				break;
+			case '\b':
+				appendStringInfoString(buf, "\\b");
+				break;
+			case '\f':
+				appendStringInfoString(buf, "\\f");
+				break;
+			case '\n':
+				appendStringInfoString(buf, "\\n");
+				break;
+			case '\r':
+				appendStringInfoString(buf, "\\r");
+				break;
+			case '\t':
+				appendStringInfoString(buf, "\\t");
+				break;
+			default:
+				if (c < 0x20)
+					appendStringInfo(buf, "\\u%04x", (unsigned int) c);
+				else
+					appendStringInfoChar(buf, (char) c);
+				break;
+		}
+	}
+	appendStringInfoChar(buf, '"');
 }
 

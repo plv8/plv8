@@ -552,6 +552,78 @@ SELECT test_pl(21) AS test_pl_after_rollback;
                     210
 (1 row)
 
+-- 10. Superuser-only pass_user_types_as_bytes and plv8.allow_raw_user_types gating
+SET client_min_messages = warning;
+CREATE TYPE raw_test_type;
+CREATE FUNCTION raw_test_type_in(cstring) RETURNS raw_test_type
+  LANGUAGE internal IMMUTABLE STRICT AS 'byteain';
+CREATE FUNCTION raw_test_type_out(raw_test_type) RETURNS cstring
+  LANGUAGE internal IMMUTABLE STRICT AS 'byteaout';
+CREATE TYPE raw_test_type (
+  INTERNALLENGTH = VARIABLE,
+  INPUT = raw_test_type_in,
+  OUTPUT = raw_test_type_out,
+  CATEGORY = 'U'
+);
+RESET client_min_messages;
+-- 10a. Normal LANGUAGE plv8 cannot return raw Uint8Array for a user-defined type
+CREATE FUNCTION raw_test_normal_plv8() RETURNS raw_test_type AS $$
+  return new Uint8Array([0x41, 0x42, 0x43]);
+$$ LANGUAGE plv8;
+\set VERBOSITY terse
+SELECT raw_test_normal_plv8();
+ERROR:  returning raw byte buffers for user-defined type raw_test_type requires superuser pass_user_types_as_bytes
+\set VERBOSITY default
+-- 10b. Non-superuser language handler cannot enable pass_user_types_as_bytes
+SET ROLE regress_plv8_lang_user;
+CREATE FUNCTION unpriv_raw_handler() RETURNS language_handler AS $$
+  if (arguments[1]) arguments[1].pass_user_types_as_bytes = true;
+  return arguments[0];
+$$ LANGUAGE plv8;
+RESET ROLE;
+CREATE LANGUAGE unpriv_raw_lang HANDLER unpriv_raw_handler;
+CREATE FUNCTION unpriv_raw_fn() RETURNS raw_test_type AS $$
+  return new Uint8Array([0x41, 0x42]);
+$$ LANGUAGE unpriv_raw_lang;
+\set VERBOSITY terse
+SELECT unpriv_raw_fn();
+ERROR:  must be superuser to enable pass_user_types_as_bytes
+\set VERBOSITY default
+-- 10c. Superuser language handler with pass_user_types_as_bytes succeeds when allow_raw_user_types = on,
+-- and fails when plv8.allow_raw_user_types = off
+CREATE FUNCTION super_raw_handler() RETURNS language_handler AS $$
+  if (arguments[1]) arguments[1].pass_user_types_as_bytes = true;
+  return arguments[0];
+$$ LANGUAGE plv8;
+CREATE LANGUAGE super_raw_lang HANDLER super_raw_handler;
+CREATE FUNCTION super_raw_roundtrip(v raw_test_type) RETURNS raw_test_type AS $$
+  const out = new Uint8Array(v.length);
+  for (let i = 0; i < v.length; i++) out[i] = v[i] + 1;
+  return out;
+$$ LANGUAGE super_raw_lang;
+SELECT super_raw_roundtrip('\x414243'::raw_test_type);
+ super_raw_roundtrip 
+---------------------
+ \x424344
+(1 row)
+
+SET plv8.allow_raw_user_types = off;
+\set VERBOSITY terse
+SELECT super_raw_roundtrip('\x414243'::raw_test_type);
+ERROR:  returning raw byte buffers for user-defined type raw_test_type requires superuser pass_user_types_as_bytes
+\set VERBOSITY default
+RESET plv8.allow_raw_user_types;
+DROP FUNCTION super_raw_roundtrip(raw_test_type);
+DROP LANGUAGE super_raw_lang;
+DROP FUNCTION super_raw_handler();
+DROP FUNCTION unpriv_raw_fn();
+DROP LANGUAGE unpriv_raw_lang;
+DROP FUNCTION unpriv_raw_handler();
+DROP FUNCTION raw_test_normal_plv8();
+DROP TYPE raw_test_type CASCADE;
+NOTICE:  drop cascades to 2 other objects
+DETAIL:  drop cascades to function raw_test_type_in(cstring)
+drop cascades to function raw_test_type_out(raw_test_type)
 -- Cleanup
 DROP FUNCTION test_other_lang(int);
 DROP LANGUAGE other_lang;

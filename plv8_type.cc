@@ -905,10 +905,28 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	/*
 	 * Direct binary buffer return for pg_tle user-defined base types
 	 * (stored internally as varlena / bytea with optional fixed length).
+	 * Restricted strictly to superuser-owned functions/handlers with
+	 * pass_user_types_as_bytes enabled and plv8.allow_raw_user_types = on.
 	 */
 	if (type->category == TYPCATEGORY_USER && !type->byval &&
 		(value->IsUint8Array() || value->IsInt8Array() || value->IsArrayBuffer()))
 	{
+		if (!plv8_pass_user_types_as_bytes || !plv8_allow_raw_user_types)
+		{
+			PG_TRY();
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("returning raw byte buffers for user-defined type %s requires superuser pass_user_types_as_bytes",
+								format_type_be(type->typid))));
+			}
+			PG_CATCH();
+			{
+				throw pg_error();
+			}
+			PG_END_TRY();
+		}
+
 		const char *src_bytes = NULL;
 		size_t byte_len = 0;
 
@@ -923,6 +941,22 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			v8::Handle<v8::ArrayBuffer> ab = v8::Handle<v8::ArrayBuffer>::Cast(value);
 			src_bytes = (const char *) ab->GetBackingStore()->Data();
 			byte_len = ab->ByteLength();
+		}
+
+		if (byte_len > (size_t) MaxAllocSize - VARHDRSZ)
+		{
+			PG_TRY();
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("returned buffer length %zu exceeds maximum varlena size",
+								byte_len)));
+			}
+			PG_CATCH();
+			{
+				throw pg_error();
+			}
+			PG_END_TRY();
 		}
 
 		size_t varlena_size = byte_len + VARHDRSZ;
@@ -1198,17 +1232,34 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 		/*
 		 * Direct binary buffer argument passing for pg_tle user-defined base
 		 * types (TYPCATEGORY_USER, stored internally as varlena / bytea) when
-		 * invoking pl/<any> (such as pl/v8-wasm) functions.
+		 * invoking superuser-authorized pl/<any> (such as pl/v8-wasm) functions.
 		 */
-		if (plv8_pass_user_types_as_bytes &&
+		if (plv8_pass_user_types_as_bytes && plv8_allow_raw_user_types &&
 			type->category == TYPCATEGORY_USER && !type->byval)
 		{
-			void	   *p = PG_DETOAST_DATUM_COPY(datum);
+			if (type->len == -1)
+			{
+				void *p = PG_DETOAST_DATUM_COPY(datum);
 
-			return CreateExternalArray(VARDATA_ANY(p),
-									   kExternalUnsignedByteArray,
-									   VARSIZE_ANY_EXHDR(p),
-									   PointerGetDatum(p));
+				return CreateExternalArray(VARDATA_ANY(p),
+										   kExternalUnsignedByteArray,
+										   VARSIZE_ANY_EXHDR(p),
+										   PointerGetDatum(p));
+			}
+			else if (type->len > (int16) VARHDRSZ)
+			{
+				const char *raw = (const char *) DatumGetPointer(datum);
+				if (raw != NULL && !VARATT_IS_EXTENDED(raw) &&
+					VARSIZE(raw) == (size_t) type->len)
+				{
+					void *p = palloc(type->len);
+					memcpy(p, raw, type->len);
+					return CreateExternalArray(VARDATA(p),
+											   kExternalUnsignedByteArray,
+											   (size_t) type->len - VARHDRSZ,
+											   PointerGetDatum(p));
+				}
+			}
 		}
 		return ToString(datum, type);
 	}

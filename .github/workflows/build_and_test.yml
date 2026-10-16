@@ -87,7 +87,7 @@ jobs:
         run: |
           mkdir -p /var/lib/pgsql/${{ matrix.pg_major }}/data
           chown -R postgres:postgres /var/lib/pgsql/${{ matrix.pg_major }}
-          su postgres -c "/usr/pgsql-${{ matrix.pg_major }}/bin/initdb -D /var/lib/pgsql/${{ matrix.pg_major }}/data"
+          su postgres -c "/usr/pgsql-${{ matrix.pg_major }}/bin/initdb -E UTF8 -D /var/lib/pgsql/${{ matrix.pg_major }}/data"
           su postgres -c "/usr/pgsql-${{ matrix.pg_major }}/bin/pg_ctl -D /var/lib/pgsql/${{ matrix.pg_major }}/data -l /tmp/postgresql.log start"
 
       - name: Checkout plv8 extension code

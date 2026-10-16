@@ -17,8 +17,9 @@ This guide covers how to compile and package WebAssembly functions, custom Postg
    - Stores the `.wasm` bytecode in `pgtle.modules` (and `public.plv8_wasm_modules`) with `is_trusted = true`.
    - Either parses the binary's Type (`0x01`), Function (`0x03`), and Export (`0x07`) sections automatically or reads your JSON manifest to generate `LANGUAGE "pl/v8-wasm"` SQL functions, custom PostgreSQL base types (`pgtle.create_base_type_if_not_exists`), and custom operators (`CREATE OPERATOR`).
 2. **Cross-Backend Shared Native Code Cache (`plv8_wasm_shared_cache`)**:
-   - The first backend to compile a `.wasm` module serializes the V8 native machine code (`CompiledWasmModule::Serialize()`) into PostgreSQL dynamic shared memory (`DSA`) indexed by a `dshash` table keyed by the FNV-1a 64-bit hash of the `.wasm` bytecode.
-   - All subsequent PostgreSQL backends deserialize the compiled native code directly from shared memory in microseconds, skipping WebAssembly compilation completely.
+   - Enabled when `plv8` is loaded via `shared_preload_libraries` (`plv8.wasm_cache_size`, `PGC_POSTMASTER`, default `64` MB).
+   - The first backend to compile a `.wasm` module via `plv8.compile_wasm_cached(wasm_bytes)` serializes the V8 native machine code (`CompiledWasmModule::Serialize()`) into PostgreSQL dynamic shared memory (`DSA`) indexed by a `dshash` table keyed by `{ db_oid, role_oid, sha256(wire_bytes) }` (with a 25% per-role quota for non-superusers and LRU eviction).
+   - All subsequent PostgreSQL backends in the same database and role deserialize the compiled native code directly from shared memory in microseconds, skipping WebAssembly compilation completely.
 3. **WASI Preview 1 & Reactor Initialization**:
    - On instantiation, `plv8` and `pg_tle` attach `wasi_snapshot_preview1`, `wasi_unstable`, `postgres`, and `env` import namespaces.
    - If the module exports `_initialize()` (standard for Go `GOOS=wasip1 -buildmode=c-shared` and TinyGo `-target=wasi -buildmode=c-shared` WASI reactors), it is automatically called once when the `WebAssembly.Instance` is created.

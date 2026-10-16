@@ -188,6 +188,8 @@ public:
 	~Converter();
 	v8::Local<v8::Object> ToValue(HeapTuple tuple);
 	Datum	ToDatum(v8::Handle<v8::Value> value, Tuplestorestate *tupstore = NULL);
+	TupleDesc GetTupleDesc() const { return m_tupdesc; }
+	bool IsScalar() const { return m_is_scalar; }
 
 private:
 	Converter(const Converter&);
@@ -435,5 +437,23 @@ extern bool is_main_pg_thread(void);
 extern void plv8_assert_main_pg_thread(const char *api_name);
 #define PLV8_ASSERT_MAIN_PG_THREAD() plv8_assert_main_pg_thread(__func__)
 extern const intptr_t plv8_external_references[];
+
+typedef struct Plv8ColMeta
+{
+	char	   *name;
+	Oid			type_oid;
+	int32		typmod;
+	Oid			collation_oid;
+} Plv8ColMeta;
+
+extern void plv8_register_column_inference_hook(const char *func_name,
+												const char *sql_func_name,
+												v8::Local<v8::Function> js_cb);
+extern void plv8_register_planner_support_hook(const char *func_name,
+											   const char *sql_func_name,
+											   v8::Local<v8::Function> js_cb);
+extern void plv8_set_function_columns_js(const char *func_name,
+										 int ncols,
+										 const Plv8ColMeta *cols);
 
 #endif	// _PLV8_

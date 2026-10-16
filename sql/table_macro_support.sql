@@ -1,0 +1,205 @@
+CREATE EXTENSION IF NOT EXISTS plv8;
+
+-- =========================================================================
+-- 1. Plain PL/v8 `RETURNS SETOF record` with `plv8.expected_columns()`
+--    and `plv8.return_query(sql, args)`
+-- =========================================================================
+CREATE TABLE macro_items (
+    id int PRIMARY KEY,
+    category text,
+    price numeric(10, 2)
+);
+
+INSERT INTO macro_items VALUES
+    (1, 'books', 19.99),
+    (2, 'books', 29.50),
+    (3, 'games', 49.00);
+
+CREATE OR REPLACE FUNCTION dynamic_filter_items(cat text, min_price numeric)
+RETURNS SETOF record
+LANGUAGE plv8 STABLE AS $$
+  const cols = plv8.expected_columns();
+  const selectList = cols.map(c => c.name + '::' + c.type_sql).join(', ');
+  const sql = `SELECT ${selectList} FROM macro_items WHERE category = $1 AND price >= $2 ORDER BY id`;
+  plv8.return_query(sql, [cat, min_price]);
+$$;
+
+SELECT * FROM dynamic_filter_items('books', 15.00) AS (id int, price numeric(10, 2));
+
+-- Calling a `RETURNS SETOF record` function in scalar targetlist context must fail cleanly
+SELECT dynamic_filter_items('books', 15.00);
+
+-- =========================================================================
+-- 2. Parse-time column inference (`plv8_source`) & Planner `prosupport`
+--    inlining (`plv8_call_support`) using in-memory JS hooks
+-- =========================================================================
+DO $$
+  // Parse simple spec: "col1:type1=expr1, col2:type2=expr2 [FROM tbl WHERE ...]"
+  function parseSpec(spec) {
+    const parts = String(spec).split('|');
+    const colPart = parts[0].trim();
+    const fromPart = parts.length > 1 ? parts[1].trim() : '';
+    const cols = colPart.split(',').map(item => {
+      const [decl, expr] = item.trim().split('=');
+      const [name, typeName] = decl.trim().split(':');
+      const rows = plv8.execute(
+        `SELECT oid::int AS type_oid FROM pg_catalog.pg_type WHERE typname = $1`,
+        [typeName.trim()]
+      );
+      const typeOid = (rows && rows.length > 0) ? rows[0].type_oid : 25;
+      return {
+        name: name.trim(),
+        type_name: typeName.trim(),
+        type_oid: typeOid,
+        typmod: -1,
+        collation_oid: 0,
+        expr: expr.trim()
+      };
+    });
+    return { cols, fromPart };
+  }
+
+  plv8.register_column_inference('js_table_macro', function(req) {
+    const parsed = parseSpec(req.source_arg);
+    return {
+      has_coldeflist: req.has_coldeflist,
+      columns: parsed.cols
+    };
+  });
+
+  plv8.register_support('js_table_macro', function(req) {
+    const parsed = parseSpec(req.source_arg);
+    const outCols = (req.expected_columns && req.expected_columns.length > 0)
+      ? req.expected_columns
+      : parsed.cols;
+
+    let sqlSelect = parsed.cols.map((c, idx) => {
+      const target = outCols[idx] || c;
+      const castType = target.type_sql || c.type_name;
+      const outName = target.name || c.name;
+      return `(${c.expr})::${castType} AS "${outName}"`;
+    }).join(', ');
+
+    // Support lateral correlation via $1 if `outer.<col>` is referenced
+    const lateralVars = [];
+    const outerMatch = parsed.fromPart.match(/outer\.([a-zA-Z0-9_]+)/);
+    if (outerMatch && req.lateral_env && req.lateral_env.length > 0) {
+      const outerRel = req.lateral_env[0];
+      const outerCol = outerRel.columns.find(c => c.name === outerMatch[1]) || outerRel.columns[0];
+      lateralVars.push({
+        rtindex: outerRel.rtindex,
+        attno: outerCol.attno,
+        type_oid: outerCol.type_oid,
+        typmod: outerCol.typmod,
+        collation_oid: outerCol.collation_oid
+      });
+    }
+
+    const fromClause = parsed.fromPart.replace(/outer\.[a-zA-Z0-9_]+/g, '$1');
+    const sql = `SELECT ${sqlSelect} ${fromClause}`;
+    return {
+      sql: sql,
+      columns: outCols,
+      lateral_vars: lateralVars
+    };
+  });
+$$ LANGUAGE plv8;
+
+CREATE OR REPLACE FUNCTION js_table_macro(spec plv8_source)
+RETURNS SETOF record
+LANGUAGE plv8 STABLE SUPPORT plv8_call_support AS $$
+  const cols = plv8.expected_columns();
+  const parts = String(spec).split('|');
+  const colDefs = parts[0].trim().split(',');
+  const fromPart = parts.length > 1 ? parts[1].trim() : '';
+  const selectExprs = colDefs.map((item, idx) => {
+    const [decl, expr] = item.trim().split('=');
+    const target = cols[idx];
+    return `(${expr.trim()})::${target.type_sql} AS "${target.name}"`;
+  }).join(', ');
+  plv8.return_query(`SELECT ${selectExprs} ${fromPart}`);
+$$;
+
+CREATE OR REPLACE FUNCTION js_table_macro(spec plv8_source, params jsonb)
+RETURNS SETOF record
+LANGUAGE plv8 STABLE SUPPORT plv8_call_support AS $$
+  const cols = plv8.expected_columns();
+  const parts = String(spec).split('|');
+  const colDefs = parts[0].trim().split(',');
+  const fromPart = parts.length > 1 ? parts[1].trim() : '';
+  const selectExprs = colDefs.map((item, idx) => {
+    const [decl, expr] = item.trim().split('=');
+    const target = cols[idx];
+    return `(${expr.trim()})::${target.type_sql} AS "${target.name}"`;
+  }).join(', ');
+  plv8.return_query(`SELECT ${selectExprs} ${fromPart}`);
+$$;
+
+-- 2a. Call WITHOUT `AS (...)` column definition list!
+SELECT * FROM js_table_macro('item_id:int4=id, item_price:numeric=price | FROM macro_items WHERE category = ''books'' ORDER BY id');
+
+-- 2b. Call WITH `AS (...)` column definition list!
+SELECT * FROM js_table_macro('item_id:int4=id, item_price:numeric=price | FROM macro_items WHERE category = ''games''')
+  AS (game_id int, cost numeric(10, 2));
+
+-- 2c. Single-column output without `AS (...)` (uses `plv8.plv8_single_col_holder`)
+SELECT * FROM js_table_macro('item_id:int4=id | FROM macro_items ORDER BY id');
+
+-- 2d. Verify planner inlining via EXPLAIN (COSTS OFF):
+--     No `Function Scan on js_table_macro`; outer WHERE pushes into index/table scan!
+EXPLAIN (COSTS OFF)
+SELECT * FROM js_table_macro('item_id:int4=id, item_price:numeric=price | FROM macro_items')
+WHERE item_id = 2;
+
+-- 2e. Verify LATERAL correlation with outer table Var injection ($1)
+CREATE TABLE outer_categories (cat_id int, cat_name text);
+INSERT INTO outer_categories VALUES (100, 'books'), (200, 'games');
+
+SELECT oc.cat_id, m.item_id, m.item_price
+FROM outer_categories oc,
+     LATERAL js_table_macro('item_id:int4=id, item_price:numeric=price | FROM macro_items WHERE category = outer.cat_name ORDER BY id') m
+ORDER BY oc.cat_id, m.item_id;
+
+-- =========================================================================
+-- 3. Custom compiled-to-JS language (`LANGUAGE pl_query_macro`) using
+--    `plv8.set_function_columns()` and `plv8.return_query()`
+-- =========================================================================
+CREATE OR REPLACE FUNCTION pl_query_macro_handler()
+RETURNS language_handler
+LANGUAGE plv8 AS $$
+  const src = arguments[0];
+  return `
+    const cols = plv8.expected_columns();
+    const sql = (${JSON.stringify(src.trim())});
+    plv8.return_query(sql);
+  `;
+$$;
+
+CREATE TRUSTED LANGUAGE pl_query_macro
+  HANDLER pl_query_macro_handler
+  VALIDATOR plv8_call_validator;
+
+CREATE OR REPLACE FUNCTION top_books_macro()
+RETURNS SETOF record
+LANGUAGE pl_query_macro STABLE AS $$
+  SELECT id, price FROM macro_items WHERE category = 'books' ORDER BY id
+$$;
+
+-- Stamp output columns onto `top_books_macro` from JS via `plv8.set_function_columns`
+DO $$
+  plv8.set_function_columns('top_books_macro', [
+    { name: 'book_id', type_oid: 23 },
+    { name: 'book_price', type_oid: 1700 }
+  ]);
+$$ LANGUAGE plv8;
+
+SELECT * FROM top_books_macro();
+
+DROP FUNCTION top_books_macro();
+DROP LANGUAGE pl_query_macro;
+DROP FUNCTION pl_query_macro_handler();
+DROP TABLE outer_categories;
+DROP FUNCTION js_table_macro(plv8_source);
+DROP FUNCTION js_table_macro(plv8_source, jsonb);
+DROP FUNCTION dynamic_filter_items(text, numeric);
+DROP TABLE macro_items;

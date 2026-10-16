@@ -78,7 +78,8 @@ DATA = $(PLV8_DATA)
 DATA_built = plv8.sql
 REGRESS = init-extension plv8 plv8-errors scalar_args inline json startup_pre startup varparam json_conv \
 		  jsonb_conv window guc es6 arraybuffer composites currentresource startup_perms bytea find_function_perms \
-		  memory_limits reset show array_spread regression procedure security_definer language_handler tle_modules
+		  memory_limits reset show array_spread regression procedure security_definer language_handler tle_modules \
+		  table_macro_support
 
 ifndef BIGINT_GRACEFUL
 	REGRESS += bigint

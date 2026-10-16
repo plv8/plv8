@@ -714,8 +714,8 @@ This module also contains some dialect supports. Currently, we have the followin
 
 - CoffeeScript (plcoffee)
 - LiveScript (plls)
-- Python 3.15 on WebAssembly (`"pl/fullpython+v8"`, `plfullpython_v8`, `"pl/python+v8"`, `plpython_v8`) and Direct WebAssembly (`"pl/v8-wasm"`, via `pgtle.bootstrap_wasm_engine()` / `pgtle.install_wasm_extension()`)
-- Custom Procedural Languages (`CREATE [TRUSTED] LANGUAGE ... HANDLER ...`): See `docs/LANGUAGE_HANDLER_USER_GUIDE.md` (API users' guide) and `docs/LANGUAGE_HANDLER_DESIGN.md` (design document).
+- Direct WebAssembly (`"pl/v8-wasm"`, via `pgtle.bootstrap_wasm_engine()` / `pgtle.install_wasm_extension()`)
+- Custom Procedural Languages (`CREATE [TRUSTED] LANGUAGE ... HANDLER ...`): Any language transpiled to JavaScript or compiled to WebAssembly can be registered on `pl/v8` (see `docs/LANGUAGE_HANDLER_USER_GUIDE.md` and `docs/LANGUAGE_HANDLER_DESIGN.md`, and standalone language extensions in [`postsql/pl-any`](https://github.com/postsql/pl-any)).
 
 With PostgreSQL 9.1 or above, you are able to load those dialects via `CREATE EXTENSION` command.
 

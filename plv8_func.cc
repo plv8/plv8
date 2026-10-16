@@ -13,9 +13,11 @@
 
 extern "C" {
 #define String PG_Node_String
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
+#include "miscadmin.h"
 #include "parser/parse_type.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -55,6 +57,11 @@ static void plv8_MemoryUsage(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_Commit(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_Rollback(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_CompileWasmCached(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_ExpectedColumns(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_ReturnQuery(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_RegisterColumnInference(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_RegisterSupport(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_SetFunctionColumns(const FunctionCallbackInfo<v8::Value>& args);
 
 const intptr_t plv8_external_references[] = {
 	reinterpret_cast<intptr_t>(plv8_FunctionInvoker),
@@ -90,6 +97,11 @@ const intptr_t plv8_external_references[] = {
 	reinterpret_cast<intptr_t>(plv8_Require),
 	reinterpret_cast<intptr_t>(plv8_Import),
 	reinterpret_cast<intptr_t>(plv8_CompileBytecode),
+	reinterpret_cast<intptr_t>(plv8_ExpectedColumns),
+	reinterpret_cast<intptr_t>(plv8_ReturnQuery),
+	reinterpret_cast<intptr_t>(plv8_RegisterColumnInference),
+	reinterpret_cast<intptr_t>(plv8_RegisterSupport),
+	reinterpret_cast<intptr_t>(plv8_SetFunctionColumns),
 	0
 };
 
@@ -403,6 +415,11 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	SetCallback(plv8, "require", plv8_Require, attrFull);
 	SetCallback(plv8, "import", plv8_Import, attrFull);
 	SetCallback(plv8, "compile_bytecode", plv8_CompileBytecode, attrFull);
+	SetCallback(plv8, "expected_columns", plv8_ExpectedColumns, attrFull);
+	SetCallback(plv8, "return_query", plv8_ReturnQuery, attrFull);
+	SetCallback(plv8, "register_column_inference", plv8_RegisterColumnInference, attrFull);
+	SetCallback(plv8, "register_support", plv8_RegisterSupport, attrFull);
+	SetCallback(plv8, "set_function_columns", plv8_SetFunctionColumns, attrFull);
 
 	plv8->SetInternalFieldCount(PLV8_INTNL_MAX);
 }
@@ -1877,4 +1894,393 @@ plv8_Rollback(const FunctionCallbackInfo<v8::Value> &args)
 		throw pg_error();
 	}
 	PG_END_TRY();
+}
+
+/*
+ * plv8.expected_columns()
+ *
+ * Returns an Array of { name, type_oid, typmod, collation_oid, type_sql }
+ * describing the expected result TupleDesc of the currently executing
+ * set-returning function (SRF), or null if not called inside an SRF.
+ */
+static void
+plv8_ExpectedColumns(const FunctionCallbackInfo<v8::Value>& args)
+{
+	Isolate *isolate = args.GetIsolate();
+	Local<Context> context = isolate->GetCurrentContext();
+	Handle<v8::Object> self = args.This();
+	Handle<v8::Value> conv_value = self->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
+
+	if (!conv_value->IsExternal())
+	{
+		args.GetReturnValue().Set(Null(isolate));
+		return;
+	}
+
+	Converter *conv = static_cast<Converter *>(
+		Handle<External>::Cast(conv_value)->Value(v8::kExternalPointerTypeTagDefault));
+	if (conv == nullptr || conv->GetTupleDesc() == NULL)
+	{
+		args.GetReturnValue().Set(Null(isolate));
+		return;
+	}
+
+	TupleDesc td = conv->GetTupleDesc();
+	Local<Array> arr = Array::New(isolate);
+	uint32_t out_idx = 0;
+
+	for (int att = 0; att < td->natts; att++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(td, att);
+
+		CHECK_FOR_INTERRUPTS();
+		if (attr->attisdropped)
+			continue;
+
+		char *type_sql = NULL;
+		PG_TRY();
+		{
+			type_sql = format_type_with_typemod(attr->atttypid, attr->atttypmod);
+		}
+		PG_CATCH();
+		{
+			throw pg_error();
+		}
+		PG_END_TRY();
+
+		Local<Object> col_obj = Object::New(isolate);
+		col_obj->Set(context, ToString("name"), ToString(NameStr(attr->attname))).Check();
+		col_obj->Set(context, ToString("type_oid"), Uint32::NewFromUnsigned(isolate, attr->atttypid)).Check();
+		col_obj->Set(context, ToString("typmod"), Int32::New(isolate, attr->atttypmod)).Check();
+		col_obj->Set(context, ToString("collation_oid"), Uint32::NewFromUnsigned(isolate, attr->attcollation)).Check();
+		col_obj->Set(context, ToString("type_sql"), ToString(type_sql ? type_sql : "text")).Check();
+
+		arr->Set(context, out_idx++, col_obj).Check();
+	}
+
+	args.GetReturnValue().Set(arr);
+}
+
+/*
+ * plv8.return_query(sql [, args])
+ *
+ * Executes a SQL query via SPI and streams all result rows directly into the
+ * active SRF tuplestore (matching columns positionally, coercing via I/O only
+ * when column type OIDs differ). Returns the number of rows appended.
+ */
+static void
+plv8_ReturnQuery(const FunctionCallbackInfo<v8::Value>& args)
+{
+	Isolate *isolate = args.GetIsolate();
+	Handle<v8::Object> self = args.This();
+	Handle<v8::Value> conv_value = self->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
+
+	if (!conv_value->IsExternal())
+		throw js_error("return_query called in context that cannot accept a set");
+
+	if (args.Length() < 1 || args[0]->IsUndefined() || args[0]->IsNull())
+		throw js_error("return_query requires a SQL query string");
+
+	Converter *conv = static_cast<Converter *>(
+		Handle<External>::Cast(conv_value)->Value(v8::kExternalPointerTypeTagDefault));
+	Tuplestorestate *tupstore = static_cast<Tuplestorestate *>(
+		self->GetInternalField(PLV8_INTNL_TUPSTORE).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
+
+	CString sql(args[0]);
+	Handle<Array> params;
+
+	if (args.Length() >= 2 && !args[1]->IsUndefined() && !args[1]->IsNull())
+	{
+		if (args[1]->IsArray())
+			params = Handle<Array>::Cast(args[1]);
+		else
+			params = convertArgsToArray(args, 1, 1);
+	}
+
+	int nparam = params.IsEmpty() ? 0 : params->Length();
+	int status = 0;
+	uint64 nrows = 0;
+
+	SubTranBlock subtran;
+	PG_TRY();
+	{
+		subtran.enter();
+		if (nparam == 0)
+			status = SPI_execute(sql, false, 0);
+		else
+			status = plv8_execute_params(sql, params);
+
+		if (status < 0)
+			elog(ERROR, "SPI_execute failed in return_query: %s", FormatSPIStatus(status));
+
+		if (SPI_tuptable != NULL && SPI_processed > 0)
+		{
+			TupleDesc spi_td = SPI_tuptable->tupdesc;
+			TupleDesc exp_td = conv->GetTupleDesc();
+			nrows = SPI_processed;
+
+			/* Build positional map of non-dropped columns in spi_td and exp_td */
+			int spi_cols[FUNC_MAX_ARGS];
+			int n_spi_cols = 0;
+			for (int a = 0; a < spi_td->natts && n_spi_cols < FUNC_MAX_ARGS; a++)
+			{
+				if (!TupleDescAttr(spi_td, a)->attisdropped)
+					spi_cols[n_spi_cols++] = a;
+			}
+
+			Datum *values = (Datum *) palloc0(sizeof(Datum) * exp_td->natts);
+			bool *nulls = (bool *) palloc0(sizeof(bool) * exp_td->natts);
+
+			for (uint64 r = 0; r < nrows; r++)
+			{
+				HeapTuple spi_tup = SPI_tuptable->vals[r];
+				int logical_idx = 0;
+
+				CHECK_FOR_INTERRUPTS();
+
+				for (int exp_att = 0; exp_att < exp_td->natts; exp_att++)
+				{
+					Form_pg_attribute exp_attr = TupleDescAttr(exp_td, exp_att);
+					if (exp_attr->attisdropped)
+					{
+						nulls[exp_att] = true;
+						values[exp_att] = (Datum) 0;
+						continue;
+					}
+
+					if (logical_idx >= n_spi_cols)
+					{
+						nulls[exp_att] = true;
+						values[exp_att] = (Datum) 0;
+						logical_idx++;
+						continue;
+					}
+
+					int spi_att = spi_cols[logical_idx++];
+					Form_pg_attribute spi_attr = TupleDescAttr(spi_td, spi_att);
+					bool isnull = false;
+					Datum d = heap_getattr(spi_tup, spi_att + 1, spi_td, &isnull);
+
+					if (isnull)
+					{
+						nulls[exp_att] = true;
+						values[exp_att] = (Datum) 0;
+					}
+					else if (spi_attr->atttypid == exp_attr->atttypid)
+					{
+						nulls[exp_att] = false;
+						values[exp_att] = d;
+					}
+					else
+					{
+						Oid typoutput;
+						bool typIsVarlena;
+						Oid typinput;
+						Oid typioparam;
+						char *str_val;
+
+						getTypeOutputInfo(spi_attr->atttypid, &typoutput, &typIsVarlena);
+						str_val = OidOutputFunctionCall(typoutput, d);
+						getTypeInputInfo(exp_attr->atttypid, &typinput, &typioparam);
+						values[exp_att] = OidInputFunctionCall(typinput, str_val, typioparam, exp_attr->atttypmod);
+						nulls[exp_att] = false;
+						pfree(str_val);
+					}
+				}
+
+				tuplestore_putvalues(tupstore, exp_td, values, nulls);
+			}
+
+			pfree(values);
+			pfree(nulls);
+			SPI_freetuptable(SPI_tuptable);
+		}
+	}
+	PG_CATCH();
+	{
+		subtran.exit(false);
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	subtran.exit(true);
+	args.GetReturnValue().Set(Int32::New(isolate, (int32_t) nrows));
+}
+
+/*
+ * plv8.register_column_inference(func_name, handler_fn_or_sql_func_name)
+ */
+static void
+plv8_RegisterColumnInference(const FunctionCallbackInfo<v8::Value>& args)
+{
+	Isolate *isolate = args.GetIsolate();
+
+	if (args.Length() < 2 || !args[0]->IsString())
+		throw js_error("plv8.register_column_inference(func_name, handler) requires a function name and a callback or SQL function name");
+
+	CString func_name(args[0]);
+	if (args[1]->IsFunction())
+	{
+		plv8_register_column_inference_hook(func_name.str(), NULL, Local<Function>::Cast(args[1]));
+	}
+	else if (args[1]->IsString())
+	{
+		CString sql_fn(args[1]);
+		plv8_register_column_inference_hook(func_name.str(), sql_fn.str(), Local<Function>());
+	}
+	else if (args[1]->IsNull() || args[1]->IsUndefined())
+	{
+		plv8_register_column_inference_hook(func_name.str(), NULL, Local<Function>());
+	}
+	else
+	{
+		throw js_error("plv8.register_column_inference second argument must be a Function, string, or null");
+	}
+
+	args.GetReturnValue().Set(v8::Boolean::New(isolate, true));
+}
+
+/*
+ * plv8.register_support(func_name, handler_fn_or_sql_func_name)
+ */
+static void
+plv8_RegisterSupport(const FunctionCallbackInfo<v8::Value>& args)
+{
+	Isolate *isolate = args.GetIsolate();
+
+	if (args.Length() < 2 || !args[0]->IsString())
+		throw js_error("plv8.register_support(func_name, handler) requires a function name and a callback or SQL function name");
+
+	CString func_name(args[0]);
+	if (args[1]->IsFunction())
+	{
+		plv8_register_planner_support_hook(func_name.str(), NULL, Local<Function>::Cast(args[1]));
+	}
+	else if (args[1]->IsString())
+	{
+		CString sql_fn(args[1]);
+		plv8_register_planner_support_hook(func_name.str(), sql_fn.str(), Local<Function>());
+	}
+	else if (args[1]->IsNull() || args[1]->IsUndefined())
+	{
+		plv8_register_planner_support_hook(func_name.str(), NULL, Local<Function>());
+	}
+	else
+	{
+		throw js_error("plv8.register_support second argument must be a Function, string, or null");
+	}
+
+	args.GetReturnValue().Set(v8::Boolean::New(isolate, true));
+}
+
+/*
+ * plv8.set_function_columns(func_name, columns_array_or_null)
+ */
+static void
+plv8_SetFunctionColumns(const FunctionCallbackInfo<v8::Value>& args)
+{
+	Isolate *isolate = args.GetIsolate();
+	Local<Context> context = isolate->GetCurrentContext();
+
+	if (args.Length() < 2 || !args[0]->IsString())
+		throw js_error("plv8.set_function_columns(func_name, columns) requires a function name and columns array or null");
+
+	CString func_name(args[0]);
+	if (args[1]->IsNull() || args[1]->IsUndefined())
+	{
+		plv8_set_function_columns_js(func_name.str(), 0, NULL);
+		args.GetReturnValue().Set(v8::Boolean::New(isolate, true));
+		return;
+	}
+
+	if (!args[1]->IsArray())
+		throw js_error("plv8.set_function_columns second argument must be an Array or null");
+
+	Local<Array> arr = Local<Array>::Cast(args[1]);
+	uint32_t len = arr->Length();
+	if (len == 0)
+	{
+		plv8_set_function_columns_js(func_name.str(), 0, NULL);
+		args.GetReturnValue().Set(v8::Boolean::New(isolate, true));
+		return;
+	}
+
+	if (len > FUNC_MAX_ARGS)
+		len = FUNC_MAX_ARGS;
+
+	Plv8ColMeta cols[FUNC_MAX_ARGS];
+	int ncols = 0;
+
+	for (uint32_t i = 0; i < len; i++)
+	{
+		Local<v8::Value> elem;
+		if (!arr->Get(context, i).ToLocal(&elem) || !elem->IsObject())
+			continue;
+		Local<Object> obj = Local<Object>::Cast(elem);
+
+		Local<v8::Value> name_val;
+		const char *cname = "?column?";
+		if (obj->Get(context, ToString("name")).ToLocal(&name_val) && name_val->IsString())
+		{
+			CString cs(name_val);
+			cname = pstrdup(cs.str("?column?"));
+		}
+		else
+		{
+			cname = pstrdup("?column?");
+		}
+
+		Oid type_oid = InvalidOid;
+		int32 typmod = -1;
+		Oid coll_oid = InvalidOid;
+
+		Local<v8::Value> oid_val;
+		if (obj->Get(context, ToString("type_oid")).ToLocal(&oid_val) && oid_val->IsNumber())
+			type_oid = (Oid) oid_val->Uint32Value(context).FromMaybe(0);
+
+		Local<v8::Value> tm_val;
+		if (obj->Get(context, ToString("typmod")).ToLocal(&tm_val) && tm_val->IsNumber())
+			typmod = tm_val->Int32Value(context).FromMaybe(-1);
+
+		Local<v8::Value> coll_val;
+		if (obj->Get(context, ToString("collation_oid")).ToLocal(&coll_val) && coll_val->IsNumber())
+			coll_oid = (Oid) coll_val->Uint32Value(context).FromMaybe(0);
+
+		if (!OidIsValid(type_oid))
+		{
+			Local<v8::Value> type_str_val;
+			if ((obj->Get(context, ToString("type")).ToLocal(&type_str_val) && type_str_val->IsString()) ||
+				(obj->Get(context, ToString("type_sql")).ToLocal(&type_str_val) && type_str_val->IsString()))
+			{
+				CString ts(type_str_val);
+				PG_TRY();
+				{
+#if PG_VERSION_NUM >= 160000
+					(void) parseTypeString(ts.str(), &type_oid, &typmod, NULL);
+#else
+					(void) parseTypeString(ts.str(), &type_oid, &typmod, false);
+#endif
+				}
+				PG_CATCH();
+				{
+					FlushErrorState();
+					type_oid = TEXTOID;
+					typmod = -1;
+				}
+				PG_END_TRY();
+			}
+		}
+
+		if (!OidIsValid(type_oid))
+			type_oid = TEXTOID;
+
+		cols[ncols].name = (char *) cname;
+		cols[ncols].type_oid = type_oid;
+		cols[ncols].typmod = typmod;
+		cols[ncols].collation_oid = coll_oid;
+		ncols++;
+	}
+
+	plv8_set_function_columns_js(func_name.str(), ncols, cols);
+	args.GetReturnValue().Set(v8::Boolean::New(isolate, true));
 }

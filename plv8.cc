@@ -27,6 +27,7 @@
 
 
 extern "C" {
+#define String PG_Node_String
 #include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
@@ -34,6 +35,7 @@ extern "C" {
 #include "access/xact.h"
 #include "catalog/indexing.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_attribute.h"
 #include "catalog/pg_namespace.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_database.h"
@@ -46,6 +48,13 @@ extern "C" {
 #include "funcapi.h"
 #include "lib/dshash.h"
 #include "miscadmin.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/parsenodes.h"
+#include "nodes/pathnodes.h"
+#include "nodes/pg_list.h"
+#include "nodes/supportnodes.h"
+#include "parser/parse_relation.h"
 #include "parser/parse_type.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
@@ -102,9 +111,19 @@ PG_FUNCTION_INFO_V1(plv8_modules_changed);
 PGDLLEXPORT void _PG_init(void);
 
 PGDLLEXPORT Datum	plv8_inline_handler(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_source_in(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_source_out(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum	plv8_call_support(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(plv8_inline_handler);
+PG_FUNCTION_INFO_V1(plv8_source_in);
+PG_FUNCTION_INFO_V1(plv8_source_out);
+PG_FUNCTION_INFO_V1(plv8_call_support);
+#undef String
 } // extern "C"
+
+static void plv8_reset_all_stamped_procs(void);
+static void plv8_dispose_support_hooks_for_user(Oid user_id);
 
 using namespace v8;
 
@@ -1729,6 +1748,8 @@ plv8_call_handler(PG_FUNCTION_ARGS)
 	Oid		fn_oid = fcinfo->flinfo->fn_oid;
 	bool	is_trigger = CALLED_AS_TRIGGER(fcinfo);
 
+	plv8_reset_all_stamped_procs();
+
 	try
 	{
 		plv8_context   *context = GetPlv8Context();
@@ -1798,6 +1819,18 @@ plv8_call_handler(PG_FUNCTION_ARGS)
 						   superuser_arg(cache->proowner),
 						   cache->preserve_numeric_precision);
 
+		if (!is_trigger && cache->nargs == 1 &&
+			proc->argtypes[0].typid == INTERNALOID &&
+			proc->rettype.typid == VOIDOID && fcinfo->nargs == 1 &&
+			!PG_ARGISNULL(0))
+		{
+			Node *arg0 = (Node *) DatumGetPointer(PG_GETARG_DATUM(0));
+			if (arg0 != NULL && IsA(arg0, InlineCodeBlock))
+			{
+				return plv8_inline_handler(fcinfo);
+			}
+		}
+
 		if (is_trigger)
 			return CallTrigger(fcinfo, proc->xenv);
 		else if (cache->retset)
@@ -1837,6 +1870,8 @@ DisposePlv8ContextHandles(plv8_context *ctx)
 {
 	HASH_SEQ_STATUS		status;
 	plv8_proc_cache*	cache;
+
+	plv8_dispose_support_hooks_for_user(ctx->user_id);
 
 	if (plv8_proc_cache_hash)
 	{
@@ -7082,4 +7117,1974 @@ plv8_append_json_string(StringInfo buf, const char *str)
 	}
 	appendStringInfoChar(buf, '"');
 }
+
+/* =========================================================================
+ * PL/v8 Dynamic Table Function & Planner Support Subsystem
+ *
+ * Provides:
+ *   1. `plv8_source_in` / `plv8_source_out` — parse-time TupleDesc inference
+ *      for functions taking `plv8_source` (or a domain over `plv8_source` such
+ *      as `pgq_pattern`) and returning `SETOF record`, enabling calls in FROM
+ *      both WITH and WITHOUT an explicit `AS (...)` column definition list.
+ *   2. `plv8_call_support` — `prosupport` planner hook (`SUPPORT plv8_call_support`)
+ *      that delegates `SupportRequestSimplify`, `SupportRequestCost`, and
+ *      `SupportRequestRows` to JavaScript callbacks (`plv8.register_support`)
+ *      or SQL/PLv8 support functions (`<func>_support` / `plv8.support_hooks`),
+ *      inlining `FROM`-clause calls into native `RTE_SUBQUERY` nodes with
+ *      full outer `LATERAL` `Var` correlation via `plv8_inline_helper_0..7`.
+ * =========================================================================
+ */
+
+#define PLV8_NUM_INLINE_HELPERS 8
+#define PLV8_MAX_INFERRED_CACHE 16
+#define PLV8_MAX_HOOK_ENTRIES   32
+#define PLV8_MAX_STAMPED_OIDS   64
+
+typedef struct Plv8InferredEntry
+{
+	char	   *func_name;
+	char	   *source_str;
+	char	   *first_arg;
+	int			ncols;
+	Plv8ColMeta *cols;
+} Plv8InferredEntry;
+
+typedef struct Plv8SupportHookEntry
+{
+	bool					in_use;
+	char					func_name[NAMEDATALEN];
+	char					infer_sql_func[NAMEDATALEN];
+	char					support_sql_func[NAMEDATALEN];
+	Oid						user_id;
+	v8::Persistent<v8::Function> infer_js_cb;
+	v8::Persistent<v8::Function> support_js_cb;
+} Plv8SupportHookEntry;
+
+static Plv8InferredEntry plv8_inferred_cache[PLV8_MAX_INFERRED_CACHE];
+static int plv8_inferred_cache_next = 0;
+
+static Plv8SupportHookEntry plv8_hook_registry[PLV8_MAX_HOOK_ENTRIES];
+static bool plv8_hook_registry_initialized = false;
+
+static Oid plv8_stamped_oids[PLV8_MAX_STAMPED_OIDS];
+static int plv8_num_stamped_oids = 0;
+
+static bool plv8_in_support_internal_call = false;
+static int plv8_inline_slot_counter = 0;
+
+static void
+plv8_ensure_hook_registry_init(void)
+{
+	if (!plv8_hook_registry_initialized)
+	{
+		for (int i = 0; i < PLV8_MAX_HOOK_ENTRIES; i++)
+		{
+			plv8_hook_registry[i].in_use = false;
+			plv8_hook_registry[i].func_name[0] = '\0';
+			plv8_hook_registry[i].infer_sql_func[0] = '\0';
+			plv8_hook_registry[i].support_sql_func[0] = '\0';
+			plv8_hook_registry[i].user_id = InvalidOid;
+			new(&plv8_hook_registry[i].infer_js_cb) v8::Persistent<v8::Function>();
+			new(&plv8_hook_registry[i].support_js_cb) v8::Persistent<v8::Function>();
+		}
+		plv8_hook_registry_initialized = true;
+	}
+}
+
+static void
+plv8_normalize_func_name(const char *raw, char *out, size_t out_sz)
+{
+	if (raw == NULL || out_sz == 0)
+	{
+		if (out_sz > 0)
+			out[0] = '\0';
+		return;
+	}
+
+	const char *dot = strrchr(raw, '.');
+	const char *p = dot ? (dot + 1) : raw;
+	size_t idx = 0;
+
+	while (*p != '\0' && idx + 1 < out_sz)
+	{
+		unsigned char c = (unsigned char) *p++;
+		if (c == '"')
+			continue;
+		if (c >= 'A' && c <= 'Z')
+			c = (unsigned char) (c - 'A' + 'a');
+		out[idx++] = (char) c;
+	}
+	out[idx] = '\0';
+}
+
+static Plv8SupportHookEntry *
+plv8_find_or_create_hook_entry(const char *func_name, bool create)
+{
+	plv8_ensure_hook_registry_init();
+	char norm[NAMEDATALEN];
+	plv8_normalize_func_name(func_name, norm, sizeof(norm));
+	if (norm[0] == '\0')
+		return NULL;
+
+	int free_slot = -1;
+	for (int i = 0; i < PLV8_MAX_HOOK_ENTRIES; i++)
+	{
+		if (plv8_hook_registry[i].in_use &&
+			strcmp(plv8_hook_registry[i].func_name, norm) == 0)
+		{
+			return &plv8_hook_registry[i];
+		}
+		if (!plv8_hook_registry[i].in_use && free_slot < 0)
+			free_slot = i;
+	}
+
+	if (!create || free_slot < 0)
+		return NULL;
+
+	Plv8SupportHookEntry *e = &plv8_hook_registry[free_slot];
+	e->in_use = true;
+	strlcpy(e->func_name, norm, sizeof(e->func_name));
+	e->infer_sql_func[0] = '\0';
+	e->support_sql_func[0] = '\0';
+	e->user_id = current_context ? current_context->user_id : GetUserId();
+	return e;
+}
+
+void
+plv8_register_column_inference_hook(const char *func_name,
+									const char *sql_func_name,
+									v8::Local<v8::Function> js_cb)
+{
+	Plv8SupportHookEntry *e = plv8_find_or_create_hook_entry(func_name, true);
+	if (e == NULL)
+		return;
+
+	e->infer_js_cb.Reset();
+	e->infer_sql_func[0] = '\0';
+
+	if (!js_cb.IsEmpty() && current_isolate != nullptr)
+	{
+		e->infer_js_cb.Reset(current_isolate, js_cb);
+		e->user_id = current_context ? current_context->user_id : GetUserId();
+	}
+	else if (sql_func_name != NULL && sql_func_name[0] != '\0')
+	{
+		strlcpy(e->infer_sql_func, sql_func_name, sizeof(e->infer_sql_func));
+	}
+}
+
+void
+plv8_register_planner_support_hook(const char *func_name,
+								   const char *sql_func_name,
+								   v8::Local<v8::Function> js_cb)
+{
+	Plv8SupportHookEntry *e = plv8_find_or_create_hook_entry(func_name, true);
+	if (e == NULL)
+		return;
+
+	e->support_js_cb.Reset();
+	e->support_sql_func[0] = '\0';
+
+	if (!js_cb.IsEmpty() && current_isolate != nullptr)
+	{
+		e->support_js_cb.Reset(current_isolate, js_cb);
+		e->user_id = current_context ? current_context->user_id : GetUserId();
+	}
+	else if (sql_func_name != NULL && sql_func_name[0] != '\0')
+	{
+		strlcpy(e->support_sql_func, sql_func_name, sizeof(e->support_sql_func));
+	}
+}
+
+static void
+plv8_dispose_support_hooks_for_user(Oid user_id)
+{
+	if (!plv8_hook_registry_initialized)
+		return;
+
+	for (int i = 0; i < PLV8_MAX_HOOK_ENTRIES; i++)
+	{
+		if (plv8_hook_registry[i].in_use &&
+			plv8_hook_registry[i].user_id == user_id)
+		{
+			plv8_hook_registry[i].infer_js_cb.Reset();
+			plv8_hook_registry[i].support_js_cb.Reset();
+		}
+	}
+}
+
+/*
+ * Save inferred columns in TopMemoryContext ring buffer.
+ */
+static void
+plv8_save_inferred_columns(const char *func_name, const char *source_str,
+						   const char *first_arg, int ncols,
+						   const Plv8ColMeta *cols)
+{
+	if (ncols <= 0 || source_str == NULL)
+		return;
+
+	MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
+	Plv8InferredEntry *slot = &plv8_inferred_cache[plv8_inferred_cache_next];
+	plv8_inferred_cache_next = (plv8_inferred_cache_next + 1) % PLV8_MAX_INFERRED_CACHE;
+
+	if (slot->func_name != NULL)
+		pfree(slot->func_name);
+	if (slot->source_str != NULL)
+		pfree(slot->source_str);
+	if (slot->first_arg != NULL)
+		pfree(slot->first_arg);
+	if (slot->cols != NULL)
+	{
+		for (int i = 0; i < slot->ncols; i++)
+		{
+			if (slot->cols[i].name != NULL)
+				pfree(slot->cols[i].name);
+		}
+		pfree(slot->cols);
+	}
+
+	slot->func_name = pstrdup(func_name ? func_name : "");
+	slot->source_str = pstrdup(source_str);
+	slot->first_arg = first_arg ? pstrdup(first_arg) : NULL;
+	slot->ncols = ncols;
+	slot->cols = (Plv8ColMeta *) palloc0(sizeof(Plv8ColMeta) * ncols);
+	for (int i = 0; i < ncols; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
+		slot->cols[i].name = pstrdup(cols[i].name ? cols[i].name : "?column?");
+		slot->cols[i].type_oid = cols[i].type_oid;
+		slot->cols[i].typmod = cols[i].typmod;
+		slot->cols[i].collation_oid = cols[i].collation_oid;
+	}
+
+	MemoryContextSwitchTo(oldcxt);
+}
+
+static Plv8InferredEntry *
+plv8_find_inferred_columns(const char *source_str)
+{
+	if (source_str == NULL)
+		return NULL;
+
+	for (int i = 0; i < PLV8_MAX_INFERRED_CACHE; i++)
+	{
+		int idx = (plv8_inferred_cache_next - 1 - i + PLV8_MAX_INFERRED_CACHE) % PLV8_MAX_INFERRED_CACHE;
+
+		CHECK_FOR_INTERRUPTS();
+		if (plv8_inferred_cache[idx].source_str != NULL &&
+			strcmp(plv8_inferred_cache[idx].source_str, source_str) == 0)
+			return &plv8_inferred_cache[idx];
+	}
+	return NULL;
+}
+
+/*
+ * Look up a function by name and argument count in the syscache.
+ */
+static Oid
+plv8_lookup_func_oid_by_name_nargs(const char *funcname, int nargs)
+{
+	if (funcname == NULL || funcname[0] == '\0')
+		return InvalidOid;
+
+	Oid result = InvalidOid;
+	CatCList *catlist = SearchSysCacheList1(PROCNAMEARGSNSP, CStringGetDatum(funcname));
+	for (int i = 0; i < catlist->n_members; i++)
+	{
+		HeapTuple proctup = &catlist->members[i]->tuple;
+		Form_pg_proc procform = (Form_pg_proc) GETSTRUCT(proctup);
+
+		CHECK_FOR_INTERRUPTS();
+		if (nargs < 0 || procform->pronargs == nargs)
+		{
+			result = procform->oid;
+			break;
+		}
+	}
+	ReleaseSysCacheList(catlist);
+	return result;
+}
+
+static Oid
+plv8_find_infer_sql_func_oid(const char *func_name)
+{
+	Plv8SupportHookEntry *e = plv8_find_or_create_hook_entry(func_name, false);
+	if (e != NULL && e->infer_sql_func[0] != '\0')
+	{
+		Oid oid = plv8_lookup_func_oid_by_name_nargs(e->infer_sql_func, 2);
+		if (OidIsValid(oid))
+			return oid;
+	}
+
+	char candidate[NAMEDATALEN * 2];
+	snprintf(candidate, sizeof(candidate), "%s_infer_columns",
+			 (func_name && func_name[0] != '\0') ? func_name : "graph_table");
+	Oid oid = plv8_lookup_func_oid_by_name_nargs(candidate, 2);
+	if (OidIsValid(oid))
+		return oid;
+
+	if (func_name == NULL || func_name[0] == '\0' || strcmp(func_name, "graph_table") == 0)
+	{
+		oid = plv8_lookup_func_oid_by_name_nargs("pgq_infer_columns_tsv", 2);
+		if (OidIsValid(oid))
+			return oid;
+	}
+
+	return InvalidOid;
+}
+
+static Oid
+plv8_find_support_sql_func_oid(const char *func_name)
+{
+	Plv8SupportHookEntry *e = plv8_find_or_create_hook_entry(func_name, false);
+	if (e != NULL && e->support_sql_func[0] != '\0')
+	{
+		Oid oid = plv8_lookup_func_oid_by_name_nargs(e->support_sql_func, 5);
+		if (OidIsValid(oid))
+			return oid;
+	}
+
+	char candidate[NAMEDATALEN * 2];
+	snprintf(candidate, sizeof(candidate), "%s_support",
+			 (func_name && func_name[0] != '\0') ? func_name : "graph_table");
+	Oid oid = plv8_lookup_func_oid_by_name_nargs(candidate, 5);
+	if (OidIsValid(oid))
+		return oid;
+
+	if (func_name == NULL || func_name[0] == '\0' || strcmp(func_name, "graph_table") == 0)
+	{
+		oid = plv8_lookup_func_oid_by_name_nargs("pgq_compile_graph_table_tsv", 5);
+		if (OidIsValid(oid))
+			return oid;
+	}
+
+	return InvalidOid;
+}
+
+/*
+ * Find the 1-column composite holder type (`plv8_single_col_holder` or
+ * `plpgq_single_col_holder`) and update its single attribute metadata.
+ */
+static Oid
+plv8_update_single_col_holder_type(const Plv8ColMeta *col)
+{
+	static const char *holder_names[] = {
+		"plv8_single_col_holder",
+		"plpgq_single_col_holder",
+		NULL
+	};
+	Oid holder_type_oid = InvalidOid;
+	Oid holder_relid = InvalidOid;
+
+	if (col == NULL || XactReadOnly)
+		return InvalidOid;
+
+	for (int h = 0; holder_names[h] != NULL && !OidIsValid(holder_type_oid); h++)
+	{
+		CatCList *catlist = SearchSysCacheList1(TYPENAMENSP,
+												CStringGetDatum(holder_names[h]));
+		for (int i = 0; i < catlist->n_members; i++)
+		{
+			HeapTuple ttup = &catlist->members[i]->tuple;
+			Form_pg_type tform = (Form_pg_type) GETSTRUCT(ttup);
+
+			CHECK_FOR_INTERRUPTS();
+			if (tform->typtype == TYPTYPE_COMPOSITE && OidIsValid(tform->typrelid))
+			{
+				holder_type_oid = tform->oid;
+				holder_relid = tform->typrelid;
+				break;
+			}
+		}
+		ReleaseSysCacheList(catlist);
+	}
+
+	if (!OidIsValid(holder_type_oid) || !OidIsValid(holder_relid))
+		return InvalidOid;
+
+	HeapTuple typtup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(col->type_oid));
+	if (!HeapTupleIsValid(typtup))
+		return InvalidOid;
+	Form_pg_type typform = (Form_pg_type) GETSTRUCT(typtup);
+
+	Relation attrel = table_open(AttributeRelationId, RowExclusiveLock);
+	HeapTuple atttup = SearchSysCacheCopy2(ATTNUM,
+										   ObjectIdGetDatum(holder_relid),
+										   Int16GetDatum(1));
+	if (!HeapTupleIsValid(atttup))
+	{
+		table_close(attrel, RowExclusiveLock);
+		ReleaseSysCache(typtup);
+		return InvalidOid;
+	}
+
+	Form_pg_attribute attform = (Form_pg_attribute) GETSTRUCT(atttup);
+	namestrcpy(&attform->attname,
+			   (col->name && col->name[0] != '\0') ? col->name : "?column?");
+	attform->atttypid = col->type_oid;
+	attform->attlen = typform->typlen;
+	attform->attbyval = typform->typbyval;
+	attform->attalign = typform->typalign;
+	attform->attstorage = typform->typstorage;
+#if PG_VERSION_NUM >= 140000
+	attform->attcompression = '\0';
+#endif
+	attform->atttypmod = col->typmod;
+	attform->attndims = (typform->typcategory == TYPCATEGORY_ARRAY) ? 1 : 0;
+	attform->attcollation = OidIsValid(col->collation_oid)
+		? col->collation_oid
+		: typform->typcollation;
+
+	ReleaseSysCache(typtup);
+
+	CatalogTupleUpdate(attrel, &atttup->t_self, atttup);
+	heap_freetuple(atttup);
+	table_close(attrel, RowExclusiveLock);
+
+	CacheInvalidateRelcacheByRelid(holder_relid);
+	CommandCounterIncrement();
+
+	return holder_type_oid;
+}
+
+static bool
+plv8_is_single_col_holder_type(Oid typid)
+{
+	if (!OidIsValid(typid) || typid == RECORDOID)
+		return false;
+
+	HeapTuple typtup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
+	if (!HeapTupleIsValid(typtup))
+		return false;
+	Form_pg_type tform = (Form_pg_type) GETSTRUCT(typtup);
+	bool match = (strcmp(NameStr(tform->typname), "plv8_single_col_holder") == 0 ||
+				  strcmp(NameStr(tform->typname), "plpgq_single_col_holder") == 0);
+	ReleaseSysCache(typtup);
+	return match;
+}
+
+static void
+plv8_record_stamped_oid(Oid funcid)
+{
+	if (!OidIsValid(funcid))
+		return;
+	for (int i = 0; i < plv8_num_stamped_oids; i++)
+	{
+		if (plv8_stamped_oids[i] == funcid)
+			return;
+	}
+	if (plv8_num_stamped_oids < PLV8_MAX_STAMPED_OIDS)
+		plv8_stamped_oids[plv8_num_stamped_oids++] = funcid;
+}
+
+/*
+ * Update `proallargtypes`, `proargmodes`, and `proargnames` on a `pg_proc`
+ * tuple (and optionally `prosrc`, `proargtypes`, `pronargs` for inline helpers).
+ */
+static void
+plv8_update_proc_table_columns(Oid funcid,
+							   int num_out_cols,
+							   const Plv8ColMeta *out_cols,
+							   const char *new_prosrc,
+							   int new_num_in_args,
+							   const Oid *new_in_arg_oids)
+{
+	if (!OidIsValid(funcid) || XactReadOnly)
+		return;
+
+	Oid single_holder_oid = InvalidOid;
+	if (num_out_cols == 1 && out_cols != NULL)
+		single_holder_oid = plv8_update_single_col_holder_type(&out_cols[0]);
+
+	Relation proc_rel = table_open(ProcedureRelationId, RowExclusiveLock);
+	HeapTuple tup = SearchSysCacheCopy1(PROCOID, ObjectIdGetDatum(funcid));
+	if (!HeapTupleIsValid(tup))
+	{
+		table_close(proc_rel, RowExclusiveLock);
+		return;
+	}
+
+	Form_pg_proc procform = (Form_pg_proc) GETSTRUCT(tup);
+
+	if (num_out_cols <= 0 && new_prosrc == NULL && new_num_in_args < 0 &&
+		procform->prorettype == RECORDOID &&
+		heap_attisnull(tup, Anum_pg_proc_proallargtypes, RelationGetDescr(proc_rel)))
+	{
+		heap_freetuple(tup);
+		table_close(proc_rel, RowExclusiveLock);
+		return;
+	}
+
+	Datum values[Natts_pg_proc];
+	bool nulls[Natts_pg_proc];
+	bool replaces[Natts_pg_proc];
+	MemSet(values, 0, sizeof(values));
+	MemSet(nulls, false, sizeof(nulls));
+	MemSet(replaces, false, sizeof(replaces));
+
+	int ninargs;
+	const Oid *inargoids;
+
+	if (new_num_in_args >= 0)
+	{
+		ninargs = new_num_in_args;
+		inargoids = new_in_arg_oids;
+		values[Anum_pg_proc_pronargs - 1] = Int16GetDatum((int16) ninargs);
+		replaces[Anum_pg_proc_pronargs - 1] = true;
+		values[Anum_pg_proc_proargtypes - 1] =
+			PointerGetDatum(buildoidvector(inargoids, ninargs));
+		replaces[Anum_pg_proc_proargtypes - 1] = true;
+	}
+	else
+	{
+		ninargs = procform->pronargs;
+		inargoids = procform->proargtypes.values;
+	}
+
+	if (new_prosrc != NULL)
+	{
+		values[Anum_pg_proc_prosrc - 1] = CStringGetTextDatum(new_prosrc);
+		replaces[Anum_pg_proc_prosrc - 1] = true;
+	}
+
+	if (num_out_cols <= 0)
+	{
+		values[Anum_pg_proc_prorettype - 1] = ObjectIdGetDatum(RECORDOID);
+		replaces[Anum_pg_proc_prorettype - 1] = true;
+
+		nulls[Anum_pg_proc_proallargtypes - 1] = true;
+		replaces[Anum_pg_proc_proallargtypes - 1] = true;
+
+		nulls[Anum_pg_proc_proargmodes - 1] = true;
+		replaces[Anum_pg_proc_proargmodes - 1] = true;
+
+		nulls[Anum_pg_proc_proargnames - 1] = true;
+		replaces[Anum_pg_proc_proargnames - 1] = true;
+	}
+	else if (num_out_cols == 1 && OidIsValid(single_holder_oid))
+	{
+		values[Anum_pg_proc_prorettype - 1] = ObjectIdGetDatum(single_holder_oid);
+		replaces[Anum_pg_proc_prorettype - 1] = true;
+
+		nulls[Anum_pg_proc_proallargtypes - 1] = true;
+		replaces[Anum_pg_proc_proallargtypes - 1] = true;
+
+		nulls[Anum_pg_proc_proargmodes - 1] = true;
+		replaces[Anum_pg_proc_proargmodes - 1] = true;
+
+		nulls[Anum_pg_proc_proargnames - 1] = true;
+		replaces[Anum_pg_proc_proargnames - 1] = true;
+	}
+	else
+	{
+		int total_args = ninargs + num_out_cols;
+		Datum *all_types = (Datum *) palloc(sizeof(Datum) * total_args);
+		Datum *all_modes = (Datum *) palloc(sizeof(Datum) * total_args);
+		Datum *all_names = (Datum *) palloc(sizeof(Datum) * total_args);
+
+		values[Anum_pg_proc_prorettype - 1] = ObjectIdGetDatum(RECORDOID);
+		replaces[Anum_pg_proc_prorettype - 1] = true;
+
+		for (int i = 0; i < ninargs; i++)
+		{
+			char argbuf[32];
+
+			CHECK_FOR_INTERRUPTS();
+			all_types[i] = ObjectIdGetDatum(inargoids[i]);
+			all_modes[i] = CharGetDatum(PROARGMODE_IN);
+			snprintf(argbuf, sizeof(argbuf), "__in_%d", i + 1);
+			all_names[i] = CStringGetTextDatum(argbuf);
+		}
+		for (int i = 0; i < num_out_cols; i++)
+		{
+			CHECK_FOR_INTERRUPTS();
+			all_types[ninargs + i] = ObjectIdGetDatum(out_cols[i].type_oid);
+			all_modes[ninargs + i] = CharGetDatum(PROARGMODE_TABLE);
+			all_names[ninargs + i] = CStringGetTextDatum(
+				out_cols[i].name ? out_cols[i].name : "?column?");
+		}
+
+#if PG_VERSION_NUM >= 160000
+		values[Anum_pg_proc_proallargtypes - 1] = PointerGetDatum(
+			construct_array_builtin(all_types, total_args, OIDOID));
+		replaces[Anum_pg_proc_proallargtypes - 1] = true;
+
+		values[Anum_pg_proc_proargmodes - 1] = PointerGetDatum(
+			construct_array_builtin(all_modes, total_args, CHAROID));
+		replaces[Anum_pg_proc_proargmodes - 1] = true;
+
+		values[Anum_pg_proc_proargnames - 1] = PointerGetDatum(
+			construct_array_builtin(all_names, total_args, TEXTOID));
+		replaces[Anum_pg_proc_proargnames - 1] = true;
+#else
+		values[Anum_pg_proc_proallargtypes - 1] = PointerGetDatum(
+			construct_array(all_types, total_args, OIDOID, sizeof(Oid), true, TYPALIGN_INT));
+		replaces[Anum_pg_proc_proallargtypes - 1] = true;
+
+		values[Anum_pg_proc_proargmodes - 1] = PointerGetDatum(
+			construct_array(all_modes, total_args, CHAROID, 1, true, TYPALIGN_CHAR));
+		replaces[Anum_pg_proc_proargmodes - 1] = true;
+
+		values[Anum_pg_proc_proargnames - 1] = PointerGetDatum(
+			construct_array(all_names, total_args, TEXTOID, -1, false, TYPALIGN_INT));
+		replaces[Anum_pg_proc_proargnames - 1] = true;
+#endif
+	}
+
+	HeapTuple newtup = heap_modify_tuple(tup, RelationGetDescr(proc_rel),
+										 values, nulls, replaces);
+	CatalogTupleUpdate(proc_rel, &newtup->t_self, newtup);
+
+	/*
+	 * If this function is already in `plv8_proc_cache_hash` and we only
+	 * toggled its TABLE return columns (not `prosrc` or `proargtypes`), keep
+	 * its `fn_xmin` / `fn_tid` and `rettype = RECORDOID` synchronized so the
+	 * compiled V8 function cache stays warm.
+	 */
+	if (new_prosrc == NULL && new_num_in_args < 0 && plv8_proc_cache_hash != NULL)
+	{
+		bool found = false;
+		plv8_proc_cache *cache = (plv8_proc_cache *)
+			hash_search(plv8_proc_cache_hash, &funcid, HASH_FIND, &found);
+		if (found && cache != NULL && !cache->function.IsEmpty())
+		{
+			cache->fn_xmin = HeapTupleHeaderGetXmin(newtup->t_data);
+			cache->fn_tid = newtup->t_self;
+			cache->rettype = RECORDOID;
+		}
+	}
+
+	heap_freetuple(newtup);
+	heap_freetuple(tup);
+	table_close(proc_rel, RowExclusiveLock);
+
+	CommandCounterIncrement();
+
+	if (num_out_cols > 0 && new_prosrc == NULL)
+		plv8_record_stamped_oid(funcid);
+}
+
+/*
+ * Apply `plv8_update_proc_table_columns` to all `RETURNS SETOF record`
+ * overloads of `func_name`.
+ */
+static void
+plv8_update_func_overloads_columns(const char *func_name,
+								   int num_out_cols,
+								   const Plv8ColMeta *out_cols)
+{
+	char norm[NAMEDATALEN];
+	plv8_normalize_func_name(func_name ? func_name : "graph_table", norm, sizeof(norm));
+	if (norm[0] == '\0')
+		strlcpy(norm, "graph_table", sizeof(norm));
+
+	List *oids = NIL;
+	CatCList *catlist = SearchSysCacheList1(PROCNAMEARGSNSP, CStringGetDatum(norm));
+	for (int i = 0; i < catlist->n_members; i++)
+	{
+		HeapTuple proctup = &catlist->members[i]->tuple;
+		Form_pg_proc procform = (Form_pg_proc) GETSTRUCT(proctup);
+
+		CHECK_FOR_INTERRUPTS();
+		if (procform->proretset &&
+			(procform->prorettype == RECORDOID ||
+			 plv8_is_single_col_holder_type(procform->prorettype)))
+		{
+			oids = lappend_oid(oids, procform->oid);
+		}
+	}
+	ReleaseSysCacheList(catlist);
+
+	ListCell *lc;
+	foreach(lc, oids)
+	{
+		Oid foid = lfirst_oid(lc);
+
+		CHECK_FOR_INTERRUPTS();
+		plv8_update_proc_table_columns(foid, num_out_cols, out_cols, NULL, -1, NULL);
+	}
+	list_free(oids);
+}
+
+static void
+plv8_reset_all_stamped_procs(void)
+{
+	if (plv8_num_stamped_oids <= 0 || XactReadOnly)
+		return;
+
+	int count = plv8_num_stamped_oids;
+	Oid local_oids[PLV8_MAX_STAMPED_OIDS];
+	for (int i = 0; i < count; i++)
+		local_oids[i] = plv8_stamped_oids[i];
+	plv8_num_stamped_oids = 0;
+
+	PG_TRY();
+	{
+		for (int i = 0; i < count; i++)
+		{
+			CHECK_FOR_INTERRUPTS();
+			plv8_update_proc_table_columns(local_oids[i], 0, NULL, NULL, -1, NULL);
+		}
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+	}
+	PG_END_TRY();
+}
+
+void
+plv8_set_function_columns_js(const char *func_name,
+							 int ncols,
+							 const Plv8ColMeta *cols)
+{
+	PG_TRY();
+	{
+		plv8_update_func_overloads_columns(func_name, ncols, cols);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+}
+
+/*
+ * Inspect `query_ctx` around `source_str` to determine:
+ *   - `func_name_out`: unqualified lowercase name of the enclosing function call
+ *   - `first_arg_out`: raw SQL text of the 1st argument (if `source_str` is arg 2+)
+ *   - `has_coldeflist_out`: true if the call is followed by `AS (...)` or `alias(...)`
+ */
+static void
+plv8_extract_enclosing_call(const char *query_ctx,
+							const char *source_str,
+							char **func_name_out,
+							char **first_arg_out,
+							bool *has_coldeflist_out)
+{
+	*func_name_out = pstrdup("graph_table");
+	*first_arg_out = pstrdup("");
+	*has_coldeflist_out = false;
+
+	if (query_ctx == NULL || *query_ctx == '\0' || source_str == NULL || *source_str == '\0')
+		return;
+
+	size_t src_len = strlen(source_str);
+	size_t match_len = src_len > 32 ? 32 : src_len;
+	char *needle = pnstrdup(source_str, match_len);
+	const char *pos = strstr(query_ctx, needle);
+	pfree(needle);
+
+	if (pos == NULL)
+		return;
+
+	/* Scan backwards from `pos` to find the enclosing `func_name(` */
+	int depth = 0;
+	const char *open_paren = NULL;
+	const char *first_comma_at_zero = NULL;
+	const char *quote_start = pos;
+
+	/* Step back over the opening quote (`'` or `$tag$`) */
+	if (quote_start > query_ctx && quote_start[-1] == '\'')
+		quote_start--;
+	else if (quote_start > query_ctx && quote_start[-1] == '$')
+	{
+		quote_start--;
+		while (quote_start > query_ctx &&
+			   (isalnum((unsigned char) quote_start[-1]) || quote_start[-1] == '_'))
+			quote_start--;
+		if (quote_start > query_ctx && quote_start[-1] == '$')
+			quote_start--;
+	}
+
+	for (const char *p = quote_start - 1; p >= query_ctx; p--)
+	{
+		char c = *p;
+		if (c == ')')
+			depth++;
+		else if (c == '(')
+		{
+			if (depth == 0)
+			{
+				open_paren = p;
+				break;
+			}
+			depth--;
+		}
+		else if (c == ',' && depth == 0)
+		{
+			first_comma_at_zero = p;
+		}
+	}
+
+	if (open_paren != NULL)
+	{
+		/* Extract function name preceding `open_paren` */
+		const char *fn_end = open_paren;
+		while (fn_end > query_ctx && isspace((unsigned char) fn_end[-1]))
+			fn_end--;
+		const char *fn_start = fn_end;
+		while (fn_start > query_ctx &&
+			   (isalnum((unsigned char) fn_start[-1]) ||
+				fn_start[-1] == '_' || fn_start[-1] == '.' || fn_start[-1] == '"'))
+			fn_start--;
+		if (fn_end > fn_start)
+		{
+			char *raw_fn = pnstrdup(fn_start, fn_end - fn_start);
+			char norm[NAMEDATALEN];
+			plv8_normalize_func_name(raw_fn, norm, sizeof(norm));
+			pfree(raw_fn);
+			if (norm[0] != '\0')
+			{
+				pfree(*func_name_out);
+				*func_name_out = pstrdup(norm);
+			}
+		}
+
+		/* Extract 1st argument if `source_str` is the 2nd+ argument */
+		if (first_comma_at_zero != NULL && first_comma_at_zero > open_paren + 1)
+		{
+			const char *a_start = open_paren + 1;
+			const char *a_end = first_comma_at_zero;
+			while (a_start < a_end && isspace((unsigned char) *a_start))
+				a_start++;
+			while (a_end > a_start && isspace((unsigned char) a_end[-1]))
+				a_end--;
+			pfree(*first_arg_out);
+			*first_arg_out = pnstrdup(a_start, a_end - a_start);
+		}
+
+		/* Scan forward from `open_paren` to find the matching `)` and check for `AS (...)` */
+		int fdepth = 0;
+		bool in_squote = false;
+		const char *close_paren = NULL;
+		for (const char *p = open_paren; *p != '\0'; p++)
+		{
+			char c = *p;
+			if (in_squote)
+			{
+				if (c == '\'')
+				{
+					if (p[1] == '\'')
+						p++;
+					else
+						in_squote = false;
+				}
+				continue;
+			}
+			if (c == '\'')
+			{
+				in_squote = true;
+				continue;
+			}
+			if (c == '(')
+				fdepth++;
+			else if (c == ')')
+			{
+				fdepth--;
+				if (fdepth == 0)
+				{
+					close_paren = p;
+					break;
+				}
+			}
+		}
+
+		if (close_paren != NULL)
+		{
+			const char *after = close_paren + 1;
+			while (*after != '\0' && isspace((unsigned char) *after))
+				after++;
+
+			/* Check optional `AS` keyword */
+			if (pg_strncasecmp(after, "AS", 2) == 0 &&
+				(isspace((unsigned char) after[2]) || after[2] == '('))
+			{
+				after += 2;
+				while (*after != '\0' && isspace((unsigned char) *after))
+					after++;
+				if (*after == '(')
+				{
+					*has_coldeflist_out = true;
+					return;
+				}
+			}
+
+			/* Check optional alias identifier followed by `(` */
+			if (isalpha((unsigned char) *after) || *after == '_' || *after == '"')
+			{
+				const char *tok_start = after;
+				if (*after == '"')
+				{
+					after++;
+					while (*after != '\0' && *after != '"')
+						after++;
+					if (*after == '"')
+						after++;
+				}
+				else
+				{
+					while (isalnum((unsigned char) *after) || *after == '_')
+						after++;
+				}
+				size_t tok_len = (size_t) (after - tok_start);
+				/* Ignore SQL clause keywords that cannot be followed by a coldeflist */
+				if (!(tok_len == 5 && pg_strncasecmp(tok_start, "WHERE", 5) == 0) &&
+					!(tok_len == 4 && pg_strncasecmp(tok_start, "JOIN", 4) == 0) &&
+					!(tok_len == 2 && pg_strncasecmp(tok_start, "ON", 2) == 0) &&
+					!(tok_len == 5 && pg_strncasecmp(tok_start, "ORDER", 5) == 0) &&
+					!(tok_len == 5 && pg_strncasecmp(tok_start, "GROUP", 5) == 0) &&
+					!(tok_len == 5 && pg_strncasecmp(tok_start, "LIMIT", 5) == 0) &&
+					!(tok_len == 5 && pg_strncasecmp(tok_start, "CROSS", 5) == 0) &&
+					!(tok_len == 4 && pg_strncasecmp(tok_start, "LEFT", 4) == 0) &&
+					!(tok_len == 5 && pg_strncasecmp(tok_start, "INNER", 5) == 0))
+				{
+					while (*after != '\0' && isspace((unsigned char) *after))
+						after++;
+					if (*after == '(')
+						*has_coldeflist_out = true;
+				}
+			}
+		}
+	}
+}
+
+/*
+ * Parse the tab-separated output from a `<func>_infer_columns(query_ctx, source_str)`
+ * SQL hook:
+ *   Line 0: "COLDEF\t1" or "COLDEF\t0\t<first_arg>"
+ *   Line k: "<col_name>\t<type_oid>\t<typmod>\t<collation_oid>"
+ */
+static void
+plv8_parse_and_apply_inferred_tsv(const char *func_name,
+								  const char *source_str,
+								  const char *fallback_first_arg,
+								  bool fallback_has_coldef,
+								  const char *tsv)
+{
+	if (tsv == NULL || *tsv == '\0')
+		return;
+
+	bool has_coldef = fallback_has_coldef;
+	char *first_arg = fallback_first_arg ? pstrdup(fallback_first_arg) : NULL;
+	char *copy = pstrdup(tsv);
+	char *saveptr = NULL;
+	Plv8ColMeta cols[FUNC_MAX_ARGS];
+	int ncols = 0;
+	int line_idx = 0;
+
+	for (char *line = strtok_r(copy, "\n", &saveptr);
+		 line != NULL;
+		 line = strtok_r(NULL, "\n", &saveptr))
+	{
+		CHECK_FOR_INTERRUPTS();
+		if (line_idx == 0 && strncmp(line, "COLDEF\t", 7) == 0)
+		{
+			if (strncmp(line, "COLDEF\t1", 8) == 0)
+				has_coldef = true;
+			else if (strncmp(line, "COLDEF\t0", 8) == 0)
+			{
+				has_coldef = false;
+				if (line[8] == '\t' && line[9] != '\0')
+					first_arg = pstrdup(line + 9);
+			}
+			line_idx++;
+			continue;
+		}
+		if (ncols < FUNC_MAX_ARGS)
+		{
+			char *tab1 = strchr(line, '\t');
+			if (tab1 != NULL)
+			{
+				*tab1 = '\0';
+				char *tab2 = strchr(tab1 + 1, '\t');
+				if (tab2 != NULL)
+				{
+					*tab2 = '\0';
+					char *tab3 = strchr(tab2 + 1, '\t');
+					if (tab3 != NULL)
+						*tab3 = '\0';
+					cols[ncols].name = pstrdup(line);
+					cols[ncols].type_oid = (Oid) atooid(tab1 + 1);
+					cols[ncols].typmod = atoi(tab2 + 1);
+					cols[ncols].collation_oid = tab3 ? (Oid) atooid(tab3 + 1) : InvalidOid;
+					ncols++;
+				}
+			}
+		}
+		line_idx++;
+	}
+
+	if (ncols > 0)
+		plv8_save_inferred_columns(func_name, source_str, first_arg, ncols, cols);
+
+	if (has_coldef)
+		plv8_update_func_overloads_columns(func_name, 0, NULL);
+	else if (ncols > 0)
+		plv8_update_func_overloads_columns(func_name, ncols, cols);
+}
+
+/*
+ * Helper to extract an array of `Plv8ColMeta` from a V8 Array of column objects.
+ */
+static int
+plv8_extract_cols_from_v8_array(Isolate *isolate,
+								Local<Context> context,
+								Local<Array> arr,
+								Plv8ColMeta *out_cols)
+{
+	uint32_t len = arr->Length();
+	if (len > FUNC_MAX_ARGS)
+		len = FUNC_MAX_ARGS;
+	int ncols = 0;
+
+	for (uint32_t i = 0; i < len; i++)
+	{
+		CHECK_FOR_INTERRUPTS();
+		Local<v8::Value> elem;
+		if (!arr->Get(context, i).ToLocal(&elem) || !elem->IsObject())
+			continue;
+		Local<Object> obj = Local<Object>::Cast(elem);
+
+		const char *cname = "?column?";
+		Local<v8::Value> name_val;
+		if (obj->Get(context, ToString("name")).ToLocal(&name_val) && name_val->IsString())
+		{
+			CString cs(name_val);
+			cname = pstrdup(cs.str("?column?"));
+		}
+		else
+		{
+			cname = pstrdup("?column?");
+		}
+
+		Oid type_oid = InvalidOid;
+		int32 typmod = -1;
+		Oid coll_oid = InvalidOid;
+
+		Local<v8::Value> oid_val;
+		if (obj->Get(context, ToString("type_oid")).ToLocal(&oid_val) && oid_val->IsNumber())
+			type_oid = (Oid) oid_val->Uint32Value(context).FromMaybe(0);
+
+		Local<v8::Value> tm_val;
+		if (obj->Get(context, ToString("typmod")).ToLocal(&tm_val) && tm_val->IsNumber())
+			typmod = tm_val->Int32Value(context).FromMaybe(-1);
+
+		Local<v8::Value> coll_val;
+		if (obj->Get(context, ToString("collation_oid")).ToLocal(&coll_val) && coll_val->IsNumber())
+			coll_oid = (Oid) coll_val->Uint32Value(context).FromMaybe(0);
+
+		if (!OidIsValid(type_oid))
+		{
+			Local<v8::Value> type_str_val;
+			if ((obj->Get(context, ToString("type")).ToLocal(&type_str_val) && type_str_val->IsString()) ||
+				(obj->Get(context, ToString("type_sql")).ToLocal(&type_str_val) && type_str_val->IsString()))
+			{
+				CString ts(type_str_val);
+				PG_TRY();
+				{
+					#if PG_VERSION_NUM >= 160000
+					(void) parseTypeString(ts.str(), &type_oid, &typmod, NULL);
+#else
+					(void) parseTypeString(ts.str(), &type_oid, &typmod, false);
+#endif
+				}
+				PG_CATCH();
+				{
+					FlushErrorState();
+					type_oid = TEXTOID;
+					typmod = -1;
+				}
+				PG_END_TRY();
+			}
+		}
+
+		if (!OidIsValid(type_oid))
+			type_oid = TEXTOID;
+
+		out_cols[ncols].name = (char *) cname;
+		out_cols[ncols].type_oid = type_oid;
+		out_cols[ncols].typmod = typmod;
+		out_cols[ncols].collation_oid = coll_oid;
+		ncols++;
+	}
+	return ncols;
+}
+
+/*
+ * plv8_source_in(cstring) -> plv8_source
+ */
+Datum
+plv8_source_in(PG_FUNCTION_ARGS)
+{
+	char *str = PG_GETARG_CSTRING(0);
+	const char *query_ctx = debug_query_string ? debug_query_string : "";
+
+	if (!plv8_in_support_internal_call && *str != '\0')
+	{
+		char *func_name = NULL;
+		char *first_arg = NULL;
+		bool has_coldeflist = false;
+
+		plv8_extract_enclosing_call(query_ctx, str, &func_name, &first_arg, &has_coldeflist);
+
+		Plv8SupportHookEntry *hook = plv8_find_or_create_hook_entry(func_name, false);
+		if (hook != NULL && !hook->infer_js_cb.IsEmpty())
+		{
+			plv8_in_support_internal_call = true;
+			try
+			{
+				plv8_context *ctx = GetPlv8Context();
+				CurrentContextScope context_scope(ctx);
+				Isolate *isolate = ctx->isolate;
+				Isolate::Scope iscope(isolate);
+				HandleScope handle_scope(isolate);
+				Local<Context> context = ctx->localContext();
+				Context::Scope cscope(context);
+				HandlerExecutionScope hscope(context);
+
+				Local<Function> fn = Local<Function>::New(isolate, hook->infer_js_cb);
+				Local<Object> req = Object::New(isolate);
+				req->Set(context, ToString("func_name"), ToString(func_name)).Check();
+				req->Set(context, ToString("query_string"), ToString(query_ctx)).Check();
+				req->Set(context, ToString("source_arg"), ToString(str)).Check();
+				req->Set(context, ToString("first_arg"), ToString(first_arg ? first_arg : "")).Check();
+				req->Set(context, ToString("has_coldeflist"), v8::Boolean::New(isolate, has_coldeflist)).Check();
+
+				Local<v8::Value> call_args[1] = { req };
+				Local<v8::Value> res = DoCall(context, fn, context->Global(), 1, call_args, false);
+
+				if (!res.IsEmpty() && res->IsString())
+				{
+					CString tsv_cs(res);
+					plv8_parse_and_apply_inferred_tsv(func_name, str, first_arg, has_coldeflist, tsv_cs.str());
+				}
+				else if (!res.IsEmpty() && res->IsArray())
+				{
+					Plv8ColMeta cols[FUNC_MAX_ARGS];
+					int ncols = plv8_extract_cols_from_v8_array(isolate, context, Local<Array>::Cast(res), cols);
+					if (ncols > 0)
+						plv8_save_inferred_columns(func_name, str, first_arg, ncols, cols);
+					if (has_coldeflist)
+						plv8_update_func_overloads_columns(func_name, 0, NULL);
+					else if (ncols > 0)
+						plv8_update_func_overloads_columns(func_name, ncols, cols);
+				}
+				else if (!res.IsEmpty() && res->IsObject())
+				{
+					Local<Object> robj = Local<Object>::Cast(res);
+					Local<v8::Value> cd_val;
+					if (robj->Get(context, ToString("has_coldeflist")).ToLocal(&cd_val) && cd_val->IsBoolean())
+						has_coldeflist = cd_val->BooleanValue(isolate);
+					Local<v8::Value> fa_val;
+					if (robj->Get(context, ToString("first_arg")).ToLocal(&fa_val) && fa_val->IsString())
+					{
+						CString facs(fa_val);
+						first_arg = pstrdup(facs.str(""));
+					}
+					Local<v8::Value> cols_val;
+					if (robj->Get(context, ToString("columns")).ToLocal(&cols_val) && cols_val->IsArray())
+					{
+						Plv8ColMeta cols[FUNC_MAX_ARGS];
+						int ncols = plv8_extract_cols_from_v8_array(isolate, context, Local<Array>::Cast(cols_val), cols);
+						if (ncols > 0)
+							plv8_save_inferred_columns(func_name, str, first_arg, ncols, cols);
+						if (has_coldeflist)
+							plv8_update_func_overloads_columns(func_name, 0, NULL);
+						else if (ncols > 0)
+							plv8_update_func_overloads_columns(func_name, ncols, cols);
+					}
+				}
+				plv8_in_support_internal_call = false;
+			}
+			catch (js_error& e)
+			{
+				plv8_in_support_internal_call = false;
+				e.rethrow();
+			}
+			catch (pg_error& e)
+			{
+				plv8_in_support_internal_call = false;
+				e.rethrow();
+			}
+		}
+		else
+		{
+			Oid infer_oid = plv8_find_infer_sql_func_oid(func_name);
+			if (OidIsValid(infer_oid))
+			{
+				plv8_in_support_internal_call = true;
+				PG_TRY();
+				{
+					Datum res_datum = OidFunctionCall2(
+						infer_oid,
+						CStringGetTextDatum(query_ctx),
+						CStringGetTextDatum(str));
+					char *tsv = TextDatumGetCString(res_datum);
+					plv8_parse_and_apply_inferred_tsv(func_name, str, first_arg, has_coldeflist, tsv);
+				}
+				PG_FINALLY();
+				{
+					plv8_in_support_internal_call = false;
+				}
+				PG_END_TRY();
+			}
+		}
+	}
+
+	PG_RETURN_TEXT_P(cstring_to_text(str));
+}
+
+/*
+ * plv8_source_out(plv8_source) -> cstring
+ */
+Datum
+plv8_source_out(PG_FUNCTION_ARGS)
+{
+	Datum txt = PG_GETARG_DATUM(0);
+
+	PG_RETURN_CSTRING(TextDatumGetCString(txt));
+}
+
+/*
+ * Extract a C string from a Const node (or RelabelType/CoerceViaIO/CoerceToDomain wrapping a Const).
+ */
+static char *
+plv8_extract_const_string(Node *node)
+{
+	if (node == NULL)
+		return NULL;
+	while (IsA(node, RelabelType) || IsA(node, CoerceViaIO) || IsA(node, CoerceToDomain))
+	{
+		CHECK_FOR_INTERRUPTS();
+		if (IsA(node, RelabelType))
+			node = (Node *) ((RelabelType *) node)->arg;
+		else if (IsA(node, CoerceViaIO))
+			node = (Node *) ((CoerceViaIO *) node)->arg;
+		else
+			node = (Node *) ((CoerceToDomain *) node)->arg;
+	}
+	if (IsA(node, Const))
+	{
+		Const *c = (Const *) node;
+		Oid typoutput;
+		bool typIsVarlena;
+
+		if (c->constisnull)
+			return NULL;
+		getTypeOutputInfo(c->consttype, &typoutput, &typIsVarlena);
+		return OidOutputFunctionCall(typoutput, c->constvalue);
+	}
+	return NULL;
+}
+
+static bool
+plv8_is_source_type_node(Node *node)
+{
+	if (node == NULL)
+		return false;
+	Oid typid = getBaseType(exprType(node));
+	if (!OidIsValid(typid))
+		return false;
+	HeapTuple tp = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
+	if (!HeapTupleIsValid(tp))
+		return false;
+	Form_pg_type tform = (Form_pg_type) GETSTRUCT(tp);
+	bool match = (strcmp(NameStr(tform->typname), "plv8_source") == 0 ||
+				  strcmp(NameStr(tform->typname), "pgq_pattern") == 0);
+	ReleaseSysCache(tp);
+	return match;
+}
+
+static bool
+plv8_is_null_const_node(Node *node)
+{
+	while (node != NULL && (IsA(node, RelabelType) || IsA(node, CoerceViaIO) || IsA(node, CoerceToDomain)))
+	{
+		CHECK_FOR_INTERRUPTS();
+		if (IsA(node, RelabelType))
+			node = (Node *) ((RelabelType *) node)->arg;
+		else if (IsA(node, CoerceViaIO))
+			node = (Node *) ((CoerceViaIO *) node)->arg;
+		else
+			node = (Node *) ((CoerceToDomain *) node)->arg;
+	}
+	return (node != NULL && IsA(node, Const) && ((Const *) node)->constisnull);
+}
+
+/*
+ * Extract the 1st argument string (constant text/JSONB or function call `fn()`)
+ * from the 1st argument of a supported function call.
+ */
+static char *
+plv8_extract_first_arg_string(Node *arg1)
+{
+	char *const_str = plv8_extract_const_string(arg1);
+	if (const_str != NULL)
+		return const_str;
+
+	while (arg1 != NULL && (IsA(arg1, RelabelType) || IsA(arg1, CoerceViaIO) || IsA(arg1, CoerceToDomain)))
+	{
+		CHECK_FOR_INTERRUPTS();
+		if (IsA(arg1, RelabelType))
+			arg1 = (Node *) ((RelabelType *) arg1)->arg;
+		else if (IsA(arg1, CoerceViaIO))
+			arg1 = (Node *) ((CoerceViaIO *) arg1)->arg;
+		else
+			arg1 = (Node *) ((CoerceToDomain *) arg1)->arg;
+	}
+
+	if (arg1 != NULL && IsA(arg1, FuncExpr))
+	{
+		FuncExpr *fe = (FuncExpr *) arg1;
+		char *funcname = get_func_name(fe->funcid);
+		Oid nspid = get_func_namespace(fe->funcid);
+		char *nspname = OidIsValid(nspid) ? get_namespace_name(nspid) : NULL;
+
+		if (funcname != NULL)
+		{
+			if (nspname != NULL)
+				return psprintf("%s.%s()", quote_identifier(nspname), quote_identifier(funcname));
+			return psprintf("%s()", quote_identifier(funcname));
+		}
+	}
+
+	return NULL;
+}
+
+static inline const char *
+plv8_node_strval(void *v)
+{
+#if PG_VERSION_NUM >= 150000
+	return ((PG_Node_String *) v)->sval;
+#else
+	return ((::Value *) v)->val.str;
+#endif
+}
+
+/*
+ * Append RTE column descriptors from `rtable` into `lat_buf` JSON array.
+ */
+static void
+plv8_append_rtable_to_lateral_json(StringInfo lat_buf, List *rtable,
+								   RangeTblEntry *skip_rte, int sublevels_up,
+								   bool *first_rte)
+{
+	ListCell *lc;
+	int rtindex = 0;
+
+	foreach(lc, rtable)
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+		List *colnames = NIL;
+		List *colvars = NIL;
+		ListCell *name_lc;
+		ListCell *var_lc;
+		bool first_col = true;
+
+		CHECK_FOR_INTERRUPTS();
+		rtindex++;
+
+		if (rte == skip_rte || rte->eref == NULL || rte->eref->aliasname == NULL)
+			continue;
+
+		PG_TRY();
+		{
+#if PG_VERSION_NUM >= 180000
+			expandRTE(rte, rtindex, sublevels_up, VAR_RETURNING_DEFAULT, -1,
+					  false, &colnames, &colvars);
+#else
+			expandRTE(rte, rtindex, sublevels_up, -1,
+					  false, &colnames, &colvars);
+#endif
+		}
+		PG_CATCH();
+		{
+			FlushErrorState();
+			colnames = NIL;
+			colvars = NIL;
+		}
+		PG_END_TRY();
+
+		if (colnames == NIL || colvars == NIL)
+			continue;
+
+		if (!(*first_rte))
+			appendStringInfoChar(lat_buf, ',');
+		*first_rte = false;
+
+		appendStringInfoString(lat_buf, "{\"alias\":");
+		plv8_append_json_string(lat_buf, rte->eref->aliasname);
+		appendStringInfo(lat_buf, ",\"rtindex\":%d,\"columns\":[",
+						 sublevels_up > 0 ? -rtindex : rtindex);
+
+		forboth(name_lc, colnames, var_lc, colvars)
+		{
+			const char *colname = plv8_node_strval(lfirst(name_lc));
+			Node *varnode = (Node *) lfirst(var_lc);
+
+			CHECK_FOR_INTERRUPTS();
+			if (colname == NULL || *colname == '\0' || varnode == NULL || !IsA(varnode, Var))
+				continue;
+
+			Var *var = (Var *) varnode;
+			if (!OidIsValid(var->vartype) || var->varattno <= 0)
+				continue;
+
+			if (!first_col)
+				appendStringInfoChar(lat_buf, ',');
+			first_col = false;
+
+			appendStringInfoString(lat_buf, "{\"name\":");
+			plv8_append_json_string(lat_buf, colname);
+			appendStringInfo(lat_buf,
+							 ",\"attno\":%d,\"type_oid\":%u,\"typmod\":%d,\"collation_oid\":%u,\"type_sql\":",
+							 (int) var->varattno, var->vartype, var->vartypmod, var->varcollid);
+			plv8_append_json_string(lat_buf, format_type_with_typemod(var->vartype, var->vartypmod));
+			appendStringInfoChar(lat_buf, '}');
+		}
+		appendStringInfoString(lat_buf, "]}");
+	}
+}
+
+/*
+ * plv8_call_support(internal) -> internal
+ *
+ * General-purpose planner support hook (`SUPPORT plv8_call_support`) for
+ * PL/v8 and custom `pl/<lang>` functions.
+ */
+Datum
+plv8_call_support(PG_FUNCTION_ARGS)
+{
+	Node *rawreq = (Node *) PG_GETARG_POINTER(0);
+
+	if (rawreq == NULL)
+		PG_RETURN_POINTER(NULL);
+
+	if (IsA(rawreq, SupportRequestCost))
+	{
+		SupportRequestCost *req = (SupportRequestCost *) rawreq;
+
+		req->startup = 10.0;
+		req->per_tuple = 0.01;
+		PG_RETURN_POINTER(req);
+	}
+
+	if (IsA(rawreq, SupportRequestRows))
+	{
+		SupportRequestRows *req = (SupportRequestRows *) rawreq;
+
+		req->rows = 100.0;
+		PG_RETURN_POINTER(req);
+	}
+
+	if (IsA(rawreq, SupportRequestSimplify))
+	{
+		SupportRequestSimplify *req = (SupportRequestSimplify *) rawreq;
+		PlannerInfo *root = req->root;
+		FuncExpr *fexpr = req->fcall;
+
+		if (plv8_in_support_internal_call || root == NULL || root->parse == NULL ||
+			fexpr == NULL || list_length(fexpr->args) < 1)
+			PG_RETURN_POINTER(NULL);
+
+		char *raw_func_name = get_func_name(fexpr->funcid);
+		char func_name[NAMEDATALEN];
+		plv8_normalize_func_name(raw_func_name ? raw_func_name : "graph_table",
+								 func_name, sizeof(func_name));
+
+		int nargs = list_length(fexpr->args);
+		char *first_arg_str = NULL;
+		char *source_str = NULL;
+		char *params_str = NULL;
+		Node *params_arg_node = NULL;
+		bool source_is_first_arg = (nargs == 1 || plv8_is_source_type_node((Node *) linitial(fexpr->args)));
+
+		if (source_is_first_arg)
+		{
+			source_str = plv8_extract_const_string((Node *) linitial(fexpr->args));
+			first_arg_str = pstrdup("");
+			if (nargs >= 2)
+				params_arg_node = (Node *) lsecond(fexpr->args);
+		}
+		else
+		{
+			source_str = plv8_extract_const_string((Node *) lsecond(fexpr->args));
+			first_arg_str = plv8_extract_first_arg_string((Node *) linitial(fexpr->args));
+			if (nargs >= 3)
+				params_arg_node = (Node *) lthird(fexpr->args);
+		}
+
+		if (source_str == NULL)
+			PG_RETURN_POINTER(NULL);
+
+		/*
+		 * Locate the RTE_FUNCTION in `root->parse->rtable` that corresponds to
+		 * this `SupportRequestSimplify` call.
+		 */
+		RangeTblEntry *target_rte = NULL;
+		RangeTblFunction *target_rtfunc = NULL;
+		ListCell *lc;
+
+		foreach(lc, root->parse->rtable)
+		{
+			RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
+
+			CHECK_FOR_INTERRUPTS();
+			if (rte->rtekind == RTE_FUNCTION && list_length(rte->functions) == 1)
+			{
+				RangeTblFunction *rtfunc = (RangeTblFunction *) linitial(rte->functions);
+
+				if (rtfunc->funcexpr != NULL && IsA(rtfunc->funcexpr, FuncExpr))
+				{
+					FuncExpr *rte_fe = (FuncExpr *) rtfunc->funcexpr;
+
+					if (rte_fe->funcid == fexpr->funcid &&
+						list_length(rte_fe->args) >= (source_is_first_arg ? 1 : 2))
+					{
+						Node *src_node = source_is_first_arg
+							? (Node *) linitial(rte_fe->args)
+							: (Node *) lsecond(rte_fe->args);
+						char *rte_src = plv8_extract_const_string(src_node);
+
+						if (rte_src != NULL && strcmp(rte_src, source_str) == 0)
+						{
+							target_rte = rte;
+							target_rtfunc = rtfunc;
+							break;
+						}
+						if (target_rte == NULL)
+						{
+							target_rte = rte;
+							target_rtfunc = rtfunc;
+						}
+					}
+				}
+			}
+		}
+
+		if (target_rte == NULL)
+			PG_RETURN_POINTER(NULL);
+
+		if (first_arg_str == NULL)
+		{
+			Plv8InferredEntry *cached = plv8_find_inferred_columns(source_str);
+			if (cached != NULL && cached->first_arg != NULL)
+				first_arg_str = pstrdup(cached->first_arg);
+		}
+		if (first_arg_str == NULL)
+			PG_RETURN_POINTER(NULL);
+
+		if (params_arg_node != NULL && !plv8_is_null_const_node(params_arg_node))
+		{
+			params_str = plv8_extract_const_string(params_arg_node);
+			if (params_str == NULL)
+			{
+				/*
+				 * Non-constant runtime params argument: fall back to runtime SRF.
+				 * Note: if `target_rtfunc->funccolnames != NIL`, reset stamped
+				 * columns now; otherwise leave them until `plv8_call_handler`
+				 * so `ExecInitFunctionScan()` can build `rsinfo->expectedDesc`!
+				 */
+				if (target_rtfunc->funccolnames != NIL)
+					plv8_update_func_overloads_columns(func_name, 0, NULL);
+				PG_RETURN_POINTER(NULL);
+			}
+		}
+
+		/*
+		 * Build expected output columns JSON and `expected_cols` array.
+		 */
+		StringInfoData expected_cols_buf;
+		initStringInfo(&expected_cols_buf);
+		appendStringInfoChar(&expected_cols_buf, '[');
+
+		int expected_ncols = 0;
+		Plv8ColMeta expected_cols[FUNC_MAX_ARGS];
+
+		if (target_rtfunc->funccolnames != NIL)
+		{
+			ListCell *cn_lc;
+			ListCell *ct_lc;
+			ListCell *cm_lc;
+			ListCell *cc_lc;
+			bool first = true;
+
+			forfour(cn_lc, target_rtfunc->funccolnames,
+					ct_lc, target_rtfunc->funccoltypes,
+					cm_lc, target_rtfunc->funccoltypmods,
+					cc_lc, target_rtfunc->funccolcollations)
+			{
+				const char *cname = plv8_node_strval(lfirst(cn_lc));
+				Oid ctype = lfirst_oid(ct_lc);
+				int32 ctypmod = lfirst_int(cm_lc);
+				Oid ccoll = lfirst_oid(cc_lc);
+
+				CHECK_FOR_INTERRUPTS();
+				if (!first)
+					appendStringInfoChar(&expected_cols_buf, ',');
+				first = false;
+
+				appendStringInfoString(&expected_cols_buf, "{\"name\":");
+				plv8_append_json_string(&expected_cols_buf, cname);
+				appendStringInfo(&expected_cols_buf,
+								 ",\"type_oid\":%u,\"typmod\":%d,\"collation_oid\":%u,\"type_sql\":",
+								 ctype, ctypmod, ccoll);
+				plv8_append_json_string(&expected_cols_buf,
+										format_type_with_typemod(ctype, ctypmod));
+				appendStringInfoChar(&expected_cols_buf, '}');
+
+				if (expected_ncols < FUNC_MAX_ARGS)
+				{
+					expected_cols[expected_ncols].name = pstrdup(cname);
+					expected_cols[expected_ncols].type_oid = ctype;
+					expected_cols[expected_ncols].typmod = ctypmod;
+					expected_cols[expected_ncols].collation_oid = ccoll;
+					expected_ncols++;
+				}
+			}
+		}
+		else
+		{
+			Plv8InferredEntry *cached = plv8_find_inferred_columns(source_str);
+			if (cached != NULL && cached->ncols > 0)
+			{
+				for (int i = 0; i < cached->ncols; i++)
+				{
+					CHECK_FOR_INTERRUPTS();
+					if (i > 0)
+						appendStringInfoChar(&expected_cols_buf, ',');
+					appendStringInfoString(&expected_cols_buf, "{\"name\":");
+					plv8_append_json_string(&expected_cols_buf, cached->cols[i].name);
+					appendStringInfo(&expected_cols_buf,
+									 ",\"type_oid\":%u,\"typmod\":%d,\"collation_oid\":%u,\"type_sql\":",
+									 cached->cols[i].type_oid,
+									 cached->cols[i].typmod,
+									 cached->cols[i].collation_oid);
+					plv8_append_json_string(&expected_cols_buf,
+											format_type_with_typemod(cached->cols[i].type_oid,
+																	 cached->cols[i].typmod));
+					appendStringInfoChar(&expected_cols_buf, '}');
+
+					if (expected_ncols < FUNC_MAX_ARGS)
+						expected_cols[expected_ncols++] = cached->cols[i];
+				}
+			}
+		}
+		appendStringInfoChar(&expected_cols_buf, ']');
+
+		/*
+		 * Build `lateral_env` JSON from `root->parse->rtable` (and `parent_root`).
+		 */
+		StringInfoData lateral_env_buf;
+		bool first_rte = true;
+		initStringInfo(&lateral_env_buf);
+		appendStringInfoChar(&lateral_env_buf, '[');
+		plv8_append_rtable_to_lateral_json(&lateral_env_buf, root->parse->rtable,
+										   target_rte, 0, &first_rte);
+
+		if (root->parent_root != NULL && root->parent_root->parse != NULL)
+		{
+			plv8_append_rtable_to_lateral_json(&lateral_env_buf,
+											   root->parent_root->parse->rtable,
+											   NULL, 1, &first_rte);
+		}
+		appendStringInfoChar(&lateral_env_buf, ']');
+
+		char *compiled_tsv = NULL;
+		char *sql_str = NULL;
+		List *lateral_args = NIL;
+		Oid lateral_arg_oids[FUNC_MAX_ARGS];
+		int nlateral = 0;
+
+		Plv8SupportHookEntry *hook = plv8_find_or_create_hook_entry(func_name, false);
+		if (hook != NULL && !hook->support_js_cb.IsEmpty())
+		{
+			plv8_in_support_internal_call = true;
+			try
+			{
+				plv8_context *ctx = GetPlv8Context();
+				CurrentContextScope context_scope(ctx);
+				Isolate *isolate = ctx->isolate;
+				Isolate::Scope iscope(isolate);
+				HandleScope handle_scope(isolate);
+				Local<Context> context = ctx->localContext();
+				Context::Scope cscope(context);
+				HandlerExecutionScope hscope(context);
+				JSONObject json_helper;
+
+				Local<Function> fn = Local<Function>::New(isolate, hook->support_js_cb);
+				Local<Object> req_obj = Object::New(isolate);
+				req_obj->Set(context, ToString("request_type"), ToString("simplify")).Check();
+				req_obj->Set(context, ToString("func_oid"), Uint32::NewFromUnsigned(isolate, fexpr->funcid)).Check();
+				req_obj->Set(context, ToString("func_name"), ToString(func_name)).Check();
+				req_obj->Set(context, ToString("is_from_clause"), v8::Boolean::New(isolate, true)).Check();
+				req_obj->Set(context, ToString("has_coldeflist"),
+							 v8::Boolean::New(isolate, target_rtfunc->funccolnames != NIL)).Check();
+				req_obj->Set(context, ToString("first_arg"), ToString(first_arg_str)).Check();
+				req_obj->Set(context, ToString("source_arg"), ToString(source_str)).Check();
+				if (params_str != NULL)
+					req_obj->Set(context, ToString("params"), json_helper.Parse(ToString(params_str))).Check();
+				else
+					req_obj->Set(context, ToString("params"), Null(isolate)).Check();
+				req_obj->Set(context, ToString("expected_columns"),
+							 json_helper.Parse(ToString(expected_cols_buf.data))).Check();
+				req_obj->Set(context, ToString("lateral_env"),
+							 json_helper.Parse(ToString(lateral_env_buf.data))).Check();
+
+				Local<v8::Value> call_args[1] = { req_obj };
+				Local<v8::Value> res = DoCall(context, fn, context->Global(), 1, call_args, false);
+
+				if (!res.IsEmpty() && res->IsString())
+				{
+					CString cs(res);
+					compiled_tsv = pstrdup(cs.str());
+				}
+				else if (!res.IsEmpty() && res->IsObject())
+				{
+					Local<Object> robj = Local<Object>::Cast(res);
+					Local<v8::Value> sql_val;
+					if (robj->Get(context, ToString("sql")).ToLocal(&sql_val) && sql_val->IsString())
+					{
+						CString scs(sql_val);
+						sql_str = pstrdup(scs.str());
+					}
+					Local<v8::Value> cols_val;
+					if (robj->Get(context, ToString("columns")).ToLocal(&cols_val) && cols_val->IsArray())
+					{
+						Plv8ColMeta ccols[FUNC_MAX_ARGS];
+						int nccols = plv8_extract_cols_from_v8_array(isolate, context, Local<Array>::Cast(cols_val), ccols);
+						if (expected_ncols == 0 && nccols > 0)
+						{
+							for (int i = 0; i < nccols; i++)
+								expected_cols[i] = ccols[i];
+							expected_ncols = nccols;
+						}
+					}
+					Local<v8::Value> lvars_val;
+					if (robj->Get(context, ToString("lateral_vars")).ToLocal(&lvars_val) && lvars_val->IsArray())
+					{
+						Local<Array> larr = Local<Array>::Cast(lvars_val);
+						uint32_t llen = larr->Length();
+						for (uint32_t i = 0; i < llen && nlateral < FUNC_MAX_ARGS; i++)
+						{
+							Local<v8::Value> lelem;
+							if (!larr->Get(context, i).ToLocal(&lelem) || !lelem->IsObject())
+								continue;
+							Local<Object> lobj = Local<Object>::Cast(lelem);
+							int raw_rtindex = 0;
+							int varlevelsup = 0;
+							AttrNumber attno = 0;
+							Oid vtype = InvalidOid;
+							int32 vtypmod = -1;
+							Oid vcoll = InvalidOid;
+
+							Local<v8::Value> v;
+							if (lobj->Get(context, ToString("rtindex")).ToLocal(&v) && v->IsNumber())
+								raw_rtindex = v->Int32Value(context).FromMaybe(0);
+							if (raw_rtindex < 0)
+							{
+								raw_rtindex = -raw_rtindex;
+								varlevelsup = 1;
+							}
+							if (lobj->Get(context, ToString("attno")).ToLocal(&v) && v->IsNumber())
+								attno = (AttrNumber) v->Int32Value(context).FromMaybe(0);
+							if (lobj->Get(context, ToString("type_oid")).ToLocal(&v) && v->IsNumber())
+								vtype = (Oid) v->Uint32Value(context).FromMaybe(0);
+							if (lobj->Get(context, ToString("typmod")).ToLocal(&v) && v->IsNumber())
+								vtypmod = v->Int32Value(context).FromMaybe(-1);
+							if (lobj->Get(context, ToString("collation_oid")).ToLocal(&v) && v->IsNumber())
+								vcoll = (Oid) v->Uint32Value(context).FromMaybe(0);
+
+							if (raw_rtindex > 0 && attno > 0 && OidIsValid(vtype))
+							{
+								Var *vnode = makeVar((Index) raw_rtindex, attno, vtype, vtypmod, vcoll, (Index) varlevelsup);
+								lateral_args = lappend(lateral_args, vnode);
+								lateral_arg_oids[nlateral++] = vtype;
+							}
+						}
+					}
+				}
+				plv8_in_support_internal_call = false;
+			}
+			catch (js_error& e)
+			{
+				plv8_in_support_internal_call = false;
+				e.rethrow();
+			}
+			catch (pg_error& e)
+			{
+				plv8_in_support_internal_call = false;
+				e.rethrow();
+			}
+		}
+		else
+		{
+			Oid compile_oid = plv8_find_support_sql_func_oid(func_name);
+			if (!OidIsValid(compile_oid))
+				PG_RETURN_POINTER(NULL);
+
+			plv8_in_support_internal_call = true;
+			PG_TRY();
+			{
+				Datum compiled_datum = OidFunctionCall5(
+					compile_oid,
+					CStringGetTextDatum(first_arg_str),
+					CStringGetTextDatum(source_str),
+					CStringGetTextDatum(expected_cols_buf.data),
+					CStringGetTextDatum(lateral_env_buf.data),
+					CStringGetTextDatum(params_str ? params_str : ""));
+				compiled_tsv = TextDatumGetCString(compiled_datum);
+			}
+			PG_FINALLY();
+			{
+				plv8_in_support_internal_call = false;
+			}
+			PG_END_TRY();
+		}
+
+		if (compiled_tsv != NULL)
+		{
+			char *copy = pstrdup(compiled_tsv);
+			char *saveptr = NULL;
+			int line_idx = 0;
+			Plv8ColMeta compiled_cols[FUNC_MAX_ARGS];
+			int ncompiled_cols = 0;
+
+			for (char *line = strtok_r(copy, "\n", &saveptr);
+				 line != NULL;
+				 line = strtok_r(NULL, "\n", &saveptr))
+			{
+				CHECK_FOR_INTERRUPTS();
+				if (line_idx == 0 && strncmp(line, "SQL\t", 4) == 0)
+				{
+					sql_str = pstrdup(line + 4);
+					line_idx++;
+					continue;
+				}
+				if (strncmp(line, "COL\t", 4) == 0 && ncompiled_cols < FUNC_MAX_ARGS)
+				{
+					char *p1 = line + 4;
+					char *t1 = strchr(p1, '\t');
+					if (t1 != NULL)
+					{
+						*t1 = '\0';
+						char *t2 = strchr(t1 + 1, '\t');
+						if (t2 != NULL)
+						{
+							*t2 = '\0';
+							char *t3 = strchr(t2 + 1, '\t');
+							if (t3 != NULL)
+								*t3 = '\0';
+							compiled_cols[ncompiled_cols].name = pstrdup(p1);
+							compiled_cols[ncompiled_cols].type_oid = (Oid) atooid(t1 + 1);
+							compiled_cols[ncompiled_cols].typmod = atoi(t2 + 1);
+							compiled_cols[ncompiled_cols].collation_oid =
+								t3 ? (Oid) atooid(t3 + 1) : InvalidOid;
+							ncompiled_cols++;
+						}
+					}
+				}
+				else if (strncmp(line, "LAT\t", 4) == 0 && nlateral < FUNC_MAX_ARGS)
+				{
+					char *p1 = line + 4;
+					char *t1 = strchr(p1, '\t');
+					if (t1 != NULL)
+					{
+						*t1 = '\0';
+						char *t2 = strchr(t1 + 1, '\t');
+						if (t2 != NULL)
+						{
+							*t2 = '\0';
+							char *t3 = strchr(t2 + 1, '\t');
+							if (t3 != NULL)
+							{
+								*t3 = '\0';
+								char *t4 = strchr(t3 + 1, '\t');
+								if (t4 != NULL)
+									*t4 = '\0';
+
+								int raw_rtindex = atoi(p1);
+								int varlevelsup = 0;
+								if (raw_rtindex < 0)
+								{
+									raw_rtindex = -raw_rtindex;
+									varlevelsup = 1;
+								}
+								AttrNumber attno = (AttrNumber) atoi(t1 + 1);
+								Oid vtype = (Oid) atooid(t2 + 1);
+								int32 vtypmod = atoi(t3 + 1);
+								Oid vcoll = t4 ? (Oid) atooid(t4 + 1) : InvalidOid;
+
+								Var *vnode = makeVar((Index) raw_rtindex,
+													 attno,
+													 vtype,
+													 vtypmod,
+													 vcoll,
+													 (Index) varlevelsup);
+								lateral_args = lappend(lateral_args, vnode);
+								lateral_arg_oids[nlateral++] = vtype;
+							}
+						}
+					}
+				}
+				line_idx++;
+			}
+
+			if (expected_ncols == 0 && ncompiled_cols > 0)
+			{
+				for (int i = 0; i < ncompiled_cols; i++)
+					expected_cols[i] = compiled_cols[i];
+				expected_ncols = ncompiled_cols;
+			}
+		}
+
+		if (sql_str == NULL || *sql_str == '\0')
+			PG_RETURN_POINTER(NULL);
+
+		/*
+		 * Now that inlining is succeeding, reset `func_name`'s `pg_proc`
+		 * `proallargtypes` back to `RECORDOID` so subsequent `AS (...)` calls
+		 * see a clean `TYPEFUNC_RECORD`.
+		 */
+		plv8_update_func_overloads_columns(func_name, 0, NULL);
+
+		int slot_idx = (plv8_inline_slot_counter++) % PLV8_NUM_INLINE_HELPERS;
+		char helper_name[64];
+		snprintf(helper_name, sizeof(helper_name), "plv8_inline_helper_%d", slot_idx);
+		Oid helper_oid = plv8_lookup_func_oid_by_name_nargs(helper_name, -1);
+		if (!OidIsValid(helper_oid))
+		{
+			snprintf(helper_name, sizeof(helper_name), "plpgq_inline_helper_%d", slot_idx);
+			helper_oid = plv8_lookup_func_oid_by_name_nargs(helper_name, -1);
+		}
+		if (!OidIsValid(helper_oid))
+			PG_RETURN_POINTER(NULL);
+
+		plv8_update_proc_table_columns(
+			helper_oid,
+			target_rtfunc->funccolnames != NIL ? 0 : expected_ncols,
+			expected_cols,
+			sql_str,
+			nlateral,
+			lateral_arg_oids);
+
+		if (nlateral > 0)
+			target_rte->lateral = true;
+
+		FuncExpr *new_fexpr = makeFuncExpr(helper_oid,
+										   get_func_rettype(helper_oid),
+										   lateral_args,
+										   fexpr->funccollid,
+										   fexpr->inputcollid,
+										   COERCE_EXPLICIT_CALL);
+		new_fexpr->funcretset = true;
+
+		PG_RETURN_POINTER(new_fexpr);
+	}
+
+	PG_RETURN_POINTER(NULL);
+}
+
 

@@ -80,5 +80,46 @@ CREATE TRIGGER plv8_modules_changed
 	AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON plv8.packages
 	FOR EACH STATEMENT EXECUTE FUNCTION plv8_modules_changed();
 ALTER TABLE plv8.packages ENABLE ALWAYS TRIGGER plv8_modules_changed;
+
+CREATE TYPE plv8_source;
+
+CREATE OR REPLACE FUNCTION plv8_source_in(cstring)
+RETURNS plv8_source
+AS 'MODULE_PATHNAME', 'plv8_source_in'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION plv8_source_out(plv8_source)
+RETURNS cstring
+AS 'MODULE_PATHNAME', 'plv8_source_out'
+LANGUAGE C IMMUTABLE STRICT;
+
+CREATE TYPE plv8_source (
+  INPUT = plv8_source_in,
+  OUTPUT = plv8_source_out,
+  INTERNALLENGTH = VARIABLE,
+  STORAGE = extended,
+  CATEGORY = 'S'
+);
+
+CREATE CAST (text AS plv8_source) WITH INOUT AS IMPLICIT;
+CREATE CAST (plv8_source AS text) WITH INOUT AS IMPLICIT;
+CREATE CAST (varchar AS plv8_source) WITH INOUT AS IMPLICIT;
+
+CREATE OR REPLACE FUNCTION plv8_call_support(internal)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'plv8_call_support'
+LANGUAGE C;
+REVOKE ALL ON FUNCTION plv8_call_support(internal) FROM PUBLIC;
+
+CREATE TYPE plv8.plv8_single_col_holder AS (__col1 text);
+
+CREATE OR REPLACE FUNCTION plv8_inline_helper_0() RETURNS SETOF record LANGUAGE sql STABLE AS \$\$ SELECT 1 WHERE false \$\$;
+CREATE OR REPLACE FUNCTION plv8_inline_helper_1() RETURNS SETOF record LANGUAGE sql STABLE AS \$\$ SELECT 1 WHERE false \$\$;
+CREATE OR REPLACE FUNCTION plv8_inline_helper_2() RETURNS SETOF record LANGUAGE sql STABLE AS \$\$ SELECT 1 WHERE false \$\$;
+CREATE OR REPLACE FUNCTION plv8_inline_helper_3() RETURNS SETOF record LANGUAGE sql STABLE AS \$\$ SELECT 1 WHERE false \$\$;
+CREATE OR REPLACE FUNCTION plv8_inline_helper_4() RETURNS SETOF record LANGUAGE sql STABLE AS \$\$ SELECT 1 WHERE false \$\$;
+CREATE OR REPLACE FUNCTION plv8_inline_helper_5() RETURNS SETOF record LANGUAGE sql STABLE AS \$\$ SELECT 1 WHERE false \$\$;
+CREATE OR REPLACE FUNCTION plv8_inline_helper_6() RETURNS SETOF record LANGUAGE sql STABLE AS \$\$ SELECT 1 WHERE false \$\$;
+CREATE OR REPLACE FUNCTION plv8_inline_helper_7() RETURNS SETOF record LANGUAGE sql STABLE AS \$\$ SELECT 1 WHERE false \$\$;
 EOF
 done

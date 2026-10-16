@@ -120,6 +120,14 @@ any subsequent function as global variables.
 Remember `CREATE FUNCTION` also starts the `plv8` runtime environment, so make
 sure to `SET` this GUC before any `plv8` actions including `CREATE FUNCTION`.
 
+## Custom Procedural Languages & Language Handler Infrastructure
+
+PL/v8 provides chained language handler infrastructure (`HANDLER`, `INLINE`, `VALIDATOR`, `meta` protocol, structured error diagnostics, `plv8.modules`, dynamic table function planner support, and shared WebAssembly module caching) for building pure-JS/WASM procedural languages on top of V8. Standalone trusted procedural language extensions built on this infrastructure are published in [`postsql/pl-any`](https://github.com/postsql/pl-any).
+
+See:
+- [LANGUAGE_HANDLER_USER_GUIDE.md](./LANGUAGE_HANDLER_USER_GUIDE.md) — API Users' Guide for Building Custom Procedural Languages on `pl/v8`
+- [LANGUAGE_HANDLER_DESIGN.md](./LANGUAGE_HANDLER_DESIGN.md) — Design Document for Chained Language Handlers, `meta` Protocol, Diagnostics, Modules, & Shared WASM Engine
+
 ## Stored procedures
 
 There are a couple of utility procedures that will get installed.

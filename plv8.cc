@@ -7823,13 +7823,13 @@ plv8_update_single_col_holder_type(const Plv8ColMeta *col)
 		return InvalidOid;
 	Form_pg_type typform = (Form_pg_type) GETSTRUCT(typtup);
 
-	Relation attrel = table_open(AttributeRelationId, RowExclusiveLock);
+	Relation attrel = table_open(AttributeRelationId, ShareRowExclusiveLock);
 	HeapTuple atttup = SearchSysCacheCopy2(ATTNUM,
 										   ObjectIdGetDatum(holder_relid),
 										   Int16GetDatum(1));
 	if (!HeapTupleIsValid(atttup))
 	{
-		table_close(attrel, RowExclusiveLock);
+		table_close(attrel, NoLock);
 		ReleaseSysCache(typtup);
 		return InvalidOid;
 	}
@@ -7855,7 +7855,7 @@ plv8_update_single_col_holder_type(const Plv8ColMeta *col)
 
 	CatalogTupleUpdate(attrel, &atttup->t_self, atttup);
 	heap_freetuple(atttup);
-	table_close(attrel, RowExclusiveLock);
+	table_close(attrel, NoLock);
 
 	CacheInvalidateRelcacheByRelid(holder_relid);
 	CommandCounterIncrement();
@@ -7908,15 +7908,16 @@ plv8_update_proc_table_columns(Oid funcid,
 	if (!OidIsValid(funcid) || XactReadOnly)
 		return;
 
+	Relation proc_rel = table_open(ProcedureRelationId, ShareRowExclusiveLock);
+
 	Oid single_holder_oid = InvalidOid;
 	if (num_out_cols == 1 && out_cols != NULL)
 		single_holder_oid = plv8_update_single_col_holder_type(&out_cols[0]);
 
-	Relation proc_rel = table_open(ProcedureRelationId, RowExclusiveLock);
 	HeapTuple tup = SearchSysCacheCopy1(PROCOID, ObjectIdGetDatum(funcid));
 	if (!HeapTupleIsValid(tup))
 	{
-		table_close(proc_rel, RowExclusiveLock);
+		table_close(proc_rel, NoLock);
 		return;
 	}
 
@@ -7927,7 +7928,7 @@ plv8_update_proc_table_columns(Oid funcid,
 		heap_attisnull(tup, Anum_pg_proc_proallargtypes, RelationGetDescr(proc_rel)))
 	{
 		heap_freetuple(tup);
-		table_close(proc_rel, RowExclusiveLock);
+		table_close(proc_rel, NoLock);
 		return;
 	}
 
@@ -8072,7 +8073,7 @@ plv8_update_proc_table_columns(Oid funcid,
 
 	heap_freetuple(newtup);
 	heap_freetuple(tup);
-	table_close(proc_rel, RowExclusiveLock);
+	table_close(proc_rel, NoLock);
 
 	CommandCounterIncrement();
 
@@ -8093,6 +8094,12 @@ plv8_update_func_overloads_columns(const char *func_name,
 	plv8_normalize_func_name(func_name ? func_name : "graph_table", norm, sizeof(norm));
 	if (norm[0] == '\0')
 		strlcpy(norm, "graph_table", sizeof(norm));
+
+	if (!XactReadOnly)
+	{
+		Relation proc_rel = table_open(ProcedureRelationId, ShareRowExclusiveLock);
+		table_close(proc_rel, NoLock);
+	}
 
 	List *oids = NIL;
 	CatCList *catlist = SearchSysCacheList1(PROCNAMEARGSNSP, CStringGetDatum(norm));
@@ -8125,7 +8132,7 @@ plv8_update_func_overloads_columns(const char *func_name,
 static void
 plv8_reset_all_stamped_procs(void)
 {
-	if (plv8_num_stamped_oids <= 0 || XactReadOnly)
+	if (plv8_in_support_internal_call || plv8_num_stamped_oids <= 0 || XactReadOnly)
 		return;
 
 	int count = plv8_num_stamped_oids;
@@ -8547,6 +8554,10 @@ plv8_source_in(PG_FUNCTION_ARGS)
 		Plv8SupportHookEntry *hook = plv8_find_or_create_hook_entry(func_name, false);
 		if (hook != NULL && !hook->infer_js_cb.IsEmpty())
 		{
+			char *inferred_tsv = NULL;
+			Plv8ColMeta inferred_cols[FUNC_MAX_ARGS];
+			int inferred_ncols = -1;
+
 			plv8_in_support_internal_call = true;
 			try
 			{
@@ -8573,18 +8584,11 @@ plv8_source_in(PG_FUNCTION_ARGS)
 				if (!res.IsEmpty() && res->IsString())
 				{
 					CString tsv_cs(res);
-					plv8_parse_and_apply_inferred_tsv(func_name, str, first_arg, has_coldeflist, tsv_cs.str());
+					inferred_tsv = pstrdup(tsv_cs.str());
 				}
 				else if (!res.IsEmpty() && res->IsArray())
 				{
-					Plv8ColMeta cols[FUNC_MAX_ARGS];
-					int ncols = plv8_extract_cols_from_v8_array(isolate, context, Local<Array>::Cast(res), cols);
-					if (ncols > 0)
-						plv8_save_inferred_columns(func_name, str, first_arg, ncols, cols);
-					if (has_coldeflist)
-						plv8_update_func_overloads_columns(func_name, 0, NULL);
-					else if (ncols > 0)
-						plv8_update_func_overloads_columns(func_name, ncols, cols);
+					inferred_ncols = plv8_extract_cols_from_v8_array(isolate, context, Local<Array>::Cast(res), inferred_cols);
 				}
 				else if (!res.IsEmpty() && res->IsObject())
 				{
@@ -8601,14 +8605,7 @@ plv8_source_in(PG_FUNCTION_ARGS)
 					Local<v8::Value> cols_val;
 					if (robj->Get(context, ToString("columns")).ToLocal(&cols_val) && cols_val->IsArray())
 					{
-						Plv8ColMeta cols[FUNC_MAX_ARGS];
-						int ncols = plv8_extract_cols_from_v8_array(isolate, context, Local<Array>::Cast(cols_val), cols);
-						if (ncols > 0)
-							plv8_save_inferred_columns(func_name, str, first_arg, ncols, cols);
-						if (has_coldeflist)
-							plv8_update_func_overloads_columns(func_name, 0, NULL);
-						else if (ncols > 0)
-							plv8_update_func_overloads_columns(func_name, ncols, cols);
+						inferred_ncols = plv8_extract_cols_from_v8_array(isolate, context, Local<Array>::Cast(cols_val), inferred_cols);
 					}
 				}
 				plv8_in_support_internal_call = false;
@@ -8623,12 +8620,27 @@ plv8_source_in(PG_FUNCTION_ARGS)
 				plv8_in_support_internal_call = false;
 				e.rethrow();
 			}
+
+			if (inferred_tsv != NULL)
+			{
+				plv8_parse_and_apply_inferred_tsv(func_name, str, first_arg, has_coldeflist, inferred_tsv);
+			}
+			else if (inferred_ncols >= 0)
+			{
+				if (inferred_ncols > 0)
+					plv8_save_inferred_columns(func_name, str, first_arg, inferred_ncols, inferred_cols);
+				if (has_coldeflist)
+					plv8_update_func_overloads_columns(func_name, 0, NULL);
+				else if (inferred_ncols > 0)
+					plv8_update_func_overloads_columns(func_name, inferred_ncols, inferred_cols);
+			}
 		}
 		else
 		{
 			Oid infer_oid = plv8_find_infer_sql_func_oid(func_name);
 			if (OidIsValid(infer_oid))
 			{
+				char *tsv = NULL;
 				plv8_in_support_internal_call = true;
 				PG_TRY();
 				{
@@ -8636,14 +8648,15 @@ plv8_source_in(PG_FUNCTION_ARGS)
 						infer_oid,
 						CStringGetTextDatum(query_ctx),
 						CStringGetTextDatum(str));
-					char *tsv = TextDatumGetCString(res_datum);
-					plv8_parse_and_apply_inferred_tsv(func_name, str, first_arg, has_coldeflist, tsv);
+					tsv = TextDatumGetCString(res_datum);
 				}
 				PG_FINALLY();
 				{
 					plv8_in_support_internal_call = false;
 				}
 				PG_END_TRY();
+				if (tsv != NULL)
+					plv8_parse_and_apply_inferred_tsv(func_name, str, first_arg, has_coldeflist, tsv);
 			}
 		}
 	}

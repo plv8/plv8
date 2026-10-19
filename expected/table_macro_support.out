@@ -184,6 +184,23 @@ ORDER BY oc.cat_id, m.item_id;
     200 |       3 |      49.00
 (3 rows)
 
+-- 2f. Single-column and multi-column runtime SRF fallback when planner inlining is bypassed (non-Const params)
+SELECT * FROM js_table_macro('item_id:int4=id | FROM macro_items ORDER BY id', jsonb_build_object('k', 1));
+ item_id 
+---------
+       1
+       2
+       3
+(3 rows)
+
+SELECT * FROM js_table_macro('item_id:int4=id, item_price:numeric=price | FROM macro_items WHERE category = ''books'' ORDER BY id', jsonb_build_object('k', 1))
+  AS (item_id int, item_price numeric);
+ item_id | item_price 
+---------+------------
+       1 |      19.99
+       2 |      29.50
+(2 rows)
+
 -- =========================================================================
 -- 3. Custom compiled-to-JS language (`LANGUAGE pl_query_macro`) using
 --    `plv8.set_function_columns()` and `plv8.return_query()`

@@ -557,5 +557,7 @@ extern void plv8_register_planner_support_hook(const char *func_name,
 extern void plv8_set_function_columns_js(const char *func_name,
 										 int ncols,
 										 const Plv8ColMeta *cols);
+extern uint64 plv8_get_catalog_gen(void);
 
 #endif	// _PLV8_
+

@@ -36,10 +36,9 @@ jobs:
 
       - name: Start Postgres
         run: |
-          pushd postgres
-          cd inst/bin
-          ./initdb -D data
-          ./pg_ctl -D data -l logfile start
+          pushd postgres/inst/bin
+          ./initdb -D "$PWD/data"
+          ./pg_ctl -D "$PWD/data" -l "$PWD/logfile" start
           popd
 
       - name: Checkout plv8 extension code
@@ -51,16 +50,19 @@ jobs:
         id: regression-tests
         run: |
           export PATH="${PWD}/postgres/inst/bin:$PATH"
+          PGDATA_DIR="${PWD}/postgres/inst/bin/data"
+          PGLOG_FILE="${PWD}/postgres/inst/bin/logfile"
           pushd plv8
           make install
-          echo "shared_preload_libraries = 'plv8-4.0.0-ALPHA'" >> ../postgres/inst/bin/data/postgresql.conf
-          ../postgres/inst/bin/pg_ctl -D ../postgres/inst/bin/data -l ../postgres/inst/bin/logfile restart
+          echo "shared_preload_libraries = 'plv8-4.0.0-ALPHA'" >> "${PGDATA_DIR}/postgresql.conf"
+          pg_ctl -D "${PGDATA_DIR}" -l "${PGLOG_FILE}" restart
           make installcheck
           popd
 
       - name: Print regression.diffs if regression tests failed
         if: failure() && steps.regression-tests.outcome != 'success'
         run: |
+          cat postgres/inst/bin/logfile || true
           cat plv8/regression.diffs
 
   # Rocky Linux 10 ships GCC 14, and its rpm build macros export CC, CXX and

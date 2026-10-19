@@ -160,6 +160,11 @@ FROM outer_categories oc,
      LATERAL js_table_macro('item_id:int4=id, item_price:numeric=price | FROM macro_items WHERE category = outer.cat_name ORDER BY id') m
 ORDER BY oc.cat_id, m.item_id;
 
+-- 2f. Single-column and multi-column runtime SRF fallback when planner inlining is bypassed (non-Const params)
+SELECT * FROM js_table_macro('item_id:int4=id | FROM macro_items ORDER BY id', jsonb_build_object('k', 1));
+SELECT * FROM js_table_macro('item_id:int4=id, item_price:numeric=price | FROM macro_items WHERE category = ''books'' ORDER BY id', jsonb_build_object('k', 1))
+  AS (item_id int, item_price numeric);
+
 -- =========================================================================
 -- 3. Custom compiled-to-JS language (`LANGUAGE pl_query_macro`) using
 --    `plv8.set_function_columns()` and `plv8.return_query()`

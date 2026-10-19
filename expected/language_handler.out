@@ -601,18 +601,28 @@ CREATE FUNCTION super_raw_roundtrip(v raw_test_type) RETURNS raw_test_type AS $$
   for (let i = 0; i < v.length; i++) out[i] = v[i] + 1;
   return out;
 $$ LANGUAGE super_raw_lang;
+SHOW plv8.allow_raw_user_types;
+ plv8.allow_raw_user_types 
+---------------------------
+ off
+(1 row)
+
+\set VERBOSITY terse
+SELECT super_raw_roundtrip('\x414243'::raw_test_type);
+ERROR:  returning raw byte buffers for user-defined type raw_test_type requires superuser pass_user_types_as_bytes
+\set VERBOSITY default
+SET plv8.allow_raw_user_types = on;
 SELECT super_raw_roundtrip('\x414243'::raw_test_type);
  super_raw_roundtrip 
 ---------------------
  \x424344
 (1 row)
 
-SET plv8.allow_raw_user_types = off;
+RESET plv8.allow_raw_user_types;
 \set VERBOSITY terse
 SELECT super_raw_roundtrip('\x414243'::raw_test_type);
 ERROR:  returning raw byte buffers for user-defined type raw_test_type requires superuser pass_user_types_as_bytes
 \set VERBOSITY default
-RESET plv8.allow_raw_user_types;
 DROP FUNCTION super_raw_roundtrip(raw_test_type);
 DROP LANGUAGE super_raw_lang;
 DROP FUNCTION super_raw_handler();

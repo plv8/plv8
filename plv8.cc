@@ -241,7 +241,7 @@ static v8::Isolate *current_isolate = nullptr;
 static ArrayAllocator *current_allocator = nullptr;
 static bool plv8_isolate_oom_killed = false;
 bool plv8_pass_user_types_as_bytes = false;
-bool plv8_allow_raw_user_types = true;
+bool plv8_allow_raw_user_types = false;
 bool plv8_preserve_numeric_precision = false;
 static uint64 next_context_id = 1;
 size_t plv8_memory_limit = 256;
@@ -295,6 +295,25 @@ static std::string plv8_loaded_snapshot_file;
 static std::string plv8_loaded_boot_script_file;
 static bool plv8_bypass_snapshot_restore = false;
 
+struct Plv8WasmCacheKey
+{
+	Oid					db_oid;
+	Oid					role_oid;
+	uint8				wire_sha256[32];
+};
+
+struct Plv8WasmCacheEntry
+{
+	Plv8WasmCacheKey	key;
+	dsa_pointer			code_ptr;
+	uint32				code_size;
+	uint64				last_used_seq;
+};
+
+#if PG_VERSION_NUM < 150000
+#define PLV8_WASM_TRACKED_KEYS_MAX 512
+#endif
+
 struct Plv8SharedState
 {
 	LWLock			   *lock;
@@ -310,21 +329,13 @@ struct Plv8SharedState
 	pg_atomic_uint64	stores;
 	pg_atomic_uint64	evictions;
 	pg_atomic_uint64	access_seq;
-};
-
-struct Plv8WasmCacheKey
-{
-	Oid					db_oid;
-	Oid					role_oid;
-	uint8				wire_sha256[32];
-};
-
-struct Plv8WasmCacheEntry
-{
-	Plv8WasmCacheKey	key;
-	dsa_pointer			code_ptr;
-	uint32				code_size;
-	uint64				last_used_seq;
+#if PG_VERSION_NUM < 150000
+	struct
+	{
+		bool				in_use;
+		Plv8WasmCacheKey	key;
+	}					tracked_keys[PLV8_WASM_TRACKED_KEYS_MAX];
+#endif
 };
 
 static Plv8SharedState *plv8_shared_state = nullptr;
@@ -656,7 +667,105 @@ plv8_wasm_cache_store(const uint8_t *wire_bytes, size_t wire_len, const uint8_t 
 		}
 	}
 #else
-	(void) role_cap;
+	for (int iter = 0; iter < 64; iter++)
+	{
+		size_t role_used = 0;
+		bool has_role_victim = false;
+		uint64 role_min_seq = UINT64_MAX;
+		Plv8WasmCacheKey role_victim_key;
+		int role_victim_slot = -1;
+
+		bool has_global_victim = false;
+		uint64 global_min_seq = UINT64_MAX;
+		Plv8WasmCacheKey global_victim_key;
+		int global_victim_slot = -1;
+
+		for (int k = 0; k < PLV8_WASM_TRACKED_KEYS_MAX; k++)
+		{
+			if (!plv8_shared_state->tracked_keys[k].in_use)
+				continue;
+			Plv8WasmCacheEntry *cur = static_cast<Plv8WasmCacheEntry *>(
+				dshash_find(ht, &plv8_shared_state->tracked_keys[k].key, false));
+			if (cur == nullptr)
+			{
+				plv8_shared_state->tracked_keys[k].in_use = false;
+				continue;
+			}
+			if (!DsaPointerIsValid(cur->code_ptr))
+			{
+				dshash_release_lock(ht, cur);
+				plv8_shared_state->tracked_keys[k].in_use = false;
+				continue;
+			}
+			uint64 seq_val = cur->last_used_seq;
+			uint32 code_sz = cur->code_size;
+			Plv8WasmCacheKey cur_key = cur->key;
+			dshash_release_lock(ht, cur);
+
+			if (!has_global_victim || seq_val < global_min_seq)
+			{
+				global_min_seq = seq_val;
+				global_victim_key = cur_key;
+				global_victim_slot = k;
+				has_global_victim = true;
+			}
+			if (cur_key.db_oid == key.db_oid && cur_key.role_oid == key.role_oid)
+			{
+				role_used += code_sz;
+				if (!has_role_victim || seq_val < role_min_seq)
+				{
+					role_min_seq = seq_val;
+					role_victim_key = cur_key;
+					role_victim_slot = k;
+					has_role_victim = true;
+				}
+			}
+		}
+		final_role_used = role_used;
+
+		bool over_role = (role_used + len > role_cap);
+		bool over_global = (pg_atomic_read_u64(&plv8_shared_state->bytes_used) + len > max_bytes);
+		if (!over_role && !over_global)
+			break;
+
+		Plv8WasmCacheKey victim_key;
+		int victim_slot = -1;
+		if (over_role && has_role_victim)
+		{
+			victim_key = role_victim_key;
+			victim_slot = role_victim_slot;
+		}
+		else if (has_global_victim)
+		{
+			victim_key = global_victim_key;
+			victim_slot = global_victim_slot;
+		}
+		else
+			break;
+
+		if (victim_slot >= 0)
+			plv8_shared_state->tracked_keys[victim_slot].in_use = false;
+
+		Plv8WasmCacheEntry *victim = static_cast<Plv8WasmCacheEntry *>(
+			dshash_find(ht, &victim_key, true));
+		if (victim != nullptr)
+		{
+			if (DsaPointerIsValid(victim->code_ptr))
+			{
+				dsa_free(local_wasm_dsa, victim->code_ptr);
+				uint64 prev_used = pg_atomic_read_u64(&plv8_shared_state->bytes_used);
+				if (prev_used >= victim->code_size)
+					pg_atomic_fetch_sub_u64(&plv8_shared_state->bytes_used, victim->code_size);
+				else
+					pg_atomic_write_u64(&plv8_shared_state->bytes_used, 0);
+				uint64 prev_cnt = pg_atomic_read_u64(&plv8_shared_state->entries_count);
+				if (prev_cnt > 0)
+					pg_atomic_fetch_sub_u64(&plv8_shared_state->entries_count, 1);
+				pg_atomic_fetch_add_u64(&plv8_shared_state->evictions, 1);
+			}
+			dshash_delete_entry(ht, victim);
+		}
+	}
 #endif
 
 	if (final_role_used + len > role_cap ||
@@ -697,6 +806,18 @@ plv8_wasm_cache_store(const uint8_t *wire_bytes, size_t wire_len, const uint8_t 
 	entry->last_used_seq = pg_atomic_fetch_add_u64(&plv8_shared_state->access_seq, 1) + 1;
 	dshash_release_lock(ht, entry);
 
+#if PG_VERSION_NUM < 150000
+	for (int k = 0; k < PLV8_WASM_TRACKED_KEYS_MAX; k++)
+	{
+		if (!plv8_shared_state->tracked_keys[k].in_use)
+		{
+			plv8_shared_state->tracked_keys[k].in_use = true;
+			plv8_shared_state->tracked_keys[k].key = key;
+			break;
+		}
+	}
+#endif
+
 	pg_atomic_fetch_add_u64(&plv8_shared_state->bytes_used, len);
 	pg_atomic_fetch_add_u64(&plv8_shared_state->entries_count, 1);
 	pg_atomic_fetch_add_u64(&plv8_shared_state->stores, 1);
@@ -736,6 +857,23 @@ static HTAB *plv8_proc_cache_hash = NULL;
 
 static plv8_exec_env		   *exec_env_head = NULL;
 
+static bool plv8_cached_tle_fp_valid = false;
+static Oid plv8_cached_tle_user_id = InvalidOid;
+static TransactionId plv8_cached_tle_xid = InvalidTransactionId;
+static SubTransactionId plv8_cached_tle_subid = InvalidSubTransactionId;
+static CommandId plv8_cached_tle_cid = 0;
+static uint64 plv8_cached_tle_fp = 0;
+
+static uint64 plv8_catalog_gen = 1;
+static Oid plv8_cached_holder_relid = InvalidOid;
+static bool plv8_in_internal_catalog_update = false;
+
+uint64
+plv8_get_catalog_gen(void)
+{
+	return plv8_catalog_gen;
+}
+
 static void DisposePlv8ContextHandles(plv8_context *ctx);
 static void KillIsolateAndAllContexts(void);
 static void EnsureSharedIsolate(void);
@@ -756,6 +894,8 @@ static void plv8_append_json_string(StringInfo buf, const char *str);
 static plv8_proc *plv8_get_proc(Oid fn_oid, FunctionCallInfo fcinfo,
 		bool validate, char ***argnames, Oid *prolang_out, char **raw_prosrc_out) throw();
 static void plv8_xact_cb(XactEvent event, void *arg);
+static void plv8_subxact_cb(SubXactEvent event, SubTransactionId mySubid,
+		SubTransactionId parentSubid, void *arg);
 
 /*
  * CamelCaseFunctions are C++ functions.
@@ -1791,7 +1931,7 @@ _PG_init(void)
                                  gettext_noop("Allow superuser-owned language handlers to pass user-defined types as raw byte buffers."),
                                  NULL,
                                  &plv8_allow_raw_user_types,
-                                 true,
+                                 false,
                                  PGC_SUSET, 0,
                                  NULL,
                                  NULL,
@@ -1915,6 +2055,7 @@ _PG_init(void)
 	}
 
 	RegisterXactCallback(plv8_xact_cb, NULL);
+	RegisterSubXactCallback(plv8_subxact_cb, NULL);
 	CacheRegisterRelcacheCallback(plv8_modules_inval_cb, (Datum) 0);
 
 	EmitWarningsOnPlaceholders("plv8");
@@ -1926,9 +2067,22 @@ _PG_init(void)
 }
 
 static void
+plv8_subxact_cb(SubXactEvent event, SubTransactionId mySubid,
+				SubTransactionId parentSubid, void *arg)
+{
+	if (event == SUBXACT_EVENT_ABORT_SUB)
+		plv8_catalog_gen++;
+}
+
+static void
 plv8_xact_cb(XactEvent event, void *arg)
 {
 	plv8_exec_env	   *env = exec_env_head;
+
+	plv8_cached_tle_fp_valid = false;
+	if (event == XACT_EVENT_ABORT || event == XACT_EVENT_PARALLEL_ABORT)
+		plv8_catalog_gen++;
+
 
 	while (env)
 	{
@@ -3901,7 +4055,7 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 		}
 		bool owner_is_superuser = all_handlers_superuser &&
 			(proc == NULL || proc->cache == NULL || superuser_arg(proc->cache->proowner));
-		if (explicit_pass_bytes && (!plv8_allow_raw_user_types || !owner_is_superuser))
+		if (explicit_pass_bytes && !owner_is_superuser)
 		{
 			PG_TRY();
 			{
@@ -3916,7 +4070,6 @@ plv8_transpile_src(const char *src, Oid lang_oid, plv8_handler_dep *deps, int *n
 			PG_END_TRY();
 		}
 		bool pass_bytes = (is_wasm_lang || explicit_pass_bytes) &&
-						  plv8_allow_raw_user_types &&
 						  owner_is_superuser;
 		/*
 		 * preserve_numeric_precision: numeric values that cannot round-trip
@@ -4308,7 +4461,7 @@ plv8_try_restore_function_from_snapshot(plv8_proc_cache *cache,
 		}
 
 		cache->pass_user_types_as_bytes = slot.pass_user_types_as_bytes &&
-			plv8_allow_raw_user_types && superuser_arg(cache->proowner);
+			superuser_arg(cache->proowner);
 		cache->preserve_numeric_precision = slot.preserve_numeric_precision;
 		plv8_replace_snapshot_prosrc(cache, raw_prosrc);
 		plv8_snapshot_functions_restored++;
@@ -5497,6 +5650,11 @@ pg_error::rethrow() throw()
 static const char PLV8_BYTECODE_MAGIC[8] = {'P', 'L', 'V', '8', 'B', 'C', '0', '1'};
 
 static void plv8_modules_inval_cb(Datum arg, Oid relid) {
+  plv8_cached_tle_fp_valid = false;
+  if (!plv8_in_internal_catalog_update &&
+      (relid == InvalidOid || relid != plv8_cached_holder_relid)) {
+    plv8_catalog_gen++;
+  }
   if (relid == InvalidOid ||
       (OidIsValid(plv8_cached_modules_relid) &&
        relid == plv8_cached_modules_relid) ||
@@ -5546,7 +5704,6 @@ static uint64 plv8_hash_catalog_table(Oid relid) {
 
   uint64 fp = 0;
   Relation rel = table_open(relid, AccessShareLock);
-  TupleDesc tupdesc = RelationGetDescr(rel);
   TableScanDesc scan = table_beginscan_catalog(rel, 0, NULL);
   HeapTuple tuple;
 
@@ -5562,27 +5719,6 @@ static uint64 plv8_hash_catalog_table(Oid relid) {
     row_hash = plv8_fnv1a64(row_hash, &xmin, sizeof(xmin));
     row_hash = plv8_fnv1a64(row_hash, &cid, sizeof(cid));
 
-    for (int attnum = 1; attnum <= 10 && attnum <= tupdesc->natts; attnum++) {
-      bool isnull = false;
-      Datum d = heap_getattr(tuple, attnum, tupdesc, &isnull);
-      row_hash = plv8_fnv1a64(row_hash, &isnull, sizeof(isnull));
-      if (!isnull) {
-#if PG_VERSION_NUM >= 110000
-        Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum - 1);
-#else
-        Form_pg_attribute attr = tupdesc->attrs[attnum - 1];
-#endif
-        if (attr->attlen == -1) {
-          struct varlena* v = PG_DETOAST_DATUM_PACKED(d);
-          row_hash =
-              plv8_fnv1a64(row_hash, VARDATA_ANY(v), VARSIZE_ANY_EXHDR(v));
-          if ((Pointer)v != DatumGetPointer(d)) pfree(v);
-        } else if (attr->attbyval) {
-          row_hash = plv8_fnv1a64(row_hash, &d, sizeof(Datum));
-        }
-      }
-    }
-
     fp ^= row_hash;
   }
 
@@ -5596,19 +5732,53 @@ uint64 plv8_tle_modules_fingerprint(void) {
 
   AcceptInvalidationMessages();
 
+  Oid user_id = GetUserId();
+  TransactionId cur_xid = GetCurrentTransactionIdIfAny();
+  SubTransactionId cur_subid = GetCurrentSubTransactionId();
+  CommandId cur_cid = GetCurrentCommandId(false);
+
+  if (plv8_cached_tle_fp_valid &&
+      plv8_cached_tle_user_id == user_id &&
+      plv8_cached_tle_xid == cur_xid &&
+      plv8_cached_tle_subid == cur_subid &&
+      plv8_cached_tle_cid == cur_cid) {
+    return plv8_cached_tle_fp;
+  }
+
   Oid nspoid = get_namespace_oid("plv8", true);
-  if (!OidIsValid(nspoid)) return 0;
+  if (!OidIsValid(nspoid)) {
+    plv8_cached_tle_user_id = user_id;
+    plv8_cached_tle_xid = cur_xid;
+    plv8_cached_tle_subid = cur_subid;
+    plv8_cached_tle_cid = cur_cid;
+    plv8_cached_tle_fp = 0;
+    plv8_cached_tle_fp_valid = true;
+    return 0;
+  }
 
   Oid mod_relid = get_relname_relid("modules", nspoid);
   Oid pkg_relid = get_relname_relid("packages", nspoid);
-  if (!OidIsValid(mod_relid)) return 0;
+  if (!OidIsValid(mod_relid)) {
+    plv8_cached_tle_user_id = user_id;
+    plv8_cached_tle_xid = cur_xid;
+    plv8_cached_tle_subid = cur_subid;
+    plv8_cached_tle_cid = cur_cid;
+    plv8_cached_tle_fp = 0;
+    plv8_cached_tle_fp_valid = true;
+    return 0;
+  }
 
   plv8_cached_modules_relid = mod_relid;
   plv8_cached_packages_relid = pkg_relid;
 
-  Oid user_id = GetUserId();
   if (plv8_namespace_aclcheck(nspoid, user_id, ACL_USAGE) != ACLCHECK_OK ||
       pg_class_aclcheck(mod_relid, user_id, ACL_SELECT) != ACLCHECK_OK) {
+    plv8_cached_tle_user_id = user_id;
+    plv8_cached_tle_xid = cur_xid;
+    plv8_cached_tle_subid = cur_subid;
+    plv8_cached_tle_cid = cur_cid;
+    plv8_cached_tle_fp = 0;
+    plv8_cached_tle_fp_valid = true;
     return 0;
   }
 
@@ -5624,6 +5794,13 @@ uint64 plv8_tle_modules_fingerprint(void) {
     fp = plv8_fnv1a64(fp, &user_id, sizeof(user_id));
   }
   if (fp == 0) fp = 1;
+
+  plv8_cached_tle_user_id = user_id;
+  plv8_cached_tle_xid = cur_xid;
+  plv8_cached_tle_subid = cur_subid;
+  plv8_cached_tle_cid = cur_cid;
+  plv8_cached_tle_fp = fp;
+  plv8_cached_tle_fp_valid = true;
   return fp;
 }
 
@@ -7485,7 +7662,6 @@ static Oid plv8_stamped_oids[PLV8_MAX_STAMPED_OIDS];
 static int plv8_num_stamped_oids = 0;
 
 static bool plv8_in_support_internal_call = false;
-static int plv8_inline_slot_counter = 0;
 
 static void
 plv8_ensure_hook_registry_init(void)
@@ -7818,10 +7994,41 @@ plv8_update_single_col_holder_type(const Plv8ColMeta *col)
 	if (!OidIsValid(holder_type_oid) || !OidIsValid(holder_relid))
 		return InvalidOid;
 
+	plv8_cached_holder_relid = holder_relid;
+
 	HeapTuple typtup = SearchSysCache1(TYPEOID, ObjectIdGetDatum(col->type_oid));
 	if (!HeapTupleIsValid(typtup))
 		return InvalidOid;
 	Form_pg_type typform = (Form_pg_type) GETSTRUCT(typtup);
+	int16 typ_len = typform->typlen;
+	bool typ_byval = typform->typbyval;
+	char typ_align = typform->typalign;
+	char typ_storage = typform->typstorage;
+	Oid typ_collation = typform->typcollation;
+	char typ_category = typform->typcategory;
+	ReleaseSysCache(typtup);
+
+	const char *desired_name = (col->name && col->name[0] != '\0') ? col->name : "?column?";
+	Oid desired_coll = OidIsValid(col->collation_oid)
+		? col->collation_oid
+		: typ_collation;
+	int16 desired_ndims = (typ_category == TYPCATEGORY_ARRAY) ? 1 : 0;
+
+	HeapTuple cur_atttup = SearchSysCache2(ATTNUM,
+										   ObjectIdGetDatum(holder_relid),
+										   Int16GetDatum(1));
+	if (HeapTupleIsValid(cur_atttup))
+	{
+		Form_pg_attribute cur_att = (Form_pg_attribute) GETSTRUCT(cur_atttup);
+		bool same = (strncmp(NameStr(cur_att->attname), desired_name, NAMEDATALEN - 1) == 0 &&
+					 cur_att->atttypid == col->type_oid &&
+					 cur_att->atttypmod == col->typmod &&
+					 cur_att->attcollation == desired_coll &&
+					 cur_att->attndims == desired_ndims);
+		ReleaseSysCache(cur_atttup);
+		if (same)
+			return holder_type_oid;
+	}
 
 	Relation attrel = table_open(AttributeRelationId, ShareRowExclusiveLock);
 	HeapTuple atttup = SearchSysCacheCopy2(ATTNUM,
@@ -7830,34 +8037,41 @@ plv8_update_single_col_holder_type(const Plv8ColMeta *col)
 	if (!HeapTupleIsValid(atttup))
 	{
 		table_close(attrel, NoLock);
-		ReleaseSysCache(typtup);
 		return InvalidOid;
 	}
 
 	Form_pg_attribute attform = (Form_pg_attribute) GETSTRUCT(atttup);
-	namestrcpy(&attform->attname,
-			   (col->name && col->name[0] != '\0') ? col->name : "?column?");
+	if (strncmp(NameStr(attform->attname), desired_name, NAMEDATALEN - 1) == 0 &&
+		attform->atttypid == col->type_oid &&
+		attform->atttypmod == col->typmod &&
+		attform->attcollation == desired_coll &&
+		attform->attndims == desired_ndims)
+	{
+		heap_freetuple(atttup);
+		table_close(attrel, NoLock);
+		return holder_type_oid;
+	}
+
+	namestrcpy(&attform->attname, desired_name);
 	attform->atttypid = col->type_oid;
-	attform->attlen = typform->typlen;
-	attform->attbyval = typform->typbyval;
-	attform->attalign = typform->typalign;
-	attform->attstorage = typform->typstorage;
+	attform->attlen = typ_len;
+	attform->attbyval = typ_byval;
+	attform->attalign = typ_align;
+	attform->attstorage = typ_storage;
 #if PG_VERSION_NUM >= 140000
 	attform->attcompression = '\0';
 #endif
 	attform->atttypmod = col->typmod;
-	attform->attndims = (typform->typcategory == TYPCATEGORY_ARRAY) ? 1 : 0;
-	attform->attcollation = OidIsValid(col->collation_oid)
-		? col->collation_oid
-		: typform->typcollation;
-
-	ReleaseSysCache(typtup);
+	attform->attndims = desired_ndims;
+	attform->attcollation = desired_coll;
 
 	CatalogTupleUpdate(attrel, &atttup->t_self, atttup);
 	heap_freetuple(atttup);
 	table_close(attrel, NoLock);
 
+	plv8_in_internal_catalog_update = true;
 	CacheInvalidateRelcacheByRelid(holder_relid);
+	plv8_in_internal_catalog_update = false;
 	CommandCounterIncrement();
 
 	return holder_type_oid;
@@ -7893,6 +8107,29 @@ plv8_record_stamped_oid(Oid funcid)
 		plv8_stamped_oids[plv8_num_stamped_oids++] = funcid;
 }
 
+static bool
+plv8_varlena_attr_equals(HeapTuple tup, TupleDesc tupdesc, int attnum,
+						 bool new_isnull, Datum new_val)
+{
+	bool old_isnull = false;
+	Datum old_val = heap_getattr(tup, attnum, tupdesc, &old_isnull);
+	if (old_isnull != new_isnull)
+		return false;
+	if (new_isnull)
+		return true;
+	struct varlena *old_v = PG_DETOAST_DATUM_PACKED(old_val);
+	struct varlena *new_v = PG_DETOAST_DATUM_PACKED(new_val);
+	size_t old_len = VARSIZE_ANY_EXHDR(old_v);
+	size_t new_len = VARSIZE_ANY_EXHDR(new_v);
+	bool eq = (old_len == new_len &&
+			   memcmp(VARDATA_ANY(old_v), VARDATA_ANY(new_v), old_len) == 0);
+	if ((Pointer) old_v != DatumGetPointer(old_val))
+		pfree(old_v);
+	if ((Pointer) new_v != DatumGetPointer(new_val))
+		pfree(new_v);
+	return eq;
+}
+
 /*
  * Update `proallargtypes`, `proargmodes`, and `proargnames` on a `pg_proc`
  * tuple (and optionally `prosrc`, `proargtypes`, `pronargs` for inline helpers).
@@ -7922,10 +8159,11 @@ plv8_update_proc_table_columns(Oid funcid,
 	}
 
 	Form_pg_proc procform = (Form_pg_proc) GETSTRUCT(tup);
+	TupleDesc proc_tupdesc = RelationGetDescr(proc_rel);
 
 	if (num_out_cols <= 0 && new_prosrc == NULL && new_num_in_args < 0 &&
 		procform->prorettype == RECORDOID &&
-		heap_attisnull(tup, Anum_pg_proc_proallargtypes, RelationGetDescr(proc_rel)))
+		heap_attisnull(tup, Anum_pg_proc_proallargtypes, proc_tupdesc))
 	{
 		heap_freetuple(tup);
 		table_close(proc_rel, NoLock);
@@ -7964,6 +8202,47 @@ plv8_update_proc_table_columns(Oid funcid,
 		replaces[Anum_pg_proc_prosrc - 1] = true;
 	}
 
+	Datum *existing_names = NULL;
+	bool *existing_nulls = NULL;
+	int n_existing_names = 0;
+	if (new_num_in_args < 0 && ninargs > 0)
+	{
+		bool argnames_isnull = true;
+		Datum argnames_datum = heap_getattr(tup, Anum_pg_proc_proargnames,
+											proc_tupdesc, &argnames_isnull);
+		if (!argnames_isnull)
+		{
+#if PG_VERSION_NUM >= 160000
+			deconstruct_array_builtin(DatumGetArrayTypeP(argnames_datum), TEXTOID,
+									  &existing_names, &existing_nulls,
+									  &n_existing_names);
+#else
+			deconstruct_array(DatumGetArrayTypeP(argnames_datum), TEXTOID, -1, false,
+							  TYPALIGN_INT, &existing_names, &existing_nulls,
+							  &n_existing_names);
+#endif
+		}
+	}
+
+	bool has_real_in_argnames = false;
+	if (existing_names != NULL && n_existing_names >= ninargs && ninargs > 0)
+	{
+		for (int i = 0; i < ninargs; i++)
+		{
+			if (!existing_nulls[i])
+			{
+				char *nm = TextDatumGetCString(existing_names[i]);
+				if (nm[0] != '\0' && strncmp(nm, "__in_", 5) != 0)
+					has_real_in_argnames = true;
+				pfree(nm);
+			}
+			else
+			{
+				existing_names[i] = CStringGetTextDatum("");
+			}
+		}
+	}
+
 	if (num_out_cols <= 0)
 	{
 		values[Anum_pg_proc_prorettype - 1] = ObjectIdGetDatum(RECORDOID);
@@ -7975,7 +8254,20 @@ plv8_update_proc_table_columns(Oid funcid,
 		nulls[Anum_pg_proc_proargmodes - 1] = true;
 		replaces[Anum_pg_proc_proargmodes - 1] = true;
 
-		nulls[Anum_pg_proc_proargnames - 1] = true;
+		if (has_real_in_argnames)
+		{
+#if PG_VERSION_NUM >= 160000
+			values[Anum_pg_proc_proargnames - 1] = PointerGetDatum(
+				construct_array_builtin(existing_names, ninargs, TEXTOID));
+#else
+			values[Anum_pg_proc_proargnames - 1] = PointerGetDatum(
+				construct_array(existing_names, ninargs, TEXTOID, -1, false, TYPALIGN_INT));
+#endif
+		}
+		else
+		{
+			nulls[Anum_pg_proc_proargnames - 1] = true;
+		}
 		replaces[Anum_pg_proc_proargnames - 1] = true;
 	}
 	else if (num_out_cols == 1 && OidIsValid(single_holder_oid))
@@ -7989,7 +8281,20 @@ plv8_update_proc_table_columns(Oid funcid,
 		nulls[Anum_pg_proc_proargmodes - 1] = true;
 		replaces[Anum_pg_proc_proargmodes - 1] = true;
 
-		nulls[Anum_pg_proc_proargnames - 1] = true;
+		if (has_real_in_argnames)
+		{
+#if PG_VERSION_NUM >= 160000
+			values[Anum_pg_proc_proargnames - 1] = PointerGetDatum(
+				construct_array_builtin(existing_names, ninargs, TEXTOID));
+#else
+			values[Anum_pg_proc_proargnames - 1] = PointerGetDatum(
+				construct_array(existing_names, ninargs, TEXTOID, -1, false, TYPALIGN_INT));
+#endif
+		}
+		else
+		{
+			nulls[Anum_pg_proc_proargnames - 1] = true;
+		}
 		replaces[Anum_pg_proc_proargnames - 1] = true;
 	}
 	else
@@ -8009,8 +8314,15 @@ plv8_update_proc_table_columns(Oid funcid,
 			CHECK_FOR_INTERRUPTS();
 			all_types[i] = ObjectIdGetDatum(inargoids[i]);
 			all_modes[i] = CharGetDatum(PROARGMODE_IN);
-			snprintf(argbuf, sizeof(argbuf), "__in_%d", i + 1);
-			all_names[i] = CStringGetTextDatum(argbuf);
+			if (existing_names != NULL && i < n_existing_names && !existing_nulls[i])
+			{
+				all_names[i] = existing_names[i];
+			}
+			else
+			{
+				snprintf(argbuf, sizeof(argbuf), "__in_%d", i + 1);
+				all_names[i] = CStringGetTextDatum(argbuf);
+			}
 		}
 		for (int i = 0; i < num_out_cols; i++)
 		{
@@ -8048,7 +8360,60 @@ plv8_update_proc_table_columns(Oid funcid,
 #endif
 	}
 
-	HeapTuple newtup = heap_modify_tuple(tup, RelationGetDescr(proc_rel),
+	bool already_matches = true;
+	if (replaces[Anum_pg_proc_pronargs - 1])
+	{
+		if (procform->pronargs != (int16) ninargs ||
+			(ninargs > 0 &&
+			 memcmp(procform->proargtypes.values, inargoids, sizeof(Oid) * ninargs) != 0))
+		{
+			already_matches = false;
+		}
+	}
+	if (already_matches && replaces[Anum_pg_proc_prorettype - 1])
+	{
+		if (procform->prorettype != DatumGetObjectId(values[Anum_pg_proc_prorettype - 1]))
+			already_matches = false;
+	}
+	if (already_matches && replaces[Anum_pg_proc_prosrc - 1])
+	{
+		if (!plv8_varlena_attr_equals(tup, proc_tupdesc, Anum_pg_proc_prosrc,
+									  nulls[Anum_pg_proc_prosrc - 1],
+									  values[Anum_pg_proc_prosrc - 1]))
+			already_matches = false;
+	}
+	if (already_matches && replaces[Anum_pg_proc_proallargtypes - 1])
+	{
+		if (!plv8_varlena_attr_equals(tup, proc_tupdesc, Anum_pg_proc_proallargtypes,
+									  nulls[Anum_pg_proc_proallargtypes - 1],
+									  values[Anum_pg_proc_proallargtypes - 1]))
+			already_matches = false;
+	}
+	if (already_matches && replaces[Anum_pg_proc_proargmodes - 1])
+	{
+		if (!plv8_varlena_attr_equals(tup, proc_tupdesc, Anum_pg_proc_proargmodes,
+									  nulls[Anum_pg_proc_proargmodes - 1],
+									  values[Anum_pg_proc_proargmodes - 1]))
+			already_matches = false;
+	}
+	if (already_matches && replaces[Anum_pg_proc_proargnames - 1])
+	{
+		if (!plv8_varlena_attr_equals(tup, proc_tupdesc, Anum_pg_proc_proargnames,
+									  nulls[Anum_pg_proc_proargnames - 1],
+									  values[Anum_pg_proc_proargnames - 1]))
+			already_matches = false;
+	}
+
+	if (already_matches)
+	{
+		heap_freetuple(tup);
+		table_close(proc_rel, NoLock);
+		if (num_out_cols > 0 && new_prosrc == NULL)
+			plv8_record_stamped_oid(funcid);
+		return;
+	}
+
+	HeapTuple newtup = heap_modify_tuple(tup, proc_tupdesc,
 										 values, nulls, replaces);
 	CatalogTupleUpdate(proc_rel, &newtup->t_self, newtup);
 
@@ -8090,16 +8455,13 @@ plv8_update_func_overloads_columns(const char *func_name,
 								   int num_out_cols,
 								   const Plv8ColMeta *out_cols)
 {
+	if (XactReadOnly)
+		return;
+
 	char norm[NAMEDATALEN];
 	plv8_normalize_func_name(func_name ? func_name : "graph_table", norm, sizeof(norm));
 	if (norm[0] == '\0')
 		strlcpy(norm, "graph_table", sizeof(norm));
-
-	if (!XactReadOnly)
-	{
-		Relation proc_rel = table_open(ProcedureRelationId, ShareRowExclusiveLock);
-		table_close(proc_rel, NoLock);
-	}
 
 	List *oids = NIL;
 	CatCList *catlist = SearchSysCacheList1(PROCNAMEARGSNSP, CStringGetDatum(norm));
@@ -8113,6 +8475,13 @@ plv8_update_func_overloads_columns(const char *func_name,
 			(procform->prorettype == RECORDOID ||
 			 plv8_is_single_col_holder_type(procform->prorettype)))
 		{
+			if (num_out_cols <= 0 && procform->prorettype == RECORDOID)
+			{
+				bool att_isnull = true;
+				(void) SysCacheGetAttr(PROCOID, proctup, Anum_pg_proc_proallargtypes, &att_isnull);
+				if (att_isnull)
+					continue;
+			}
 			oids = lappend_oid(oids, procform->oid);
 		}
 	}
@@ -9478,21 +9847,73 @@ plv8_call_support(PG_FUNCTION_ARGS)
 		 */
 		plv8_update_func_overloads_columns(func_name, 0, NULL);
 
-		int slot_idx = (plv8_inline_slot_counter++) % PLV8_NUM_INLINE_HELPERS;
-		char helper_name[64];
-		snprintf(helper_name, sizeof(helper_name), "plv8_inline_helper_%d", slot_idx);
-		Oid helper_oid = plv8_lookup_func_oid_by_name_nargs(helper_name, -1);
-		if (!OidIsValid(helper_oid))
+		int helper_ncols = target_rtfunc->funccolnames != NIL ? 0 : expected_ncols;
+		uint64 slot_hash = plv8_fnv1a64(14695981039346656037ULL, sql_str, strlen(sql_str));
+		slot_hash = plv8_fnv1a64(slot_hash, &nlateral, sizeof(nlateral));
+		if (nlateral > 0)
+			slot_hash = plv8_fnv1a64(slot_hash, lateral_arg_oids, sizeof(Oid) * nlateral);
+		slot_hash = plv8_fnv1a64(slot_hash, &helper_ncols, sizeof(helper_ncols));
+		for (int i = 0; i < helper_ncols; i++)
 		{
-			snprintf(helper_name, sizeof(helper_name), "plpgq_inline_helper_%d", slot_idx);
-			helper_oid = plv8_lookup_func_oid_by_name_nargs(helper_name, -1);
+			const char *cn = expected_cols[i].name ? expected_cols[i].name : "";
+			slot_hash = plv8_fnv1a64(slot_hash, cn, strlen(cn) + 1);
+			slot_hash = plv8_fnv1a64(slot_hash, &expected_cols[i].type_oid, sizeof(Oid));
+		}
+
+		int base_slot = (int) (slot_hash % PLV8_NUM_INLINE_HELPERS);
+		Oid helper_oid = InvalidOid;
+		for (int probe = 0; probe < PLV8_NUM_INLINE_HELPERS; probe++)
+		{
+			int slot_idx = (base_slot + probe) % PLV8_NUM_INLINE_HELPERS;
+			char helper_name[64];
+			snprintf(helper_name, sizeof(helper_name), "plv8_inline_helper_%d", slot_idx);
+			Oid cand_oid = plv8_lookup_func_oid_by_name_nargs(helper_name, -1);
+			if (!OidIsValid(cand_oid))
+			{
+				snprintf(helper_name, sizeof(helper_name), "plpgq_inline_helper_%d", slot_idx);
+				cand_oid = plv8_lookup_func_oid_by_name_nargs(helper_name, -1);
+			}
+			if (!OidIsValid(cand_oid))
+				continue;
+
+			bool in_use = false;
+			if (root->parse != NULL)
+			{
+				ListCell *rlc;
+				foreach(rlc, root->parse->rtable)
+				{
+					RangeTblEntry *rte = (RangeTblEntry *) lfirst(rlc);
+					if (rte == target_rte || rte->rtekind != RTE_FUNCTION)
+						continue;
+					ListCell *flc;
+					foreach(flc, rte->functions)
+					{
+						RangeTblFunction *rtf = (RangeTblFunction *) lfirst(flc);
+						if (rtf->funcexpr && IsA(rtf->funcexpr, FuncExpr) &&
+							((FuncExpr *) rtf->funcexpr)->funcid == cand_oid)
+						{
+							in_use = true;
+							break;
+						}
+					}
+					if (in_use)
+						break;
+				}
+			}
+			if (!in_use)
+			{
+				helper_oid = cand_oid;
+				break;
+			}
+			if (!OidIsValid(helper_oid))
+				helper_oid = cand_oid;
 		}
 		if (!OidIsValid(helper_oid))
 			PG_RETURN_POINTER(NULL);
 
 		plv8_update_proc_table_columns(
 			helper_oid,
-			target_rtfunc->funccolnames != NIL ? 0 : expected_ncols,
+			helper_ncols,
 			expected_cols,
 			sql_str,
 			nlateral,

@@ -295,6 +295,19 @@ BEGIN
   IF after_secdef <= after_invoker THEN
     RAISE EXCEPTION 'Expected SECURITY DEFINER function to restore from snapshot for owner role_a (before=%, after=%)', after_invoker, after_secdef;
   END IF;
+
+  -- Changing function owner (proowner mismatch against snapshot slot) must
+  -- refuse snapshot restore and recompile cleanly from pg_proc.
+  EXECUTE 'ALTER FUNCTION plv8_snap_role_a_fn(int) OWNER TO plv8_iso_role_b';
+  EXECUTE 'SET ROLE plv8_iso_role_a';
+  IF plv8_snap_role_a_fn(9) <> 109 THEN
+    RAISE EXCEPTION 'Unexpected result after owner change';
+  END IF;
+  EXECUTE 'RESET ROLE';
+  IF (plv8_info()->>'snapshot_functions_restored')::int <> after_secdef THEN
+    RAISE EXCEPTION 'Expected snapshot restore to be skipped when proowner changed';
+  END IF;
+  EXECUTE 'ALTER FUNCTION plv8_snap_role_a_fn(int) OWNER TO plv8_iso_role_a';
 END;
 $$;
 

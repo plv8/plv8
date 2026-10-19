@@ -487,13 +487,18 @@ CREATE FUNCTION super_raw_roundtrip(v raw_test_type) RETURNS raw_test_type AS $$
   return out;
 $$ LANGUAGE super_raw_lang;
 
-SELECT super_raw_roundtrip('\x414243'::raw_test_type);
-
-SET plv8.allow_raw_user_types = off;
+SHOW plv8.allow_raw_user_types;
 \set VERBOSITY terse
 SELECT super_raw_roundtrip('\x414243'::raw_test_type);
 \set VERBOSITY default
+
+SET plv8.allow_raw_user_types = on;
+SELECT super_raw_roundtrip('\x414243'::raw_test_type);
+
 RESET plv8.allow_raw_user_types;
+\set VERBOSITY terse
+SELECT super_raw_roundtrip('\x414243'::raw_test_type);
+\set VERBOSITY default
 
 DROP FUNCTION super_raw_roundtrip(raw_test_type);
 DROP LANGUAGE super_raw_lang;

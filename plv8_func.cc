@@ -15,12 +15,17 @@ extern "C" {
 #define String PG_Node_String
 #include "access/htup_details.h"
 #include "access/xact.h"
+#include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
 #include "miscadmin.h"
 #include "parser/parse_type.h"
+#include "storage/itemptr.h"
 #include "utils/builtins.h"
+#include "utils/fmgrprotos.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
+#include "utils/syscache.h"
 #include "nodes/memnodes.h"
 #undef String
 } // extern "C"
@@ -62,6 +67,8 @@ static void plv8_ReturnQuery(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_RegisterColumnInference(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_RegisterSupport(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_SetFunctionColumns(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_CurrentSetting(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_ProcCacheKey(const FunctionCallbackInfo<v8::Value>& args);
 
 const intptr_t plv8_external_references[] = {
 	reinterpret_cast<intptr_t>(plv8_FunctionInvoker),
@@ -102,6 +109,8 @@ const intptr_t plv8_external_references[] = {
 	reinterpret_cast<intptr_t>(plv8_RegisterColumnInference),
 	reinterpret_cast<intptr_t>(plv8_RegisterSupport),
 	reinterpret_cast<intptr_t>(plv8_SetFunctionColumns),
+	reinterpret_cast<intptr_t>(plv8_CurrentSetting),
+	reinterpret_cast<intptr_t>(plv8_ProcCacheKey),
 	0
 };
 
@@ -441,6 +450,8 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	SetCallback(plv8, "register_column_inference", plv8_RegisterColumnInference, attrFull);
 	SetCallback(plv8, "register_support", plv8_RegisterSupport, attrFull);
 	SetCallback(plv8, "set_function_columns", plv8_SetFunctionColumns, attrFull);
+	SetCallback(plv8, "current_setting", plv8_CurrentSetting, attrFull);
+	SetCallback(plv8, "proc_cache_key", plv8_ProcCacheKey, attrFull);
 
 	plv8->SetInternalFieldCount(PLV8_INTNL_MAX);
 }
@@ -2483,3 +2494,136 @@ plv8_SetFunctionColumns(const FunctionCallbackInfo<v8::Value>& args)
 	plv8_set_function_columns_js(func_name.str(), ncols, cols);
 	args.GetReturnValue().Set(v8::Boolean::New(isolate, true));
 }
+
+static void
+plv8_CurrentSetting(const FunctionCallbackInfo<v8::Value>& args)
+{
+	Isolate *isolate = args.GetIsolate();
+	if (args.Length() < 1 || !args[0]->IsString())
+	{
+		args.GetReturnValue().Set(Null(isolate));
+		return;
+	}
+
+	bool missing_ok = false;
+	if (args.Length() >= 2)
+		missing_ok = args[1]->BooleanValue(isolate);
+
+	CString setting_name(args[0]);
+	const char *val = NULL;
+	MemoryContext saved_cxt = CurrentMemoryContext;
+
+	PG_TRY();
+	{
+		val = GetConfigOptionByName(setting_name.str(), NULL, missing_ok);
+	}
+	PG_CATCH();
+	{
+		if (missing_ok)
+		{
+			FlushErrorState();
+			MemoryContextSwitchTo(saved_cxt);
+			val = NULL;
+		}
+		else
+		{
+			throw pg_error();
+		}
+	}
+	PG_END_TRY();
+
+	if (val == NULL)
+		args.GetReturnValue().Set(Null(isolate));
+	else
+		args.GetReturnValue().Set(ToString(val));
+}
+
+static void
+plv8_ProcCacheKey(const FunctionCallbackInfo<v8::Value>& args)
+{
+	Isolate *isolate = args.GetIsolate();
+	if (args.Length() < 1 || !args[0]->IsString())
+	{
+		args.GetReturnValue().Set(Null(isolate));
+		return;
+	}
+
+	CString fn_spec(args[0]);
+	const char *spec_str = fn_spec.str();
+	if (spec_str == NULL || spec_str[0] == '\0')
+	{
+		args.GetReturnValue().Set(Null(isolate));
+		return;
+	}
+
+	if (spec_str[0] == '*' && spec_str[1] == '\0')
+	{
+		char gen_buf[32];
+		snprintf(gen_buf, sizeof(gen_buf), "gen:%llu",
+				 (unsigned long long) plv8_get_catalog_gen());
+		args.GetReturnValue().Set(ToString(gen_buf));
+		return;
+	}
+
+	Oid func_oid = InvalidOid;
+	MemoryContext saved_cxt = CurrentMemoryContext;
+	PG_TRY();
+	{
+		Datum spec_datum = CStringGetTextDatum(spec_str);
+		if (strchr(spec_str, '(') != NULL)
+		{
+			Datum res = DirectFunctionCall1(to_regprocedure, spec_datum);
+			func_oid = DatumGetObjectId(res);
+		}
+		else
+		{
+			Datum res = DirectFunctionCall1(to_regproc, spec_datum);
+			func_oid = DatumGetObjectId(res);
+			if (!OidIsValid(func_oid))
+			{
+				res = DirectFunctionCall1(to_regprocedure, spec_datum);
+				func_oid = DatumGetObjectId(res);
+			}
+		}
+		pfree(DatumGetPointer(spec_datum));
+	}
+	PG_CATCH();
+	{
+		FlushErrorState();
+		MemoryContextSwitchTo(saved_cxt);
+		func_oid = InvalidOid;
+	}
+	PG_END_TRY();
+
+	if (!OidIsValid(func_oid))
+	{
+		args.GetReturnValue().Set(Null(isolate));
+		return;
+	}
+
+	HeapTuple proctup = SearchSysCache1(PROCOID, ObjectIdGetDatum(func_oid));
+	if (!HeapTupleIsValid(proctup))
+	{
+		args.GetReturnValue().Set(Null(isolate));
+		return;
+	}
+
+	TransactionId xmin = HeapTupleHeaderGetRawXmin(proctup->t_data);
+	CommandId cmin = HeapTupleHeaderGetRawCommandId(proctup->t_data);
+	ItemPointerData tid = proctup->t_self;
+	BlockNumber blk = ItemPointerGetBlockNumber(&tid);
+	OffsetNumber off = ItemPointerGetOffsetNumber(&tid);
+	ReleaseSysCache(proctup);
+
+	char key_buf[96];
+	snprintf(key_buf, sizeof(key_buf), "%u:%u:%u:(%u,%u):%llu",
+			 (unsigned int) func_oid,
+			 (unsigned int) xmin,
+			 (unsigned int) cmin,
+			 (unsigned int) blk,
+			 (unsigned int) off,
+			 (unsigned long long) plv8_get_catalog_gen());
+	args.GetReturnValue().Set(ToString(key_buf));
+}
+
+

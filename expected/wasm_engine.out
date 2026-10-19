@@ -1465,6 +1465,7 @@ END;
 $_pgtle_wasm_ext_$
 LANGUAGE plpgsql;
 REVOKE EXECUTE ON FUNCTION pgtle.install_wasm_extension(text, text, text, bytea, jsonb, text, text[]) FROM PUBLIC;
+SET plv8.allow_raw_user_types = on;
 \set QUIET off
 RESET client_min_messages;
 RESET

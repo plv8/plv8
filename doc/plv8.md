@@ -710,10 +710,13 @@ simply prepare your code to deal with the fact that only newer connections will
 get access to the PL/v8 version.
 
 ## Dialects
-This module also contains some dialect supports. Currently, we have two dialects
-that are supported:
+This module also contains some dialect supports. Currently, we have the following dialects and procedural languages supported on top of the V8 runtime:
 
 - CoffeeScript (plcoffee)
 - LiveScript (plls)
+- Direct WebAssembly (`"pl/v8-wasm"`, via `pgtle.bootstrap_wasm_engine()` / `pgtle.install_wasm_extension()`)
+- Custom Procedural Languages (`CREATE [TRUSTED] LANGUAGE ... HANDLER ...`): Any language transpiled to JavaScript or compiled to WebAssembly can be registered on `pl/v8` (see `docs/LANGUAGE_HANDLER_USER_GUIDE.md` and `docs/LANGUAGE_HANDLER_DESIGN.md`, and standalone language extensions in [`postsql/pl-any`](https://github.com/postsql/pl-any)).
 
 With PostgreSQL 9.1 or above, you are able to load those dialects via `CREATE EXTENSION` command.
+
+

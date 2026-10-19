@@ -10,6 +10,7 @@
 /plls.control
 /plv8--*.sql
 /plv8.control
+/upgrade
 
 # Generic build files
 *.o

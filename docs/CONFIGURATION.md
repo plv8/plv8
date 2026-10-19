@@ -3,10 +3,17 @@
 PLV8 has some configuration variables that can be set either in `postgresql.conf`
 or at runtime using `SET`.
 
-| Variable                 | Description                                                                      | Default     |
-| ------------------------ | -------------------------------------------------------------------------------- | ----------- |
-| `plv8.start_proc`        | PLV8 function to run once when PLV8 is first used                                | _none_      |
-| `plv8.icu_data`          | ICU data file directory (when compiled with ICU support)                         | _none_      |
-| `plv8.v8_flags`          | V8 engine initialization flags (e.g. --harmony for all current harmony features) | _none_      |
-| `plv8.execution_timeout` | V8 execution timeout (when compiled with EXECUTION_TIMEOUT)                      | 300 seconds |
-| `plv8.memory_limit`      | Memory limit for the per-user heap usage on each connection, in **MB**           | 256         |
+| Variable                     | Context           | Description                                                                                                              | Default     |
+| ---------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------- |
+| `plv8.start_proc`            | `PGC_USERSET`     | PLV8 function to run once when PLV8 is first used                                                                        | _none_      |
+| `plv8.icu_data`              | `PGC_USERSET`     | ICU data file directory (when compiled with ICU support)                                                                 | _none_      |
+| `plv8.v8_flags`              | `PGC_USERSET`     | V8 engine initialization flags (e.g. --harmony for all current harmony features)                                         | _none_      |
+| `plv8.execution_timeout`     | `PGC_USERSET`     | V8 execution timeout (when compiled with EXECUTION_TIMEOUT)                                                              | 300 seconds |
+| `plv8.memory_limit`          | `PGC_USERSET`     | Memory limit for the per-user heap usage on each connection, in **MB**                                                   | 256         |
+| `plv8.allow_raw_user_types`  | `PGC_SUSET`       | Superuser-only toggle allowing superuser-owned language handlers (`pass_user_types_as_bytes`) to pass/return raw `TYPCATEGORY_USER` varlena bytes | `off`       |
+| `plv8.wasm_cache_size`       | `PGC_SUSET`       | Maximum shared memory size (in **MB**) for the cross-backend compiled WebAssembly native code cache (`shared_preload_libraries`) | 64          |
+| `plv8.wasm_cache_max_bytes`  | `PGC_SUSET`       | Optional fine-grained byte limit override for the WebAssembly cache (`0` = use `plv8.wasm_cache_size` MB)                | 0           |
+| `plv8.snapshot_file`         | `PGC_SUSET`       | Path to a pre-built V8 startup snapshot file (`PLV8SN02`) loaded during preload or superuser reload (`plv8_reset()`)     | _none_      |
+| `plv8.boot_script_file`      | `PGC_SUSET`       | Path to a JS boot script compiled into a V8 startup snapshot during preload or superuser reload (`plv8_reset()`)         | _none_      |
+| `plv8.thread_pool_size`      | `PGC_SUSET`       | Number of V8 background worker threads (`0` = automatic `min(CPU cores, 4)`)                                             | 0           |
+| `plv8.max_module_depth`      | `PGC_USERSET`     | Maximum module `import` / `require` nesting depth                                                                        | 32          |

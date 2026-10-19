@@ -27,6 +27,14 @@ extern "C" {
 #include "fmgr.h"
 } // extern "C"
 
+#ifdef DatumGetNumeric
+#undef DatumGetNumeric
+static inline ::Numeric
+DatumGetNumeric(Datum X)
+{
+	return (::Numeric) PG_DETOAST_DATUM(X);
+}
+#endif
 
 using namespace v8;
 
@@ -155,6 +163,25 @@ inferred_datum_type(Handle<v8::Value> value)
 	return InvalidOid;
 }
 
+static Local<v8::Value>
+EnsureStringForCString(Isolate *isolate, Local<v8::Value> value)
+{
+	if (value.IsEmpty())
+		return v8::String::Empty(isolate);
+	if (value->IsString())
+		return value;
+	Local<Context> context = isolate->GetCurrentContext();
+	TryCatch try_catch(isolate);
+	Local<v8::String> str;
+	if (!value->ToString(context).ToLocal(&str))
+	{
+		if (try_catch.HasCaught())
+			throw js_error(try_catch);
+		throw js_error("failed to convert value to string");
+	}
+	return str;
+}
+
 #if JSONB_DIRECT_CONVERSION
 
 static Local<v8::Value>
@@ -195,10 +222,10 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
     case WJB_BEGIN_OBJECT:
 			obj = v8::Object::New(isolate);
 			if (container->IsArray()) {
-				container->Set(context, count, JsonbIterate(it, obj)).Check();
+				container->CreateDataProperty(context, count, JsonbIterate(it, obj)).Check();
 				count++;
 			} else {
-				container->Set(context, key, JsonbIterate(it, obj)).Check();
+				container->CreateDataProperty(context, key.As<v8::Name>(), JsonbIterate(it, obj)).Check();
 			}
       break;
 
@@ -210,10 +237,10 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
     case WJB_BEGIN_ARRAY:
 			obj = v8::Array::New(isolate);
 			if (container->IsArray()) {
-				container->Set(context, count, JsonbIterate(it, obj)).Check();
+				container->CreateDataProperty(context, count, JsonbIterate(it, obj)).Check();
 				count++;
 			} else {
-				container->Set(context, key, JsonbIterate(it, obj)).Check();
+				container->CreateDataProperty(context, key.As<v8::Name>(), JsonbIterate(it, obj)).Check();
 			}
       break;
 
@@ -229,12 +256,12 @@ JsonbIterate(JsonbIterator **it, Local<v8::Object> container) {
 
     case WJB_VALUE:
       // object value
-			container->Set(context, key, GetJsonbValue(&val)).Check();
+			container->CreateDataProperty(context, key.As<v8::Name>(), GetJsonbValue(&val)).Check();
       break;
 
     case WJB_ELEM:
       // array element
-			container->Set(context, count, GetJsonbValue(&val)).Check();
+			container->CreateDataProperty(context, count, GetJsonbValue(&val)).Check();
 			count++;
       break;
 
@@ -270,16 +297,18 @@ ConvertJsonb(JsonbContainer *in) {
 	return JsonbIterate(&it, container);
 }
 
+#define PLV8_MAX_JSONB_DEPTH 100
+
 #if PG_VERSION_NUM >= 190000
 static JsonbValue *
-JsonbObjectFromObject(JsonbInState *pstate, Local<v8::Object> object);
+JsonbObjectFromObject(JsonbInState *pstate, Local<v8::Object> object, int depth = 0);
 static JsonbValue *
-JsonbArrayFromArray(JsonbInState *pstate, Local<v8::Object> object);
+JsonbArrayFromArray(JsonbInState *pstate, Local<v8::Object> object, int depth = 0);
 #else
 static JsonbValue *
-JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object);
+JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object, int depth = 0);
 static JsonbValue *
-JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object);
+JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object, int depth = 0);
 #endif
 
 static void LogType(Local<v8::Value> val, bool asError = true) {
@@ -406,7 +435,7 @@ JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorTo
 	// if the token type is a key, the only valid value is jbvString
 	if (type == WJB_KEY) {
 		val.type = jbvString;
-		v8::String::Utf8Value utf8(isolate, value->ToString(context).ToLocalChecked());
+		v8::String::Utf8Value utf8(isolate, EnsureStringForCString(isolate, value));
 		val.val.string.val = ToCStringCopy(utf8);
 		val.val.string.len = utf8.length();
 	} else {
@@ -419,26 +448,26 @@ JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorTo
 			return NULL;
 		} else if (value->IsString()) {
 			val.type = jbvString;
-			v8::String::Utf8Value utf8(isolate, value->ToString(context).ToLocalChecked());
+			v8::String::Utf8Value utf8(isolate, EnsureStringForCString(isolate, value));
 			val.val.string.val = ToCStringCopy(utf8);
 			val.val.string.len = utf8.length();
 		} else if (value->IsNumber()) {
 			if (value->IsInt32()) {
-				int32 iv = value->Int32Value(context).ToChecked();
+				int32 iv = Plv8ToInt32(isolate, context, value);
 				val.val.numeric = DatumGetNumeric(DirectFunctionCall1(int4_numeric, Int32GetDatum(iv)));
 				val.type = jbvNumeric;
 			} else if (value->IsUint32()) {
-				int64 iv = (int64) value->Uint32Value(context).ToChecked();
+				int64 iv = (int64) Plv8ToUint32(isolate, context, value);
 				val.val.numeric = DatumGetNumeric(DirectFunctionCall1(int8_numeric, Int64GetDatum(iv)));
 				val.type = jbvNumeric;
 			} else {
-				float8 fv = (float8) value->NumberValue(context).ToChecked();
+				float8 fv = (float8) Plv8ToNumber(isolate, context, value);
 
 				val.val.numeric = DatumGetNumeric(DirectFunctionCall1(float8_numeric, Float8GetDatum(fv)));
 				val.type = jbvNumeric;
 			}
 		} else if (value->IsDate()) {
-			double t = value->NumberValue(context).ToChecked();
+			double t = Plv8ToNumber(isolate, context, value);
 			if (isnan(t)) {
 				val.type = jbvNull;
 			} else {
@@ -449,7 +478,7 @@ JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorTo
 		} else {
 			LogType(value, false);
 			val.type = jbvString;
-			v8::String::Utf8Value utf8(isolate, value->ToString(context).ToLocalChecked());
+			v8::String::Utf8Value utf8(isolate, EnsureStringForCString(isolate, value));
 			val.val.string.val = ToCStringCopy(utf8);
 			val.val.string.len = utf8.length();
 		}
@@ -465,10 +494,13 @@ JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorTo
 
 static JsonbValue *
 #if PG_VERSION_NUM >= 190000
-JsonbArrayFromArray(JsonbInState *pstate, Local<v8::Object> object) {
+JsonbArrayFromArray(JsonbInState *pstate, Local<v8::Object> object, int depth) {
 #else
-JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object) {
+JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object, int depth) {
 #endif
+	if (depth > PLV8_MAX_JSONB_DEPTH)
+		throw js_error("stack depth limit exceeded");
+
 	Isolate *isolate = Isolate::GetCurrent();
 	Local<Context>		context = isolate->GetCurrentContext();
 #if PG_VERSION_NUM >= 190000
@@ -479,12 +511,12 @@ JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object) {
 #endif
 	Local<v8::Array> a = Local<v8::Array>::Cast(object);
 	for (size_t i = 0; i < a->Length(); i++) {
-		Local<v8::Value> o = a->Get(context, i).ToLocalChecked();
+		Local<v8::Value> o = Plv8GetElement(isolate, context, a, i);
 
 		if (o->IsArray()) {
-			val = JsonbArrayFromArray(pstate, Local<v8::Array>::Cast(o));
+			val = JsonbArrayFromArray(pstate, Local<v8::Array>::Cast(o), depth + 1);
 		} else if (o->IsObject()) {
-			val = JsonbObjectFromObject(pstate, Local<v8::Object>::Cast(o));
+			val = JsonbObjectFromObject(pstate, Local<v8::Object>::Cast(o), depth + 1);
 		} else {
 			val = JsonbFromValue(pstate, o, WJB_ELEM);
 		}
@@ -502,10 +534,13 @@ JsonbArrayFromArray(JsonbParseState **pstate, Local<v8::Object> object) {
 
 static JsonbValue *
 #if PG_VERSION_NUM >= 190000
-JsonbObjectFromObject(JsonbInState *pstate, Local<v8::Object> object) {
+JsonbObjectFromObject(JsonbInState *pstate, Local<v8::Object> object, int depth) {
 #else
-JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object) {
+JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object, int depth) {
 #endif
+	if (depth > PLV8_MAX_JSONB_DEPTH)
+		throw js_error("stack depth limit exceeded");
+
 	Isolate *isolate = Isolate::GetCurrent();
 	Local<Context>		context = isolate->GetCurrentContext();
 #if PG_VERSION_NUM >= 190000
@@ -514,19 +549,78 @@ JsonbObjectFromObject(JsonbParseState **pstate, Local<v8::Object> object) {
 #else
 	JsonbValue *val = pushJsonbValue(pstate, WJB_BEGIN_OBJECT, NULL);
 #endif
-	Local<Array> arr = object->GetOwnPropertyNames(context).ToLocalChecked();
+	TryCatch try_catch(isolate);
+	Local<Array> arr;
+	if (!object->GetOwnPropertyNames(context).ToLocal(&arr))
+	{
+		if (try_catch.HasCaught())
+			throw js_error(try_catch);
+		throw js_error("failed to get own property names");
+	}
+
+	/*
+	 * Rows produced by SPI in preserve_numeric_precision mode carry a hidden
+	 * __numeric_columns list; string values in those columns are exact numeric
+	 * text and are emitted as jsonb numbers rather than strings.
+	 */
+	Local<Array> numeric_cols;
+	{
+		Local<v8::String> tag = ToString("__numeric_columns");
+		Local<v8::Value> tagval;
+		if (object->HasOwnProperty(context, tag).FromMaybe(false) &&
+			object->Get(context, tag).ToLocal(&tagval) && tagval->IsArray())
+			numeric_cols = Local<Array>::Cast(tagval);
+	}
 
 	for (size_t i = 0; i < arr->Length(); i++) {
-		Local<v8::Value> v = arr->Get(context, i).ToLocalChecked();
+		Local<v8::Value> v = Plv8GetElement(isolate, context, arr, i);
 		val = JsonbFromValue(pstate, v, WJB_KEY);
-		Local<v8::Value> o = object->Get(context, v).ToLocalChecked();
+		Local<v8::Value> o = Plv8GetProperty(isolate, context, object, v);
+
+		if (!numeric_cols.IsEmpty() && o->IsString())
+		{
+			bool is_numeric_col = false;
+			for (uint32_t n = 0; n < numeric_cols->Length() && !is_numeric_col; n++)
+			{
+				Local<v8::Value> cn;
+				if (numeric_cols->Get(context, n).ToLocal(&cn) && cn->StrictEquals(v))
+					is_numeric_col = true;
+			}
+			if (is_numeric_col)
+			{
+				v8::String::Utf8Value utf8(isolate, o);
+				const char *s = *utf8;
+				bool plain = (s != NULL && *s != '\0');
+				int ndots = 0;
+				for (const char *p = s; plain && *p; p++)
+				{
+					if (*p == '-' && p == s) continue;
+					if (*p == '.') { if (++ndots > 1) plain = false; continue; }
+					if (*p < '0' || *p > '9') plain = false;
+				}
+				if (plain)
+				{
+					JsonbValue nv;
+					nv.type = jbvNumeric;
+					nv.val.numeric = DatumGetNumeric(DirectFunctionCall3(numeric_in, CStringGetDatum(s),
+																		  ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1)));
+#if PG_VERSION_NUM >= 190000
+					pushJsonbValue(pstate, WJB_VALUE, &nv);
+					val = pstate->result;
+#else
+					val = pushJsonbValue(pstate, WJB_VALUE, &nv);
+#endif
+					continue;
+				}
+			}
+		}
 
 		if (o->IsDate()) {
 			val = JsonbFromValue(pstate, o, WJB_VALUE);
 		} else if (o->IsArray()) {
-			val = JsonbArrayFromArray(pstate, Local<v8::Array>::Cast(o));
+			val = JsonbArrayFromArray(pstate, Local<v8::Array>::Cast(o), depth + 1);
 		} else if (o->IsObject()) {
-			val = JsonbObjectFromObject(pstate, Local<v8::Object>::Cast(o));
+			val = JsonbObjectFromObject(pstate, Local<v8::Object>::Cast(o), depth + 1);
 		} else {
 			val = JsonbFromValue(pstate, o, WJB_VALUE);
 		}
@@ -553,39 +647,51 @@ ConvertObject(Local<v8::Object> object) {
 	MemoryContextSwitchTo(conversion_context);
 
 #if PG_VERSION_NUM >= 190000
-  JsonbInState pstate = {0};
+	JsonbInState pstate = {0};
 #else
-  JsonbParseState *pstate = NULL;
+	JsonbParseState *pstate = NULL;
 #endif
-  JsonbValue *val;
+	JsonbValue *val = NULL;
 
-	if (object->IsArray()) {
-		val = JsonbArrayFromArray(&pstate, object);
-	} else if (object->IsObject()) {
-		val = JsonbObjectFromObject(&pstate, object);
-	} else {
-		pushJsonbValue(&pstate, WJB_BEGIN_ARRAY, NULL);
-		JsonbFromValue(&pstate, object, WJB_ELEM);
+	try
+	{
+		if (object.IsEmpty())
+			throw js_error("cannot convert empty value to jsonb");
+
+		if (object->IsArray()) {
+			val = JsonbArrayFromArray(&pstate, object, 0);
+		} else if (object->IsObject()) {
+			val = JsonbObjectFromObject(&pstate, object, 0);
+		} else {
+			pushJsonbValue(&pstate, WJB_BEGIN_ARRAY, NULL);
+			JsonbFromValue(&pstate, object, WJB_ELEM);
 #if PG_VERSION_NUM >= 190000
-		pushJsonbValue(&pstate, WJB_END_ARRAY, NULL);
-		val = pstate.result;
+			pushJsonbValue(&pstate, WJB_END_ARRAY, NULL);
+			val = pstate.result;
 #else
-		val = pushJsonbValue(&pstate, WJB_END_ARRAY, NULL);
+			val = pushJsonbValue(&pstate, WJB_END_ARRAY, NULL);
 #endif
-                val->val.array.rawScalar = true;
+			val->val.array.rawScalar = true;
+		}
+	}
+	catch (...)
+	{
+		MemoryContextSwitchTo(oldcontext);
+		MemoryContextDelete(conversion_context);
+		throw;
 	}
 
 	MemoryContextSwitchTo(oldcontext);
 
 	Jsonb *ret = JsonbValueToJsonb(val);
 	MemoryContextDelete(conversion_context);
-  return ret;
+	return ret;
 }
 #endif
 
 static Local<Object>
 CreateExternalArray(void *data, plv8_external_array_type array_type,
-					int byte_size, Datum datum)
+					int byte_size)
 {
 	Isolate* isolate = Isolate::GetCurrent();
 	Local<v8::ArrayBuffer> buffer;
@@ -625,28 +731,123 @@ CreateExternalArray(void *data, plv8_external_array_type array_type,
 		break;
 	case kExternalInt64Array:
 		array = v8::BigInt64Array::New(buffer, 0, byte_size / sizeof(int64));
+		break;
 	default:
 		throw js_error("unexpected array type");
 	}
-	array->SetInternalField(0, External::New(isolate, DatumGetPointer(datum)));
 
 	// needs to be a copy, as the data could go away
-	memcpy(buffer->GetBackingStore()->Data(), data, byte_size);
+	if (byte_size > 0 && data != NULL)
+		memcpy(buffer->GetBackingStore()->Data(), data, byte_size);
 
 	return array;
 }
 
 static void *
-ExtractExternalArrayDatum(Handle<v8::Value> value)
+ExtractExternalArrayDatum(Handle<v8::Value> value, plv8_type *type)
 {
-	if (value->IsUndefined() || value->IsNull()) {
+	if (value.IsEmpty() || value->IsUndefined() || value->IsNull() || type == NULL) {
 		return NULL;
 	}
 
 	if (value->IsTypedArray())
 	{
-		Handle<Object> object = Handle<Object>::Cast(value);
-		return Handle<External>::Cast(object->GetInternalField(0))->Value();
+		v8::Local<v8::TypedArray> array = v8::Local<v8::TypedArray>::Cast(value);
+		void *data = array->Buffer()->GetBackingStore()->Data();
+		size_t offset = array->ByteOffset();
+		size_t len = array->ByteLength();
+
+		if (type->typid == BYTEAOID && type->category != TYPCATEGORY_ARRAY)
+		{
+			size_t size = len + VARHDRSZ;
+			void *result = palloc(size);
+			SET_VARSIZE(result, size);
+			if (len > 0 && data != NULL)
+				memcpy(VARDATA(result), (const char *) data + offset, len);
+			return result;
+		}
+
+		if (type->category == TYPCATEGORY_ARRAY)
+		{
+			Oid elemtype = InvalidOid;
+			int16 elemsz = 0;
+
+			if (value->IsInt16Array() || value->IsUint16Array())
+			{
+				elemtype = INT2OID;
+				elemsz = sizeof(int16);
+			}
+			else if (value->IsInt32Array() || value->IsUint32Array())
+			{
+				elemtype = INT4OID;
+				elemsz = sizeof(int32);
+			}
+			else if (value->IsFloat32Array())
+			{
+				elemtype = FLOAT4OID;
+				elemsz = sizeof(float4);
+			}
+			else if (value->IsFloat64Array())
+			{
+				elemtype = FLOAT8OID;
+				elemsz = sizeof(float8);
+			}
+			else if (value->IsBigInt64Array() || value->IsBigUint64Array())
+			{
+				elemtype = INT8OID;
+				elemsz = sizeof(int64);
+			}
+			else if ((value->IsInt8Array() || value->IsUint8Array()) &&
+					 (type->ext_array == kExternalByteArray ||
+					  type->ext_array == kExternalUnsignedByteArray))
+			{
+				elemtype = type->typid;
+				elemsz = 1;
+			}
+			else
+			{
+				return NULL;
+			}
+
+			Oid expected_elemtype = type->typid;
+			switch (type->ext_array)
+			{
+			case kExternalShortArray:
+			case kExternalUnsignedShortArray:
+				expected_elemtype = INT2OID;
+				break;
+			case kExternalIntArray:
+			case kExternalUnsignedIntArray:
+				expected_elemtype = INT4OID;
+				break;
+			case kExternalFloatArray:
+				expected_elemtype = FLOAT4OID;
+				break;
+			case kExternalDoubleArray:
+				expected_elemtype = FLOAT8OID;
+				break;
+			case kExternalInt64Array:
+				expected_elemtype = INT8OID;
+				break;
+			default:
+				break;
+			}
+
+			if (elemtype != expected_elemtype || elemsz <= 0)
+				return NULL;
+
+			size_t size = len + ARR_OVERHEAD_NONULLS(1);
+			ArrayType *result = (ArrayType *) palloc0(size);
+			SET_VARSIZE(result, size);
+			result->ndim = 1;
+			result->dataoffset = 0;
+			result->elemtype = elemtype;
+			*ARR_DIMS(result) = (int) (len / elemsz);
+			*ARR_LBOUND(result) = 1;
+			if (len > 0 && data != NULL)
+				memcpy(ARR_DATA_PTR(result), (const char *) data + offset, len);
+			return result;
+		}
 	}
 
 	return NULL;
@@ -665,10 +866,11 @@ static Datum
 ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 {
 	Isolate* isolate = Isolate::GetCurrent();
+	Local<Context> context = isolate->GetCurrentContext();
 	if (type->category == TYPCATEGORY_COMPOSITE)
 		return ToRecordDatum(value, isnull, type);
 
-	if (value->IsUndefined() || value->IsNull())
+	if (value.IsEmpty() || value->IsUndefined() || value->IsNull())
 	{
 		*isnull = true;
 		return (Datum) 0;
@@ -679,28 +881,32 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	{
 	case OIDOID:
 		if (value->IsNumber())
-			return ObjectIdGetDatum(value->Uint32Value(isolate->GetCurrentContext()).ToChecked());
+			return ObjectIdGetDatum(Plv8ToUint32(isolate, context, value));
 		break;
 	case BOOLOID:
 		if (value->IsBoolean())
 			return BoolGetDatum(value->BooleanValue(isolate));
+		if (value->IsNumber())
+			return BoolGetDatum(Plv8ToInt32(isolate, context, value) != 0);
+		if (value->IsBigInt())
+			return BoolGetDatum(BigInt::Cast(*value)->Int64Value() != 0);
 		break;
 	case INT2OID:
 		if (value->IsNumber())
 #ifdef CHECK_INTEGER_OVERFLOW
 			return DirectFunctionCall1(int82,
-					Int64GetDatum(value->IntegerValue()));
+					Int64GetDatum(Plv8ToInteger(isolate, context, value)));
 #else
-			return Int16GetDatum((int16) value->Int32Value(isolate->GetCurrentContext()).ToChecked());
+			return Int16GetDatum((int16) Plv8ToInt32(isolate, context, value));
 #endif
 		break;
 	case INT4OID:
 		if (value->IsNumber())
 #ifdef CHECK_INTEGER_OVERFLOW
 			return DirectFunctionCall1(int84,
-					Int64GetDatum(value->IntegerValue()));
+					Int64GetDatum(Plv8ToInteger(isolate, context, value)));
 #else
-			return Int32GetDatum((int32) value->Int32Value(isolate->GetCurrentContext()).ToChecked());
+			return Int32GetDatum((int32) Plv8ToInt32(isolate, context, value));
 #endif
 		break;
 	case INT8OID:
@@ -709,33 +915,33 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			return Int64GetDatum((int64) b->Int64Value());
 		}
 		if (value->IsNumber())
-			return Int64GetDatum((int64) value->IntegerValue(isolate->GetCurrentContext()).ToChecked());
+			return Int64GetDatum((int64) Plv8ToInteger(isolate, context, value));
 		break;
 	case FLOAT4OID:
 		if (value->IsNumber())
-			return Float4GetDatum((float4) value->NumberValue(isolate->GetCurrentContext()).ToChecked());
+			return Float4GetDatum((float4) Plv8ToNumber(isolate, context, value));
 		break;
 	case FLOAT8OID:
 		if (value->IsNumber())
-			return Float8GetDatum((float8) value->NumberValue(isolate->GetCurrentContext()).ToChecked());
+			return Float8GetDatum((float8) Plv8ToNumber(isolate, context, value));
 		break;
 	case NUMERICOID:
 		if (value->IsBigInt()) {
-			v8::String::Utf8Value utf8(isolate, value->ToString(isolate->GetCurrentContext()).ToLocalChecked());
+			v8::String::Utf8Value utf8(isolate, EnsureStringForCString(isolate, value));
 			return DirectFunctionCall3(numeric_in, (Datum) *utf8, ObjectIdGetDatum(InvalidOid), Int32GetDatum((int32) -1));
 		}
 		if (value->IsNumber())
 			return DirectFunctionCall1(float8_numeric,
-					Float8GetDatum((float8) value->NumberValue(isolate->GetCurrentContext()).ToChecked()));
+					Float8GetDatum((float8) Plv8ToNumber(isolate, context, value)));
 		break;
 	case DATEOID:
 		if (value->IsDate())
-			return EpochToDate(value->NumberValue(isolate->GetCurrentContext()).ToChecked());
+			return EpochToDate(Plv8ToNumber(isolate, context, value));
 		break;
 	case TIMESTAMPOID:
 	case TIMESTAMPTZOID:
 		if (value->IsDate())
-			return EpochToTimestampTz(value->NumberValue(isolate->GetCurrentContext()).ToChecked());
+			return EpochToTimestampTz(Plv8ToNumber(isolate, context, value));
 		break;
 	case BYTEAOID:
 		{
@@ -794,7 +1000,7 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 				return PointerGetDatum(result);
 			}
 
-			void *datum_p = ExtractExternalArrayDatum(value);
+			void *datum_p = ExtractExternalArrayDatum(value, type);
 
 			if (datum_p)
 			{
@@ -835,6 +1041,87 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 		break;
 	}
 
+	/*
+	 * Direct binary buffer return for pg_tle user-defined base types
+	 * (stored internally as varlena / bytea with optional fixed length).
+	 * Restricted strictly to superuser-owned functions/handlers with
+	 * pass_user_types_as_bytes enabled and plv8.allow_raw_user_types = on.
+	 */
+	if (type->category == TYPCATEGORY_USER && !type->byval &&
+		(value->IsUint8Array() || value->IsInt8Array() || value->IsArrayBuffer()))
+	{
+		if (!plv8_pass_user_types_as_bytes || !plv8_allow_raw_user_types)
+		{
+			PG_TRY();
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("returning raw byte buffers for user-defined type %s requires superuser pass_user_types_as_bytes",
+								format_type_be(type->typid))));
+			}
+			PG_CATCH();
+			{
+				throw pg_error();
+			}
+			PG_END_TRY();
+		}
+
+		const char *src_bytes = NULL;
+		size_t byte_len = 0;
+
+		if (value->IsUint8Array() || value->IsInt8Array())
+		{
+			v8::Handle<v8::Uint8Array> array = v8::Handle<v8::Uint8Array>::Cast(value);
+			src_bytes = (const char *) array->Buffer()->GetBackingStore()->Data() + array->ByteOffset();
+			byte_len = array->Length();
+		}
+		else if (value->IsArrayBuffer())
+		{
+			v8::Handle<v8::ArrayBuffer> ab = v8::Handle<v8::ArrayBuffer>::Cast(value);
+			src_bytes = (const char *) ab->GetBackingStore()->Data();
+			byte_len = ab->ByteLength();
+		}
+
+		if (byte_len > (size_t) MaxAllocSize - VARHDRSZ)
+		{
+			PG_TRY();
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+						 errmsg("returned buffer length %zu exceeds maximum varlena size",
+								byte_len)));
+			}
+			PG_CATCH();
+			{
+				throw pg_error();
+			}
+			PG_END_TRY();
+		}
+
+		size_t varlena_size = byte_len + VARHDRSZ;
+		if (type->len > 0 && (size_t) type->len != varlena_size)
+		{
+			PG_TRY();
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_DATA_EXCEPTION),
+						 errmsg("type %s is defined as fixed-size %d, but returned buffer has internal length %zu",
+								format_type_be(type->typid), (int) type->len, varlena_size)));
+			}
+			PG_CATCH();
+			{
+				throw pg_error();
+			}
+			PG_END_TRY();
+		}
+
+		void *res_varlena = palloc(varlena_size);
+		SET_VARSIZE(res_varlena, varlena_size);
+		if (byte_len > 0 && src_bytes != NULL)
+			memcpy(VARDATA(res_varlena), src_bytes, byte_len);
+		return PointerGetDatum(res_varlena);
+	}
+
 	/* Use lexical cast for non-numeric types. */
 	CString		str(value);
 	Datum		result;
@@ -871,13 +1158,13 @@ ToArrayDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	Isolate *isolate = Isolate::GetCurrent();
 	Local<Context>		context = isolate->GetCurrentContext();
 
-	if (value->IsUndefined() || value->IsNull())
+	if (value.IsEmpty() || value->IsUndefined() || value->IsNull())
 	{
 		*isnull = true;
 		return (Datum) 0;
 	}
 
-	void *datum_p = ExtractExternalArrayDatum(value);
+	void *datum_p = ExtractExternalArrayDatum(value, type);
 	if (datum_p)
 	{
 		*isnull = false;
@@ -892,13 +1179,34 @@ ToArrayDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	values = (Datum *) palloc(sizeof(Datum) * length);
 	nulls = (bool *) palloc(sizeof(bool) * length);
 	ndims[0] = length;
-	for (int i = 0; i < length; i++) {
-		if (type->is_composite)
-		{
-			values[i] = ToRecordDatum(array->Get(context, i).ToLocalChecked(), &nulls[i], type);
-		} else {
-			values[i] = ToScalarDatum(array->Get(context, i).ToLocalChecked(), &nulls[i], type);
+	plv8_type elem_type = *type;
+	if (!type->is_composite)
+	{
+		bool ispreferred;
+		get_type_category_preferred(elem_type.typid, &elem_type.category, &ispreferred);
+	}
+	try
+	{
+		for (int i = 0; i < length; i++) {
+			Local<v8::Value> elem = Plv8GetElement(isolate, context, array, i);
+			if (type->is_composite)
+			{
+				values[i] = ToRecordDatum(elem, &nulls[i], type);
+			} else {
+				values[i] = ToScalarDatum(elem, &nulls[i], &elem_type);
+			}
 		}
+		if (!type->is_composite)
+		{
+			type->fn_input = elem_type.fn_input;
+			type->ioparam = elem_type.ioparam;
+		}
+	}
+	catch (...)
+	{
+		pfree(values);
+		pfree(nulls);
+		throw;
 	}
 
 	result = construct_md_array(values, nulls, 1, ndims, lbs,
@@ -939,7 +1247,16 @@ ToRecordDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type, TupleDesc 
 
 	Converter	conv(tupdesc);
 
-	result = conv.ToDatum(value);
+	try
+	{
+		result = conv.ToDatum(value);
+	}
+	catch (...)
+	{
+		if (cleanup_tupdesc)
+			ReleaseTupleDesc(tupdesc);
+		throw;
+	}
 
 	if (cleanup_tupdesc)
 	  ReleaseTupleDesc(tupdesc);
@@ -992,8 +1309,29 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 	case FLOAT8OID:
 		return Number::New(isolate, DatumGetFloat8(datum));
 	case NUMERICOID:
-		return Number::New(isolate, DatumGetFloat8(
-			DirectFunctionCall1(numeric_float8, datum)));
+	{
+		float8	f = DatumGetFloat8(DirectFunctionCall1(numeric_float8, datum));
+
+		/*
+		 * With preserve_numeric_precision a numeric that cannot round-trip
+		 * through a double (more than ~15 significant digits) is handed to
+		 * JS as its exact text; otherwise it stays a Number.
+		 */
+		if (plv8_preserve_numeric_precision && !isnan(f) && !isinf(f))
+		{
+			Datum	back = DirectFunctionCall1(float8_numeric, Float8GetDatum(f));
+
+			if (!DatumGetBool(DirectFunctionCall2(numeric_eq, datum, back)))
+			{
+				char   *str = DatumGetCString(DirectFunctionCall1(numeric_out, datum));
+				Local<v8::String> result = ToString(str);
+
+				pfree(str);
+				return result;
+			}
+		}
+		return Number::New(isolate, f);
+	}
 	case DATEOID:
 		return Date::New(isolate->GetCurrentContext(), DateToEpoch(DatumGetDateADT(datum))).ToLocalChecked();
 	case TIMESTAMPOID:
@@ -1016,12 +1354,13 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 	}
 	case BYTEAOID:
 	{
-		void	   *p = PG_DETOAST_DATUM_COPY(datum);
-
-		return CreateExternalArray(VARDATA_ANY(p),
-								   kExternalUnsignedByteArray,
-								   VARSIZE_ANY_EXHDR(p),
-								   PointerGetDatum(p));
+		void	   *p = PG_DETOAST_DATUM_PACKED(datum);
+		Local<Object> result = CreateExternalArray(VARDATA_ANY(p),
+												   kExternalUnsignedByteArray,
+												   VARSIZE_ANY_EXHDR(p));
+		if (p != DatumGetPointer(datum))
+			pfree(p);
+		return result;
 	}
 	case JSONOID:
 	{
@@ -1060,6 +1399,36 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 	}
 
 	default:
+		/*
+		 * Direct binary buffer argument passing for pg_tle user-defined base
+		 * types (TYPCATEGORY_USER, stored internally as varlena / bytea) when
+		 * invoking superuser-authorized pl/<any> (such as pl/v8-wasm) functions.
+		 */
+		if (plv8_pass_user_types_as_bytes && plv8_allow_raw_user_types &&
+			type->category == TYPCATEGORY_USER && !type->byval)
+		{
+			if (type->len == -1)
+			{
+				void *p = PG_DETOAST_DATUM_PACKED(datum);
+				Local<Object> result = CreateExternalArray(VARDATA_ANY(p),
+														   kExternalUnsignedByteArray,
+														   VARSIZE_ANY_EXHDR(p));
+				if (p != DatumGetPointer(datum))
+					pfree(p);
+				return result;
+			}
+			else if (type->len > (int16) VARHDRSZ)
+			{
+				const char *raw = (const char *) DatumGetPointer(datum);
+				if (raw != NULL && !VARATT_IS_EXTENDED(raw) &&
+					VARSIZE(raw) == (size_t) type->len)
+				{
+					return CreateExternalArray((void *) VARDATA(raw),
+											   kExternalUnsignedByteArray,
+											   (size_t) type->len - VARHDRSZ);
+				}
+			}
+		}
 		return ToString(datum, type);
 	}
 }
@@ -1091,13 +1460,15 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 			{
 				int			data_bytes = ARR_SIZE(array) -
 										ARR_OVERHEAD_NONULLS(1);
-				return CreateExternalArray(ARR_DATA_PTR(array),
-									   type->ext_array,
-									   data_bytes,
-									   PointerGetDatum(array));
+				Local<Object> ext_arr = CreateExternalArray(ARR_DATA_PTR(array),
+															type->ext_array,
+															data_bytes);
+				pfree(array);
+				return ext_arr;
 			}
 		}
 
+		pfree(array);
 		throw js_error("NULL element, or multi-dimension array not allowed"
 						" in external array type");
 	}
@@ -1105,7 +1476,7 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 	deconstruct_array(DatumGetArrayTypeP(datum),
 						type->typid, type->len, type->byval, type->align,
 						&values, &nulls, &nelems);
-	Local<Array>  result = Array::New(Isolate::GetCurrent(), nelems);
+	Local<Array>  result = Array::New(isolate, nelems);
 	plv8_type base = { 0 };
 	bool    ispreferred;
 
@@ -1118,7 +1489,7 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 	get_typlenbyvalalign(base.typid, &(base.len), &(base.byval), &(base.align));
 
 	for (int i = 0; i < nelems; i++)
-		result->Set(context, i, ToValue(values[i], nulls[i], &base)).Check();
+		result->CreateDataProperty(context, i, ToValue(values[i], nulls[i], &base)).Check();
 
 	pfree(values);
 	pfree(nulls);
@@ -1344,14 +1715,19 @@ EpochToDate(double epoch)
 	PG_RETURN_DATEADT((DateADT) epoch);
 }
 
-CString::CString(Handle<v8::Value> value) : m_utf8(Isolate::GetCurrent(), value)
+CString::CString(Handle<v8::Value> value)
+	: m_utf8(Isolate::GetCurrent(),
+			 EnsureStringForCString(Isolate::GetCurrent(), value)),
+	  m_str(NULL)
 {
+	if (*m_utf8 == NULL)
+		throw js_error("failed to convert value to string");
 	m_str = ToCString(m_utf8);
 }
 
 CString::~CString()
 {
-	if (m_str != *m_utf8)
+	if (m_str != NULL && m_str != *m_utf8)
 		pfree(m_str);
 }
 

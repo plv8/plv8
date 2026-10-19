@@ -675,6 +675,7 @@ plv8_wasm_cache_store(const uint8_t *wire_bytes, size_t wire_len, const uint8_t 
 		Plv8WasmCacheKey role_victim_key;
 		int role_victim_slot = -1;
 
+		int active_slots = 0;
 		bool has_global_victim = false;
 		uint64 global_min_seq = UINT64_MAX;
 		Plv8WasmCacheKey global_victim_key;
@@ -702,6 +703,7 @@ plv8_wasm_cache_store(const uint8_t *wire_bytes, size_t wire_len, const uint8_t 
 			Plv8WasmCacheKey cur_key = cur->key;
 			dshash_release_lock(ht, cur);
 
+			active_slots++;
 			if (!has_global_victim || seq_val < global_min_seq)
 			{
 				global_min_seq = seq_val;
@@ -725,7 +727,8 @@ plv8_wasm_cache_store(const uint8_t *wire_bytes, size_t wire_len, const uint8_t 
 
 		bool over_role = (role_used + len > role_cap);
 		bool over_global = (pg_atomic_read_u64(&plv8_shared_state->bytes_used) + len > max_bytes);
-		if (!over_role && !over_global)
+		bool over_slots = (active_slots >= PLV8_WASM_TRACKED_KEYS_MAX);
+		if (!over_role && !over_global && !over_slots)
 			break;
 
 		Plv8WasmCacheKey victim_key;

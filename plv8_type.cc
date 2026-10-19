@@ -1179,6 +1179,12 @@ ToArrayDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 	values = (Datum *) palloc(sizeof(Datum) * length);
 	nulls = (bool *) palloc(sizeof(bool) * length);
 	ndims[0] = length;
+	plv8_type elem_type = *type;
+	if (!type->is_composite)
+	{
+		bool ispreferred;
+		get_type_category_preferred(elem_type.typid, &elem_type.category, &ispreferred);
+	}
 	try
 	{
 		for (int i = 0; i < length; i++) {
@@ -1187,8 +1193,13 @@ ToArrayDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 			{
 				values[i] = ToRecordDatum(elem, &nulls[i], type);
 			} else {
-				values[i] = ToScalarDatum(elem, &nulls[i], type);
+				values[i] = ToScalarDatum(elem, &nulls[i], &elem_type);
 			}
+		}
+		if (!type->is_composite)
+		{
+			type->fn_input = elem_type.fn_input;
+			type->ioparam = elem_type.ioparam;
 		}
 	}
 	catch (...)

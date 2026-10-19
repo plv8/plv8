@@ -487,19 +487,56 @@ CREATE FUNCTION super_raw_roundtrip(v raw_test_type) RETURNS raw_test_type AS $$
   return out;
 $$ LANGUAGE super_raw_lang;
 
+CREATE FUNCTION super_raw_arr(v raw_test_type[]) RETURNS raw_test_type[] AS $$
+  return v.map(x => {
+    const out = new Uint8Array(x.length);
+    for (let i = 0; i < x.length; i++) out[i] = x[i] + 1;
+    return out;
+  });
+$$ LANGUAGE super_raw_lang;
+
+CREATE TYPE raw_comp AS (r raw_test_type, n int);
+CREATE FUNCTION super_raw_comp(v raw_comp) RETURNS raw_comp AS $$
+  const out = new Uint8Array(v.r.length);
+  for (let i = 0; i < v.r.length; i++) out[i] = v.r[i] + 1;
+  return { r: out, n: v.n + 1 };
+$$ LANGUAGE super_raw_lang;
+
 SHOW plv8.allow_raw_user_types;
 \set VERBOSITY terse
 SELECT super_raw_roundtrip('\x414243'::raw_test_type);
+SELECT super_raw_arr(ARRAY['\x41'::raw_test_type, '\x42'::raw_test_type]);
+SELECT super_raw_comp(ROW('\x41'::raw_test_type, 6)::raw_comp);
 \set VERBOSITY default
 
 SET plv8.allow_raw_user_types = on;
 SELECT super_raw_roundtrip('\x414243'::raw_test_type);
+SELECT super_raw_arr(ARRAY['\x41'::raw_test_type, '\x42'::raw_test_type]);
+SELECT super_raw_comp(ROW('\x41'::raw_test_type, 6)::raw_comp);
 
 RESET plv8.allow_raw_user_types;
 \set VERBOSITY terse
 SELECT super_raw_roundtrip('\x414243'::raw_test_type);
+SELECT super_raw_arr(ARRAY['\x41'::raw_test_type, '\x42'::raw_test_type]);
+SELECT super_raw_comp(ROW('\x41'::raw_test_type, 6)::raw_comp);
 \set VERBOSITY default
 
+CREATE FUNCTION test_proc_cache_key() RETURNS bool AS $$
+  const gen = plv8.proc_cache_key("*");
+  const byName = plv8.proc_cache_key("raw_test_normal_plv8");
+  const oidRow = plv8.execute("SELECT 'raw_test_normal_plv8'::regproc::oid::int AS oid")[0];
+  const byOid = plv8.proc_cache_key(oidRow.oid);
+  return typeof gen === "string" && gen.startsWith("gen:") &&
+         typeof byName === "string" && byName === byOid &&
+         plv8.proc_cache_key(0) === null &&
+         plv8.proc_cache_key("nonexistent_fn_xyz") === null;
+$$ LANGUAGE plv8;
+SELECT test_proc_cache_key();
+
+DROP FUNCTION test_proc_cache_key();
+DROP FUNCTION super_raw_comp(raw_comp);
+DROP TYPE raw_comp;
+DROP FUNCTION super_raw_arr(raw_test_type[]);
 DROP FUNCTION super_raw_roundtrip(raw_test_type);
 DROP LANGUAGE super_raw_lang;
 DROP FUNCTION super_raw_handler();

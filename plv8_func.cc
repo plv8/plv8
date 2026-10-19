@@ -332,7 +332,6 @@ static void
 plv8_CompileWasmCached(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate *isolate = args.GetIsolate();
-	Local<Context> context = isolate->GetCurrentContext();
 
 	if (args.Length() < 1)
 		throw js_error("plv8.compile_wasm_cached([cache_key, ]wasm_bytes) requires a byte buffer");
@@ -2542,58 +2541,70 @@ static void
 plv8_ProcCacheKey(const FunctionCallbackInfo<v8::Value>& args)
 {
 	Isolate *isolate = args.GetIsolate();
-	if (args.Length() < 1 || !args[0]->IsString())
+	if (args.Length() < 1 || args[0]->IsNullOrUndefined())
 	{
 		args.GetReturnValue().Set(Null(isolate));
-		return;
-	}
-
-	CString fn_spec(args[0]);
-	const char *spec_str = fn_spec.str();
-	if (spec_str == NULL || spec_str[0] == '\0')
-	{
-		args.GetReturnValue().Set(Null(isolate));
-		return;
-	}
-
-	if (spec_str[0] == '*' && spec_str[1] == '\0')
-	{
-		char gen_buf[32];
-		snprintf(gen_buf, sizeof(gen_buf), "gen:%llu",
-				 (unsigned long long) plv8_get_catalog_gen());
-		args.GetReturnValue().Set(ToString(gen_buf));
 		return;
 	}
 
 	Oid func_oid = InvalidOid;
-	MemoryContext saved_cxt = CurrentMemoryContext;
-	PG_TRY();
+	if (args[0]->IsUint32())
 	{
-		Datum spec_datum = CStringGetTextDatum(spec_str);
-		if (strchr(spec_str, '(') != NULL)
+		func_oid = (Oid) args[0]->Uint32Value(isolate->GetCurrentContext()).FromMaybe(InvalidOid);
+	}
+	else if (args[0]->IsString())
+	{
+		CString fn_spec(args[0]);
+		const char *spec_str = fn_spec.str();
+		if (spec_str == NULL || spec_str[0] == '\0')
 		{
-			Datum res = DirectFunctionCall1(to_regprocedure, spec_datum);
-			func_oid = DatumGetObjectId(res);
+			args.GetReturnValue().Set(Null(isolate));
+			return;
 		}
-		else
+
+		if (spec_str[0] == '*' && spec_str[1] == '\0')
 		{
-			Datum res = DirectFunctionCall1(to_regproc, spec_datum);
-			func_oid = DatumGetObjectId(res);
-			if (!OidIsValid(func_oid))
+			char gen_buf[32];
+			snprintf(gen_buf, sizeof(gen_buf), "gen:%llu",
+					 (unsigned long long) plv8_get_catalog_gen());
+			args.GetReturnValue().Set(ToString(gen_buf));
+			return;
+		}
+
+		MemoryContext saved_cxt = CurrentMemoryContext;
+		PG_TRY();
+		{
+			Datum spec_datum = CStringGetTextDatum(spec_str);
+			if (strchr(spec_str, '(') != NULL)
 			{
-				res = DirectFunctionCall1(to_regprocedure, spec_datum);
+				Datum res = DirectFunctionCall1(to_regprocedure, spec_datum);
 				func_oid = DatumGetObjectId(res);
 			}
+			else
+			{
+				Datum res = DirectFunctionCall1(to_regproc, spec_datum);
+				func_oid = DatumGetObjectId(res);
+				if (!OidIsValid(func_oid))
+				{
+					res = DirectFunctionCall1(to_regprocedure, spec_datum);
+					func_oid = DatumGetObjectId(res);
+				}
+			}
+			pfree(DatumGetPointer(spec_datum));
 		}
-		pfree(DatumGetPointer(spec_datum));
+		PG_CATCH();
+		{
+			FlushErrorState();
+			MemoryContextSwitchTo(saved_cxt);
+			func_oid = InvalidOid;
+		}
+		PG_END_TRY();
 	}
-	PG_CATCH();
+	else
 	{
-		FlushErrorState();
-		MemoryContextSwitchTo(saved_cxt);
-		func_oid = InvalidOid;
+		args.GetReturnValue().Set(Null(isolate));
+		return;
 	}
-	PG_END_TRY();
 
 	if (!OidIsValid(func_oid))
 	{

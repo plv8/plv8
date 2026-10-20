@@ -8,6 +8,7 @@
  */
 #include "plv8_fdw.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <sstream>
@@ -190,7 +191,7 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
           let match = true;
           if (quals) {
             for (const q of quals) {
-              if (q.operator === '=' && v[q.field] != q.value) { match = false; break; }
+              if (q.operator === '=' && String(v[q.field]) !== String(q.value)) { match = false; break; }
             }
           }
           if (match) {
@@ -241,6 +242,33 @@ struct WrapperCacheKeyHash {
 };
 
 static std::unordered_map<WrapperCacheKey, Global<Object>, WrapperCacheKeyHash> session_wrapper_instances;
+
+void
+plv8_fdw_reset(Oid user_id)
+{
+  for (auto it = session_wrapper_instances.begin(); it != session_wrapper_instances.end(); ) {
+    if (!OidIsValid(user_id) || it->first.user_id == user_id) {
+      it->second.Reset();
+      it = session_wrapper_instances.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void
+plv8_fdw_relcache_cb(Datum arg, Oid relid)
+{
+  if (session_wrapper_instances.empty()) return;
+  for (auto it = session_wrapper_instances.begin(); it != session_wrapper_instances.end(); ) {
+    if (!OidIsValid(relid) || it->first.foreigntableid == relid) {
+      it->second.Reset();
+      it = session_wrapper_instances.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
 
 static void
 plv8_fdw_ensure_bootstrap(Local<Context> context, Isolate *isolate)
@@ -368,7 +396,6 @@ plv8_fdw_get_wrapper_instance(plv8_context *context, Oid foreigntableid, const s
   Local<String> w_str = String::NewFromUtf8(isolate, wrapper_name.c_str(), NewStringType::kNormal).ToLocalChecked();
 
   if (!global->Get(ctx, w_str).ToLocal(&constructor_val) || !constructor_val->IsFunction()) {
-    // Try looking in plv8 object
     Local<String> plv8_str = String::NewFromUtf8Literal(isolate, "plv8", NewStringType::kInternalized);
     Local<Value> plv8_val;
     if (global->Get(ctx, plv8_str).ToLocal(&plv8_val) && plv8_val->IsObject()) {
@@ -393,36 +420,38 @@ plv8_fdw_get_wrapper_instance(plv8_context *context, Oid foreigntableid, const s
     (void) options_obj->Set(ctx, k, v);
   }
 
-  // Build columns object
-  Relation rel = table_open(foreigntableid, AccessShareLock);
-  TupleDesc tupdesc = RelationGetDescr(rel);
+  // Build columns object with safe RAII TableCloseGuard
   Local<Object> columns_obj = Object::New(isolate);
+  {
+    Relation rel = table_open(foreigntableid, AccessShareLock);
+    TableCloseGuard guard(rel, AccessShareLock);
+    TupleDesc tupdesc = RelationGetDescr(rel);
 
-  for (int i = 0; i < tupdesc->natts; i++) {
-    Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-    if (attr->attisdropped) continue;
+    for (int i = 0; i < tupdesc->natts; i++) {
+      Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+      if (attr->attisdropped) continue;
 
-    Local<Object> col_info = Object::New(isolate);
-    char *cname = NameStr(attr->attname);
-    Local<String> col_name_str = String::NewFromUtf8(isolate, cname, NewStringType::kNormal).ToLocalChecked();
-    (void) col_info->Set(ctx, String::NewFromUtf8Literal(isolate, "name"), col_name_str);
-    (void) col_info->Set(ctx, String::NewFromUtf8Literal(isolate, "typeOid"), v8::Integer::New(isolate, (int32_t) attr->atttypid));
+      Local<Object> col_info = Object::New(isolate);
+      char *cname = NameStr(attr->attname);
+      Local<String> col_name_str = String::NewFromUtf8(isolate, cname, NewStringType::kNormal).ToLocalChecked();
+      (void) col_info->Set(ctx, String::NewFromUtf8Literal(isolate, "name"), col_name_str);
+      (void) col_info->Set(ctx, String::NewFromUtf8Literal(isolate, "typeOid"), v8::Integer::New(isolate, (int32_t) attr->atttypid));
 
-    char *typname = format_type_be(attr->atttypid);
-    (void) col_info->Set(ctx, String::NewFromUtf8Literal(isolate, "typeName"),
-                         String::NewFromUtf8(isolate, typname, NewStringType::kNormal).ToLocalChecked());
-    pfree(typname);
+      char *typname = format_type_be(attr->atttypid);
+      (void) col_info->Set(ctx, String::NewFromUtf8Literal(isolate, "typeName"),
+                           String::NewFromUtf8(isolate, typname, NewStringType::kNormal).ToLocalChecked());
+      pfree(typname);
 
-    char category;
-    bool ispreferred;
-    get_type_category_preferred(attr->atttypid, &category, &ispreferred);
-    char cat_str[2] = {category, '\0'};
-    (void) col_info->Set(ctx, String::NewFromUtf8Literal(isolate, "category"),
-                         String::NewFromUtf8(isolate, cat_str, NewStringType::kNormal).ToLocalChecked());
+      char category;
+      bool ispreferred;
+      get_type_category_preferred(attr->atttypid, &category, &ispreferred);
+      char cat_str[2] = {category, '\0'};
+      (void) col_info->Set(ctx, String::NewFromUtf8Literal(isolate, "category"),
+                           String::NewFromUtf8(isolate, cat_str, NewStringType::kNormal).ToLocalChecked());
 
-    (void) columns_obj->Set(ctx, col_name_str, col_info);
+      (void) columns_obj->Set(ctx, col_name_str, col_info);
+    }
   }
-  table_close(rel, AccessShareLock);
 
   Local<Value> ctor_args[2] = {options_obj, columns_obj};
   TryCatch try_catch(isolate);
@@ -443,6 +472,8 @@ plv8_fdw_get_wrapper_instance(plv8_context *context, Oid foreigntableid, const s
 static bool
 plv8_fdw_extract_qual(Node *clause, Index varno, TupleDesc tupdesc, Plv8Qual &out_qual)
 {
+  out_qual.expr_state = nullptr;
+
   if (IsA(clause, OpExpr)) {
     OpExpr *op = (OpExpr *) clause;
     if (list_length(op->args) != 2) return false;
@@ -585,8 +616,12 @@ plv8_fdw_qual_to_js(Local<Context> ctx, Isolate *isolate, const Plv8Qual &q, Exp
   Oid val_type = InvalidOid;
 
   if (q.is_param && econtext && q.right_expr) {
-    ExprState *estate_expr = ExecInitExpr((Expr *) q.right_expr, nullptr);
-    val_datum = ExecEvalExpr(estate_expr, econtext, &val_isnull);
+    if (q.expr_state) {
+      val_datum = ExecEvalExpr(q.expr_state, econtext, &val_isnull);
+    } else {
+      ExprState *estate_expr = ExecInitExpr((Expr *) q.right_expr, nullptr);
+      val_datum = ExecEvalExpr(estate_expr, econtext, &val_isnull);
+    }
     val_type = exprType(q.right_expr);
   } else {
     val_datum = q.const_datum;
@@ -624,19 +659,21 @@ plv8_fdw_get_foreign_rel_size(PlannerInfo *root, RelOptInfo *baserel, Oid foreig
     std::unordered_map<std::string, std::string> opts = plv8_fdw_get_options(foreigntableid);
     Local<Object> wrapper = plv8_fdw_get_wrapper_instance(context, foreigntableid, opts);
 
-    Relation rel = table_open(foreigntableid, AccessShareLock);
-    TupleDesc tupdesc = RelationGetDescr(rel);
-
     std::vector<Plv8Qual> candidate_quals;
-    ListCell *lc;
-    foreach (lc, baserel->baserestrictinfo) {
-      RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
-      Plv8Qual q;
-      if (plv8_fdw_extract_qual((Node *) ri->clause, baserel->relid, tupdesc, q)) {
-        candidate_quals.push_back(q);
+    {
+      Relation rel = table_open(foreigntableid, AccessShareLock);
+      TableCloseGuard guard(rel, AccessShareLock);
+      TupleDesc tupdesc = RelationGetDescr(rel);
+
+      ListCell *lc;
+      foreach (lc, baserel->baserestrictinfo) {
+        RestrictInfo *ri = (RestrictInfo *) lfirst(lc);
+        Plv8Qual q;
+        if (plv8_fdw_extract_qual((Node *) ri->clause, baserel->relid, tupdesc, q)) {
+          candidate_quals.push_back(q);
+        }
       }
     }
-    table_close(rel, AccessShareLock);
 
     Local<Array> quals_arr = Array::New(isolate, (int) candidate_quals.size());
     for (size_t i = 0; i < candidate_quals.size(); i++) {
@@ -714,6 +751,7 @@ plv8_fdw_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreignta
             if (col_val->IsString()) {
               CString col_cstr(col_val);
               Relation rel = table_open(foreigntableid, AccessShareLock);
+              TableCloseGuard guard(rel, AccessShareLock);
               TupleDesc tupdesc = RelationGetDescr(rel);
               for (int a = 0; a < tupdesc->natts; a++) {
                 Form_pg_attribute attr = TupleDescAttr(tupdesc, a);
@@ -727,7 +765,6 @@ plv8_fdw_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreignta
                   break;
                 }
               }
-              table_close(rel, AccessShareLock);
             }
           }
         }
@@ -759,6 +796,62 @@ plv8_fdw_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreignta
         NIL);
 #endif
     add_path(baserel, (Path *) path);
+
+    // Generate parameterized paths for inner nested loop joins if join clauses exist
+    if (baserel->joininfo != NIL) {
+      Relation rel = table_open(foreigntableid, AccessShareLock);
+      TableCloseGuard guard(rel, AccessShareLock);
+      TupleDesc tupdesc = RelationGetDescr(rel);
+
+      ListCell *lc;
+      foreach (lc, baserel->joininfo) {
+        RestrictInfo *rinfo = (RestrictInfo *) lfirst(lc);
+        if (!join_clause_is_movable_to(rinfo, baserel))
+          continue;
+
+        Plv8Qual q;
+        if (!plv8_fdw_extract_qual((Node *) rinfo->clause, baserel->relid, tupdesc, q))
+          continue;
+
+        Relids required_outer = bms_union(rinfo->clause_relids, baserel->lateral_relids);
+        required_outer = bms_del_member(required_outer, baserel->relid);
+        if (bms_is_empty(required_outer))
+          continue;
+
+        ParamPathInfo *param_info = get_baserel_parampathinfo(root, baserel, required_outer);
+        if (!param_info)
+          continue;
+
+        Cost param_startup_cost = 1.0;
+        Cost param_total_cost = param_startup_cost + param_info->ppi_rows * 0.1;
+
+#if PG_VERSION_NUM >= 180000
+        ForeignPath *ppath = create_foreignscan_path(
+            root, baserel,
+            NULL,
+            param_info->ppi_rows,
+            0,                 /* disabled_nodes */
+            param_startup_cost, param_total_cost,
+            NIL,
+            param_info->ppi_req_outer,
+            NULL,
+            NIL,
+            NIL);
+#else
+        ForeignPath *ppath = create_foreignscan_path(
+            root, baserel,
+            NULL,
+            param_info->ppi_rows,
+            param_startup_cost, param_total_cost,
+            NIL,
+            param_info->ppi_req_outer,
+            NULL,
+            NIL,
+            NIL);
+#endif
+        add_path(baserel, (Path *) ppath);
+      }
+    }
   }
   catch (js_error &e) { e.rethrow(); }
   catch (pg_error &e) { e.rethrow(); }
@@ -790,6 +883,7 @@ plv8_fdw_get_foreign_plan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntab
     Local<Object> wrapper = plv8_fdw_get_wrapper_instance(context, foreigntableid, opts);
 
     Relation rel = table_open(foreigntableid, AccessShareLock);
+    TableCloseGuard guard(rel, AccessShareLock);
     TupleDesc tupdesc = RelationGetDescr(rel);
 
     Local<Value> can_push_fn_val;
@@ -822,7 +916,6 @@ plv8_fdw_get_foreign_plan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntab
         local_quals = lappend(local_quals, ri);
       }
     }
-    table_close(rel, AccessShareLock);
   }
   catch (js_error &e) { e.rethrow(); }
   catch (pg_error &e) { e.rethrow(); }
@@ -903,8 +996,13 @@ plv8_fdw_eval_param_hash(Plv8FdwScanState *festate, ForeignScanState *node)
   for (const auto &q : festate->pushed_quals) {
     if (!q.is_param || !q.right_expr) continue;
     bool isnull = false;
-    ExprState *estate_expr = ExecInitExpr((Expr *) q.right_expr, nullptr);
-    Datum val = ExecEvalExpr(estate_expr, econtext, &isnull);
+    Datum val = (Datum) 0;
+    if (q.expr_state) {
+      val = ExecEvalExpr(q.expr_state, econtext, &isnull);
+    } else {
+      ExprState *estate_expr = ExecInitExpr((Expr *) q.right_expr, nullptr);
+      val = ExecEvalExpr(estate_expr, econtext, &isnull);
+    }
 
     hash ^= (uint64) q.varattno;
     hash *= 1099511628211ULL;
@@ -961,7 +1059,6 @@ plv8_fdw_invoke_execute(Plv8FdwScanState *festate, ForeignScanState *node)
   Local<String> next_str = String::NewFromUtf8Literal(isolate, "next", NewStringType::kInternalized);
 
   if (!iter_obj->Has(ctx, next_str).FromMaybe(false)) {
-    // If an array was returned, obtain its iterator
     Local<Value> sym_iter;
     Local<Symbol> iterator_sym = Symbol::GetIterator(isolate);
     if (iter_obj->Get(ctx, iterator_sym).ToLocal(&sym_iter) && sym_iter->IsFunction()) {
@@ -972,6 +1069,28 @@ plv8_fdw_invoke_execute(Plv8FdwScanState *festate, ForeignScanState *node)
   }
 
   festate->iterator.Reset(isolate, iter_obj);
+}
+
+static void
+plv8_fdw_scan_cleanup_callback(void *arg)
+{
+  Plv8FdwScanState *festate = (Plv8FdwScanState *) arg;
+  if (!festate) return;
+
+  Isolate *isolate = festate->isolate;
+  if (isolate) {
+    Isolate::Scope iso_scope(isolate);
+    festate->iterator.Reset();
+    festate->wrapper_instance.Reset();
+    festate->context.Reset();
+    for (auto &cn : festate->colnames) {
+      cn.Reset();
+    }
+    festate->colnames.clear();
+    festate->~Plv8FdwScanState();
+  } else {
+    festate->~Plv8FdwScanState();
+  }
 }
 
 /*
@@ -1013,6 +1132,11 @@ plv8_fdw_begin_foreign_scan(ForeignScanState *node, int eflags)
     festate->scan_mcxt = scan_mcxt;
     festate->eof_reached = false;
     festate->fdw_clauses = plan->fdw_exprs;
+
+    // Register RAII cleanup callback to guarantee handle disposal on query abort or normal exit
+    festate->cleanup_cb.func = plv8_fdw_scan_cleanup_callback;
+    festate->cleanup_cb.arg = festate;
+    MemoryContextRegisterResetCallback(scan_mcxt, &festate->cleanup_cb);
 
     // Cache configurations
     festate->cache_enabled = true;
@@ -1060,13 +1184,18 @@ plv8_fdw_begin_foreign_scan(ForeignScanState *node, int eflags)
     }
     bms_free(attrs_used);
 
-    // Extract pushed quals
+    // Extract pushed quals and initialize ExprState once
     festate->is_parameterized = false;
     foreach (lc, plan->fdw_exprs) {
       Node *clause = (Node *) lfirst(lc);
       Plv8Qual q;
       if (plv8_fdw_extract_qual(clause, plan->scan.scanrelid, tupdesc, q)) {
-        if (q.is_param) festate->is_parameterized = true;
+        if (q.is_param) {
+          festate->is_parameterized = true;
+          if (q.right_expr) {
+            q.expr_state = ExecInitExpr((Expr *) q.right_expr, (PlanState *) node);
+          }
+        }
         festate->pushed_quals.push_back(q);
       }
     }
@@ -1100,9 +1229,9 @@ plv8_fdw_iterate_foreign_scan(ForeignScanState *node)
 
   if (!festate || festate->eof_reached) return slot;
 
-  // Tier 1 Replay: Serving unparameterized scan from Tuplestore
+  // Tier 1 Replay: Serving unparameterized scan from Tuplestore (safe on any slot type)
   if (!festate->is_parameterized && festate->unparam_cache_complete && festate->unparam_tuplestore) {
-    if (tuplestore_gettupleslot(festate->unparam_tuplestore, true, false, slot)) {
+    if (tuplestore_gettupleslot_force(festate->unparam_tuplestore, true, false, slot)) {
       festate->stats_rows_fetched++;
       return slot;
     }
@@ -1110,14 +1239,14 @@ plv8_fdw_iterate_foreign_scan(ForeignScanState *node)
     return slot;
   }
 
-  // Tier 2 Replay: Serving parameterized scan from LRU cache
+  // Tier 2 Replay: Serving parameterized scan from LRU cache (force-store on virtual slot)
   if (festate->replaying_from_cache) {
     auto it = festate->param_cache.find(festate->current_param_hash);
     if (it != festate->param_cache.end()) {
       auto &entry = it->second;
       if (festate->cached_tuple_cursor < entry.tuples.size()) {
         MinimalTuple mt = entry.tuples[festate->cached_tuple_cursor++];
-        ExecStoreMinimalTuple(mt, slot, false);
+        ExecForceStoreMinimalTuple(mt, slot, false);
         festate->stats_rows_fetched++;
         return slot;
       }
@@ -1185,6 +1314,22 @@ plv8_fdw_iterate_foreign_scan(ForeignScanState *node)
         tuplestore_puttupleslot(festate->unparam_tuplestore, slot);
       } else if (festate->is_parameterized && festate->current_cache_bytes < festate->cache_memory_limit_bytes) {
         MemoryContext scxt = MemoryContextSwitchTo(festate->scan_mcxt);
+        if (festate->param_cache.find(festate->current_param_hash) == festate->param_cache.end()) {
+          // Check limit and evict oldest if needed
+          while (festate->param_cache.size() >= festate->cache_size_limit && !festate->param_lru_order.empty()) {
+            uint64 oldest = festate->param_lru_order.back();
+            festate->param_lru_order.pop_back();
+            auto old_it = festate->param_cache.find(oldest);
+            if (old_it != festate->param_cache.end()) {
+              festate->current_cache_bytes -= old_it->second.memory_used;
+              for (auto mt_old : old_it->second.tuples) {
+                pfree(mt_old);
+              }
+              festate->param_cache.erase(old_it);
+            }
+          }
+          festate->param_lru_order.push_front(festate->current_param_hash);
+        }
         MinimalTuple mt = ExecCopySlotMinimalTuple(slot);
         festate->param_cache[festate->current_param_hash].tuples.push_back(mt);
         size_t mt_size = mt->t_len;
@@ -1235,6 +1380,9 @@ plv8_fdw_rescan_foreign_scan(ForeignScanState *node)
         festate->replaying_from_cache = true;
         festate->cached_tuple_cursor = 0;
         festate->stats_cache_hits++;
+        // Touch LRU entry
+        festate->param_lru_order.remove(hash);
+        festate->param_lru_order.push_front(hash);
         return;
       }
     }
@@ -1289,22 +1437,17 @@ plv8_fdw_end_foreign_scan(ForeignScanState *node)
   }
   catch (...) {}
 
-  festate->iterator.Reset();
-  festate->wrapper_instance.Reset();
-  festate->context.Reset();
-
   if (festate->unparam_tuplestore) {
     tuplestore_end(festate->unparam_tuplestore);
     festate->unparam_tuplestore = nullptr;
   }
 
   MemoryContext scan_mcxt = festate->scan_mcxt;
-  festate->~Plv8FdwScanState();
+  node->fdw_state = nullptr;
 
   if (scan_mcxt) {
     MemoryContextDelete(scan_mcxt);
   }
-  node->fdw_state = nullptr;
 }
 
 /*
@@ -1362,6 +1505,31 @@ plv8_fdw_plan_foreign_modify(PlannerInfo *root, ModifyTable *plan, Index resultR
   return NIL;
 }
 
+static void
+plv8_fdw_modify_cleanup_callback(void *arg)
+{
+  Plv8FdwModifyState *fmstate = (Plv8FdwModifyState *) arg;
+  if (!fmstate) return;
+
+  Isolate *isolate = fmstate->isolate;
+  if (isolate) {
+    Isolate::Scope iso_scope(isolate);
+    fmstate->wrapper_instance.Reset();
+    fmstate->context.Reset();
+    for (auto &cn : fmstate->colnames) {
+      cn.Reset();
+    }
+    fmstate->colnames.clear();
+    for (auto &br : fmstate->batch_rows) {
+      br.Reset();
+    }
+    fmstate->batch_rows.clear();
+    fmstate->~Plv8FdwModifyState();
+  } else {
+    fmstate->~Plv8FdwModifyState();
+  }
+}
+
 /*
  * FDW Modify Callback: BeginForeignModify
  */
@@ -1383,12 +1551,24 @@ plv8_fdw_begin_foreign_modify(ModifyTableState *mtstate, ResultRelInfo *rinfo, L
     std::unordered_map<std::string, std::string> opts = plv8_fdw_get_options(foreigntableid);
     Local<Object> wrapper = plv8_fdw_get_wrapper_instance(context, foreigntableid, opts);
 
+    MemoryContext query_cxt = mtstate->ps.state->es_query_cxt;
+    MemoryContext modify_mcxt = AllocSetContextCreate(
+        query_cxt,
+        "plv8_fdw modify context",
+        ALLOCSET_DEFAULT_SIZES);
+    MemoryContext oldcxt = MemoryContextSwitchTo(modify_mcxt);
+
     Plv8FdwModifyState *fmstate = (Plv8FdwModifyState *) palloc0(sizeof(Plv8FdwModifyState));
     new (fmstate) Plv8FdwModifyState();
     fmstate->isolate = isolate;
     fmstate->context.Reset(isolate, ctx);
     fmstate->wrapper_instance.Reset(isolate, wrapper);
     fmstate->operation = mtstate->operation;
+    fmstate->modify_mcxt = modify_mcxt;
+
+    fmstate->cleanup_cb.func = plv8_fdw_modify_cleanup_callback;
+    fmstate->cleanup_cb.arg = fmstate;
+    MemoryContextRegisterResetCallback(modify_mcxt, &fmstate->cleanup_cb);
 
     TupleDesc tupdesc = RelationGetDescr(rel);
     fmstate->tupdesc = tupdesc;
@@ -1400,7 +1580,7 @@ plv8_fdw_begin_foreign_modify(ModifyTableState *mtstate, ResultRelInfo *rinfo, L
       Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
       if (attr->attisdropped) continue;
       memset(&fmstate->coltypes[i], 0, sizeof(plv8_type));
-      plv8_fill_type(&fmstate->coltypes[i], attr->atttypid);
+      plv8_fill_type(&fmstate->coltypes[i], attr->atttypid, modify_mcxt);
       char *cn = NameStr(attr->attname);
       fmstate->colname_strs[i] = cn;
       fmstate->colnames[i].Reset(isolate, String::NewFromUtf8(isolate, cn, NewStringType::kNormal).ToLocalChecked());
@@ -1437,6 +1617,7 @@ plv8_fdw_begin_foreign_modify(ModifyTableState *mtstate, ResultRelInfo *rinfo, L
     }
 
     rinfo->ri_FdwState = (void *) fmstate;
+    MemoryContextSwitchTo(oldcxt);
   }
   catch (js_error &e) { e.rethrow(); }
   catch (pg_error &e) { e.rethrow(); }
@@ -1661,11 +1842,12 @@ plv8_fdw_end_foreign_modify(EState *estate, ResultRelInfo *rinfo)
   Plv8FdwModifyState *fmstate = (Plv8FdwModifyState *) rinfo->ri_FdwState;
   if (!fmstate) return;
 
-  fmstate->wrapper_instance.Reset();
-  fmstate->context.Reset();
-  fmstate->~Plv8FdwModifyState();
-  pfree(fmstate);
+  MemoryContext modify_mcxt = fmstate->modify_mcxt;
   rinfo->ri_FdwState = nullptr;
+
+  if (modify_mcxt) {
+    MemoryContextDelete(modify_mcxt);
+  }
 }
 
 /*
@@ -1678,28 +1860,183 @@ plv8_fdw_is_foreign_rel_updatable(Relation rel)
 }
 
 /*
- * FDW Direct Modify Callback: PlanDirectModify
+ * FDW Direct Modify Callbacks: PlanDirectModify, BeginDirectModify, IterateDirectModify, EndDirectModify
  */
+static ForeignScan *
+plv8_fdw_find_modifytable_subplan(PlannerInfo *root, ModifyTable *plan, Index resultRelation, int subplan_index)
+{
+  Plan *subplan = outerPlan(plan);
+  if (subplan && IsA(subplan, ForeignScan)) {
+    return (ForeignScan *) subplan;
+  }
+  return nullptr;
+}
+
 static bool
 plv8_fdw_plan_direct_modify(PlannerInfo *root, ModifyTable *plan, Index resultRelation, int subplan_index)
 {
-  return false;
+  CmdType operation = plan->operation;
+  if (operation != CMD_UPDATE && operation != CMD_DELETE)
+    return false;
+
+  ForeignScan *fscan = plv8_fdw_find_modifytable_subplan(root, plan, resultRelation, subplan_index);
+  if (!fscan)
+    return false;
+
+  if (fscan->scan.plan.qual != NIL)
+    return false;
+
+  Oid foreigntableid = root->simple_rte_array[resultRelation]->relid;
+  std::unordered_map<std::string, std::string> opts = plv8_fdw_get_options(foreigntableid);
+  auto it_dm = opts.find("direct_modify");
+  if (it_dm == opts.end() || (it_dm->second != "true" && it_dm->second != "on"))
+    return false;
+
+  fscan->operation = operation;
+  fscan->resultRelation = resultRelation;
+  fscan->fdw_private = lappend(fscan->fdw_private, makeInteger((int) operation));
+  return true;
 }
 
 static void
 plv8_fdw_begin_direct_modify(ForeignScanState *node, int eflags)
 {
+  ForeignScan *plan = (ForeignScan *) node->ss.ps.plan;
+  Oid foreigntableid = RelationGetRelid(node->ss.ss_currentRelation);
+  CmdType operation = CMD_UNKNOWN;
+  if (plan->fdw_private != NIL) {
+    operation = (CmdType) ((::Integer *) linitial(plan->fdw_private))->ival;
+  }
+
+  try {
+    plv8_context *context = GetPlv8Context();
+    CurrentContextScope ccs(context);
+    Isolate *isolate = context->isolate;
+    Isolate::Scope iso_scope(isolate);
+    HandleScope hs(isolate);
+    Local<Context> ctx = context->localContext();
+    Context::Scope ctx_scope(ctx);
+
+    std::unordered_map<std::string, std::string> opts = plv8_fdw_get_options(foreigntableid);
+    Local<Object> wrapper = plv8_fdw_get_wrapper_instance(context, foreigntableid, opts);
+
+    MemoryContext query_cxt = node->ss.ps.state->es_query_cxt;
+    MemoryContext direct_mcxt = AllocSetContextCreate(
+        query_cxt,
+        "plv8_fdw direct modify context",
+        ALLOCSET_DEFAULT_SIZES);
+    MemoryContext oldcxt = MemoryContextSwitchTo(direct_mcxt);
+
+    Plv8FdwDirectModifyState *dmstate = (Plv8FdwDirectModifyState *) palloc0(sizeof(Plv8FdwDirectModifyState));
+    new (dmstate) Plv8FdwDirectModifyState();
+    dmstate->isolate = isolate;
+    dmstate->context.Reset(isolate, ctx);
+    dmstate->wrapper_instance.Reset(isolate, wrapper);
+    dmstate->operation = operation;
+    dmstate->has_executed = false;
+    dmstate->affected_rows = 0;
+    dmstate->set_processed = (node->resultRelInfo == nullptr || node->resultRelInfo->ri_projectReturning == nullptr);
+    dmstate->direct_mcxt = direct_mcxt;
+
+    TupleDesc tupdesc = RelationGetDescr(node->ss.ss_currentRelation);
+    ListCell *lc;
+    foreach (lc, plan->fdw_exprs) {
+      Node *clause = (Node *) lfirst(lc);
+      Plv8Qual q;
+      if (plv8_fdw_extract_qual(clause, plan->scan.scanrelid, tupdesc, q)) {
+        if (q.is_param && q.right_expr) {
+          q.expr_state = ExecInitExpr((Expr *) q.right_expr, (PlanState *) node);
+        }
+        dmstate->quals.push_back(q);
+      }
+    }
+
+    node->fdw_state = (void *) dmstate;
+    MemoryContextSwitchTo(oldcxt);
+  }
+  catch (js_error &e) { e.rethrow(); }
+  catch (pg_error &e) { e.rethrow(); }
+  catch (const std::exception &e) {
+    ereport(ERROR, (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION), errmsg("plv8_fdw: %s", e.what())));
+  }
 }
 
 static TupleTableSlot *
 plv8_fdw_iterate_direct_modify(ForeignScanState *node)
 {
-  return nullptr;
+  Plv8FdwDirectModifyState *dmstate = (Plv8FdwDirectModifyState *) node->fdw_state;
+  TupleTableSlot *slot = node->ss.ss_ScanTupleSlot;
+  if (!dmstate || dmstate->has_executed) {
+    return ExecClearTuple(slot);
+  }
+
+  dmstate->has_executed = true;
+
+  try {
+    Isolate *isolate = dmstate->isolate;
+    Isolate::Scope iso_scope(isolate);
+    HandleScope hs(isolate);
+    Local<Context> ctx = dmstate->context.Get(isolate);
+    Context::Scope ctx_scope(ctx);
+
+    Local<Object> wrapper = dmstate->wrapper_instance.Get(isolate);
+    Local<Value> dm_fn_val;
+    if (wrapper->Get(ctx, String::NewFromUtf8Literal(isolate, "directModify")).ToLocal(&dm_fn_val) && dm_fn_val->IsFunction()) {
+      Local<Function> dm_fn = dm_fn_val.As<Function>();
+      const char *op_str = (dmstate->operation == CMD_UPDATE) ? "UPDATE" : "DELETE";
+      Local<String> op_js = String::NewFromUtf8(isolate, op_str, NewStringType::kNormal).ToLocalChecked();
+
+      ExprContext *econtext = node->ss.ps.ps_ExprContext;
+      Local<Array> quals_arr = Array::New(isolate, (int) dmstate->quals.size());
+      for (size_t i = 0; i < dmstate->quals.size(); i++) {
+        (void) quals_arr->Set(ctx, (uint32_t) i, plv8_fdw_qual_to_js(ctx, isolate, dmstate->quals[i], econtext));
+      }
+
+      Local<Value> args[3] = {op_js, quals_arr, Object::New(isolate)};
+      TryCatch tc(isolate);
+      Local<Value> ret_val;
+      if (dm_fn->Call(ctx, wrapper, 3, args).ToLocal(&ret_val) && ret_val->IsNumber()) {
+        dmstate->affected_rows = ret_val->Int32Value(ctx).FromMaybe(0);
+      }
+      if (tc.HasCaught()) throw js_error(tc);
+    }
+
+    if (dmstate->set_processed) {
+      node->ss.ps.state->es_processed += dmstate->affected_rows;
+    }
+  }
+  catch (js_error &e) { e.rethrow(); }
+  catch (pg_error &e) { e.rethrow(); }
+  catch (const std::exception &e) {
+    ereport(ERROR, (errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION), errmsg("plv8_fdw: %s", e.what())));
+  }
+
+  return ExecClearTuple(slot);
 }
 
 static void
 plv8_fdw_end_direct_modify(ForeignScanState *node)
 {
+  Plv8FdwDirectModifyState *dmstate = (Plv8FdwDirectModifyState *) node->fdw_state;
+  if (!dmstate) return;
+
+  MemoryContext direct_mcxt = dmstate->direct_mcxt;
+  node->fdw_state = nullptr;
+
+  if (direct_mcxt) {
+    Isolate *isolate = dmstate->isolate;
+    if (isolate) {
+      Isolate::Scope iso_scope(isolate);
+      dmstate->wrapper_instance.Reset();
+      dmstate->context.Reset();
+      dmstate->~Plv8FdwDirectModifyState();
+    } else {
+      dmstate->wrapper_instance.Reset();
+      dmstate->context.Reset();
+      dmstate->~Plv8FdwDirectModifyState();
+    }
+    MemoryContextDelete(direct_mcxt);
+  }
 }
 
 /*
@@ -1761,6 +2098,7 @@ plv8_fdw_validator(PG_FUNCTION_ARGS)
 {
   ArrayType *array = PG_GETARG_ARRAYTYPE_P(0);
   Oid catalog = PG_GETARG_OID(1);
+  (void) catalog;
 
   static const char *valid_opts[] = {
       "wrapper",
@@ -1770,6 +2108,7 @@ plv8_fdw_validator(PG_FUNCTION_ARGS)
       "rowid_column",
       "batch_size",
       "key",
+      "direct_modify",
       nullptr
   };
 

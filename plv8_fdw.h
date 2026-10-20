@@ -43,7 +43,9 @@ extern "C" {
 #include "optimizer/restrictinfo.h"
 #include "parser/parse_oper.h"
 #include "utils/builtins.h"
+#include "utils/inval.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/tuplestore.h"
@@ -64,6 +66,7 @@ struct Plv8Qual {
   Oid opno;
   Node *left_expr;
   Node *right_expr;
+  ExprState *expr_state;
   bool is_param;
   bool is_null_test;
   bool null_test_is_not_null;
@@ -93,6 +96,7 @@ struct Plv8FdwScanState {
   List *fdw_clauses;
 
   MemoryContext scan_mcxt;
+  MemoryContextCallback cleanup_cb;
   bool eof_reached;
 
   // Caching subsystem
@@ -133,6 +137,8 @@ struct Plv8FdwModifyState {
   std::string rowid_colname;
   int batch_size;
   std::vector<v8::Global<v8::Object>> batch_rows;
+  MemoryContext modify_mcxt;
+  MemoryContextCallback cleanup_cb;
 };
 
 struct Plv8FdwDirectModifyState {
@@ -143,6 +149,22 @@ struct Plv8FdwDirectModifyState {
   std::vector<Plv8Qual> quals;
   bool has_executed;
   int affected_rows;
+  bool set_processed;
+  MemoryContext direct_mcxt;
+  MemoryContextCallback cleanup_cb;
+};
+
+struct TableCloseGuard {
+  Relation rel;
+  LOCKMODE mode;
+  TableCloseGuard(Relation r, LOCKMODE m) : rel(r), mode(m) {}
+  ~TableCloseGuard() {
+    if (rel) {
+      table_close(rel, mode);
+      rel = nullptr;
+    }
+  }
+  void release() { rel = nullptr; }
 };
 
 extern "C" {
@@ -152,5 +174,7 @@ PGDLLEXPORT Datum plv8_fdw_validator(PG_FUNCTION_ARGS);
 
 void plv8_fdw_init_context(plv8_context *context);
 void plv8_fdw_xact_cb(XactEvent event);
+void plv8_fdw_reset(Oid user_id);
+void plv8_fdw_relcache_cb(Datum arg, Oid relid);
 
 #endif // _PLV8_FDW_H_

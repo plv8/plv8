@@ -2403,6 +2403,7 @@ plv8_reset(PG_FUNCTION_ARGS)
 			break;
 		}
 	}
+	plv8_fdw_reset(user_id);
 	return (Datum) 0;
 }
 

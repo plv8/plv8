@@ -90,8 +90,31 @@ ROLLBACK;
 
 SELECT key FROM ft_sessions WHERE key = 'sess:rollback_test';
 
+-- 11. Direct Modify Pushdown
+CREATE SERVER test_dm_srv FOREIGN DATA WRAPPER plv8_fdw OPTIONS (wrapper 'MapTableFdw', direct_modify 'true');
+CREATE FOREIGN TABLE ft_dm_sessions (
+    key text,
+    user_id int,
+    status text,
+    data jsonb
+) SERVER test_dm_srv OPTIONS (rowid_column 'key');
+
+EXPLAIN (VERBOSE, COSTS OFF)
+DELETE FROM ft_dm_sessions WHERE key = 'sess:3';
+
+DELETE FROM ft_dm_sessions WHERE key = 'sess:3';
+SELECT key FROM ft_dm_sessions WHERE key = 'sess:3';
+
+-- 12. Session Reset Coordination
+SELECT plv8_reset();
+SELECT id, username FROM ft_users WHERE id = 101;
+SELECT key, user_id, status FROM ft_dm_sessions WHERE key = 'sess:1';
+
 -- Clean up
 DROP FOREIGN TABLE ft_users;
 DROP FOREIGN TABLE ft_sessions;
+DROP FOREIGN TABLE ft_dm_sessions;
 DROP SERVER test_array_srv;
 DROP SERVER test_map_srv;
+DROP SERVER test_dm_srv;
+

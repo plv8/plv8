@@ -1,4 +1,4 @@
--- SPECKLE_POSTGRES json_ instead of json to fix syntax error in PG15
+-- Use json_ instead of json to fix syntax error in PG15
 CREATE FUNCTION valid_json(json_ text) RETURNS boolean
 LANGUAGE plv8 IMMUTABLE STRICT
 AS $$

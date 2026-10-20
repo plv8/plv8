@@ -26,7 +26,7 @@
 
 PostgreSQL allows extensions to register new procedural languages (`CREATE [TRUSTED] LANGUAGE ... HANDLER ...`). Traditionally, implementing a new procedural language in PostgreSQL requires writing a C shared library that directly interfaces with PostgreSQL's internal C APIs (`FunctionCallInfo`, `SPI_connect`, `Datum` conversion, `MemoryContext` management, `PG_TRY`/`PG_CATCH` `sigsetjmp` exception handling, and `pg_proc` syscache invalidation).
 
-In managed cloud database environments (such as Cloud SQL and AlloyDB) and Trusted Language Extensions (`pg_tle`), deploying arbitrary C shared libraries is restricted for security and stability reasons. However, `pl/v8` already provides a battle-tested, memory-limited, per-role isolated V8 JavaScript and WebAssembly execution engine with full Server Programming Interface (SPI) integration.
+In managed cloud database environments and Trusted Language Extensions (`pg_tle`), deploying arbitrary C shared libraries is restricted for security and stability reasons. However, `pl/v8` already provides a battle-tested, memory-limited, per-role isolated V8 JavaScript and WebAssembly execution engine with full Server Programming Interface (SPI) integration.
 
 The **PL/v8 Language Handler Architecture** turns `pl/v8` into a **meta-runtime and compiler target** for PostgreSQL procedural languages. Instead of writing a C extension, a language author writes a **language handler function in `plv8` (or in another `plv8`-backed language)** with SQL return type `language_handler`:
 
@@ -120,7 +120,7 @@ This architecture powers four production language runtimes in the repository:
 
 ### 3.1 Core Data Structures (`plv8.h` & `plv8.cc`)
 
-In [`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L112-L148), `plv8` tracks compiled functions and their language handler dependencies using three key structures:
+In `plv8.cc`, `plv8` tracks compiled functions and their language handler dependencies using three key structures:
 
 ```cpp
 #define PLV8_MAX_LANG_HANDLER_DEPTH 32
@@ -155,7 +155,7 @@ typedef struct plv8_proc_cache
 } plv8_proc_cache;
 ```
 
-Per-invocation runtime type information is stored in `plv8_proc` ([`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L144-L151)), which wraps a pointer to `plv8_proc_cache`, the `plv8_exec_env *xenv`, and resolved `plv8_type` descriptors (`rettype` and `argtypes[FUNC_MAX_ARGS]`) allocated inside the caller's `fn_mcxt`.
+Per-invocation runtime type information is stored in `plv8_proc` (`plv8.cc`), which wraps a pointer to `plv8_proc_cache`, the `plv8_exec_env *xenv`, and resolved `plv8_type` descriptors (`rettype` and `argtypes[FUNC_MAX_ARGS]`) allocated inside the caller's `fn_mcxt`.
 
 ---
 
@@ -185,14 +185,14 @@ CREATE TRUSTED LANGUAGE my_lang
 
 Wait—why does `CREATE FUNCTION my_lang_handler() RETURNS language_handler ... LANGUAGE plv8` succeed in PostgreSQL?
 In standard PostgreSQL, PLs often reject pseudo-types like `language_handler` as return types. In `pl/v8`:
-1. **`plv8_call_validator` ([`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L1203-L1208))**: Explicitly allows `prorettype == LANGUAGE_HANDLERnoid` (`2280`) alongside normal base, composite, domain, polymorphic, and trigger return types.
-2. **`plv8_call_handler` Direct Call Guard ([`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L920-L929))**: If a user or SQL query attempts to invoke a `RETURNS language_handler` function directly from SQL (where `fcinfo->flinfo->fn_oid == handler_oid` and the function's own return type in `pg_proc` is `LANGUAGE_HANDLERnoid`), `plv8_call_handler` immediately raises:
+1. **`plv8_call_validator` (`plv8.cc`)**: Explicitly allows `prorettype == LANGUAGE_HANDLERnoid` (`2280`) alongside normal base, composite, domain, polymorphic, and trigger return types.
+2. **`plv8_call_handler` Direct Call Guard (`plv8.cc`)**: If a user or SQL query attempts to invoke a `RETURNS language_handler` function directly from SQL (where `fcinfo->flinfo->fn_oid == handler_oid` and the function's own return type in `pg_proc` is `LANGUAGE_HANDLERnoid`), `plv8_call_handler` immediately raises:
    ```cpp
    ereport(ERROR,
            (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
             errmsg("language handler function cannot be called directly")));
    ```
-3. **`plv8.find_function` Lookup ([`plv8_func.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8_func.cc#L661-L720))**: `find_js_function_by_oid` permits `rettype == LANGUAGE_HANDLERnoid` so that language handlers can be resolved internally (and by other V8 functions with `EXECUTE` privilege) via `find_js_function`.
+3. **`plv8.find_function` Lookup (`plv8_func.cc`)**: `find_js_function_by_oid` permits `rettype == LANGUAGE_HANDLERnoid` so that language handlers can be resolved internally (and by other V8 functions with `EXECUTE` privilege) via `find_js_function`.
 
 ### 4.2 Language Chain Resolution (`plv8_is_js_language` & `plv8_transpile_src`)
 
@@ -200,7 +200,7 @@ Because a language handler is itself a `pg_proc` entry with a `prolang` OID, a l
 
 $$\text{Function } F \xrightarrow{\text{prolang}} \text{Lang } L_0 \xrightarrow{\text{lanplcallfoid}} \text{Handler } H_0 \xrightarrow{\text{prolang}} \text{Lang } L_1 \xrightarrow{\text{lanplcallfoid}} \text{Handler } H_1 \xrightarrow{\text{prolang}} \texttt{plv8}$$
 
-Both [`plv8_is_js_language(Oid lang_oid)`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L1942-L1981) and [`plv8_transpile_src(...)`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L1983-L2182) resolve this chain as follows:
+Both `plv8_is_js_language(Oid lang_oid)` and `plv8_transpile_src(...)` resolve this chain as follows:
 
 1. **Base Case (`lang_oid == plv8_lang_oid`):** Look up the `"plv8"` `pg_language` tuple via `SearchSysCache1(LANGNAME, NameGetDatum("plv8"))`. If `lang_oid == plv8_lang_oid`, no transpilation is needed (`plv8_transpile_src` returns `pstrdup(src)` with `*nhandlers_out = 0`).
 2. **Iterative Chain Walk (Depth `0 .. PLV8_MAX_LANG_HANDLER_DEPTH - 1`):**
@@ -228,7 +228,7 @@ Both [`plv8_is_js_language(Oid lang_oid)`](file:///google/src/cloud/hannuk/port_
 
 When `plv8_transpile_src` invokes the language handler function, it passes two arguments:
 - `arguments[0]` (`v8::String`): The raw source text (`prosrc` for a `CREATE FUNCTION`, or `laninline` block text for a `DO` block).
-- `arguments[1]` (`v8::Object`): The compile-time `meta` object constructed in [`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L2077-L2164).
+- `arguments[1]` (`v8::Object`): The compile-time `meta` object constructed in `plv8.cc`.
 
 | Property | V8 Type | When `proctuple != NULL` (`CREATE FUNCTION` / Call) | When `proctuple == NULL` (`DO` Block) | Description |
 |---|---|---|---|---|
@@ -245,23 +245,23 @@ When `plv8_transpile_src` invokes the language handler function, it passes two a
 | `pass_user_types_as_bytes` | `Boolean` (Out) | Read back after handler returns | *(ignored)* | If mutated to `true` by the handler (`meta.pass_user_types_as_bytes = true`), enables raw `Uint8Array` marshaling for `TYPCATEGORY_USER` arguments and return values. |
 
 #### Why `rettype_len` and `argtype_lens` Subtract `VARHDRSZ` (`4`)
-In PostgreSQL (and specifically `pg_tle`'s `create_base_type_if_not_exists`), fixed-length user base types stored with varlena headers have `pg_type.typlen = internal_length + VARHDRSZ` (where `VARHDRSZ == 4`). `plv8_transpile_src` ([`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L2106-L2108)) normalizes `len = (len > (int16) VARHDRSZ) ? (len - (int16) VARHDRSZ) : len` so that `meta.rettype_len` and `meta.argtype_lens[a]` report the exact user payload size (e.g., `8` bytes for a 2×`int32` vector `wasm_vec2i`, matching `"internallength": 8` in the `pg_tle` manifest).
+In PostgreSQL (and specifically `pg_tle`'s `create_base_type_if_not_exists`), fixed-length user base types stored with varlena headers have `pg_type.typlen = internal_length + VARHDRSZ` (where `VARHDRSZ == 4`). `plv8_transpile_src` (`plv8.cc`) normalizes `len = (len > (int16) VARHDRSZ) ? (len - (int16) VARHDRSZ) : len` so that `meta.rettype_len` and `meta.argtype_lens[a]` report the exact user payload size (e.g., `8` bytes for a 2×`int32` vector `wasm_vec2i`, matching `"internallength": 8` in the `pg_tle` manifest).
 
 #### How `argnames` Aligns with `argtype_oids`
-In PostgreSQL's `pg_proc`, `proargnames` and `proargmodes` include `OUT` (`'o'`) and `TABLE` (`'t'`) parameters, whereas `proargtypes` (`pronargs`) contains only input-bearing parameters (`'i'`, `'b'`, `'v'`). `plv8_transpile_src` ([`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L2115-L2141)) iterates `all_args` and skips modes other than `'i'`, `'b'`, and `'v'`, guaranteeing that `meta.argnames.length === meta.argtype_oids.length === pronargs`.
+In PostgreSQL's `pg_proc`, `proargnames` and `proargmodes` include `OUT` (`'o'`) and `TABLE` (`'t'`) parameters, whereas `proargtypes` (`pronargs`) contains only input-bearing parameters (`'i'`, `'b'`, `'v'`). `plv8_transpile_src` (`plv8.cc`) iterates `all_args` and skips modes other than `'i'`, `'b'`, and `'v'`, guaranteeing that `meta.argnames.length === meta.argtype_oids.length === pronargs`.
 
 ### 4.4 `HandlerExecutionScope`: Safe SPI Access During Transpilation
 
 A major hazard when running a JavaScript language handler inside `plv8` is that compilation can be triggered *while another function or SRF is already executing* (or while setting up `plv8_call_handler`'s converter/tuplestore state on the global `plv8` object).
 
-In `plv8`, the global `plv8` object stores four internal fields ([`plv8.h`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.h#L43-L50)):
+In `plv8`, the global `plv8` object stores four internal fields (`plv8.h`):
 - `PLV8_INTNL_CONV = 1`: Pointer to the active function's `Converter` (`srf_return_types`, `is_srf`).
 - `PLV8_INTNL_TUPSTORE = 2`: Pointer to the active SRF's `Tuplestorestate`.
 - `PLV8_INTNL_FCINFO = 3`: Pointer to the active `FunctionCallInfoBaseData` (`fcinfo`).
 
 If a language handler calls `plv8.execute("SELECT ...")` during transpilation (for example, `plpgsql_v8` inspecting `pg_attribute` to resolve `table_name%ROWTYPE` or `col%TYPE`), or if a malicious handler attempted to call `plv8.return_next(...)` during compilation, leaving the outer function's internal fields exposed on `plv8` would corrupt the outer call's `Tuplestorestate` or `fcinfo`.
 
-To prevent this, [`plv8.h`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.h#L334-L370) defines the RAII guard `HandlerExecutionScope`:
+To prevent this, `plv8.h` defines the RAII guard `HandlerExecutionScope`:
 
 ```cpp
 class HandlerExecutionScope
@@ -309,7 +309,7 @@ public:
 };
 ```
 
-In [`plv8_transpile_src`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L2075), `HandlerExecutionScope handler_scope(isolate, context);` is instantiated immediately before building `meta` and calling `Call(context, fn, recv, nargs, args)`, and automatically restores the outer internal fields when `plv8_transpile_src` exits (whether normally or via C++ `js_error` exception unwinding).
+In `plv8_transpile_src`, `HandlerExecutionScope handler_scope(isolate, context);` is instantiated immediately before building `meta` and calling `Call(context, fn, recv, nargs, args)`, and automatically restores the outer internal fields when `plv8_transpile_src` exits (whether normally or via C++ `js_error` exception unwinding).
 
 ### 4.5 All Four Entry Points Explained
 
@@ -320,12 +320,12 @@ In [`plv8_transpile_src`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/goog
 2. **Trigger Function Calls (`plv8_call_handler` with `CALLED_AS_TRIGGER(fcinfo)`)**:
    - Passes `is_trigger = true` to `plv8_get_proc`.
    - `CompileFunction` binds the standard trigger parameters `(NEW, OLD, TG_NAME, TG_WHEN, TG_LEVEL, TG_OP, TG_RELID, TG_TABLE_NAME, TG_TABLE_SCHEMA, TG_ARGV)` into the generated function signature so the transpiled trigger body can read and mutate `NEW`/`OLD` directly.
-3. **Anonymous `DO` Blocks (`plv8_inline_handler`, [`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L1125-L1182))**:
+3. **Anonymous `DO` Blocks (`plv8_inline_handler`, `plv8.cc`)**:
    - Receives `InlineCodeBlock *codeblock` (`codeblock->source_text`, `codeblock->langOid`).
    - Calls `plv8_transpile_src(source_text, codeblock->langOid, NULL, NULL, NULL, NULL)`.
    - Because `proctuple == NULL`, `meta` has `{ is_do_block: true }`.
    - Compiles and executes the transpiled JS immediately in the current role's `plv8_context` inside an `SPI_connect()` / `SPI_finish()` block.
-4. **Syntax & Handler Validation (`plv8_call_validator`, [`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L1188-L1254))**:
+4. **Syntax & Handler Validation (`plv8_call_validator`, `plv8.cc`)**:
    - Invoked by PostgreSQL during `CREATE [OR REPLACE] FUNCTION` when `check_function_bodies = on`.
    - Verifies that the function's `prolang` resolves to `plv8` via `plv8_is_js_language(lang_oid)`.
    - Calls `Compile(fn_oid, NULL, true, is_trigger)` inside an `SPI_connect()` scope!
@@ -337,7 +337,7 @@ In [`plv8_transpile_src`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/goog
 
 ### 5.1 Multi-Dimensional Cache Validation
 
-Each backend maintains `plv8_proc_cache_hash` (`HTAB *`, keyed by `Oid fn_oid`). Whenever `plv8_call_handler` ([`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L931-L967)) or `plv8_get_proc` ([`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L2206-L2248)) finds an existing `plv8_proc_cache` entry (`found == true && !cache->function.IsEmpty()`), it checks **four** dimensions before reusing the cached `v8::Persistent<v8::Function>`:
+Each backend maintains `plv8_proc_cache_hash` (`HTAB *`, keyed by `Oid fn_oid`). Whenever `plv8_call_handler` (`plv8.cc`) or `plv8_get_proc` (`plv8.cc`) finds an existing `plv8_proc_cache` entry (`found == true && !cache->function.IsEmpty()`), it checks **four** dimensions before reusing the cached `v8::Persistent<v8::Function>`:
 
 1. **Target Function Catalog Freshness (`fn_xmin` & `fn_tid`)**:
    ```cpp
@@ -360,7 +360,7 @@ Each backend maintains `plv8_proc_cache_hash` (`HTAB *`, keyed by `Oid fn_oid`).
 
 ### 5.2 Handler Chain Validation (`plv8_cache_handlers_valid`) and Cascading Eviction
 
-In [`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L1875-L1914), `plv8_cache_handlers_valid` verifies both that the language's current `lanplcallfoid` still matches `cache->handlers[0].fn_oid` (in case `ALTER LANGUAGE` or `DROP/CREATE LANGUAGE` changed the handler OID) and that every handler in `cache->handlers[0..nhandlers-1]` still has the exact same `(fn_xmin, fn_tid)` in `PROCOID` syscache:
+In `plv8.cc`, `plv8_cache_handlers_valid` verifies both that the language's current `lanplcallfoid` still matches `cache->handlers[0].fn_oid` (in case `ALTER LANGUAGE` or `DROP/CREATE LANGUAGE` changed the handler OID) and that every handler in `cache->handlers[0..nhandlers-1]` still has the exact same `(fn_xmin, fn_tid)` in `PROCOID` syscache:
 
 ```cpp
 static bool
@@ -410,10 +410,10 @@ plv8_cache_handlers_valid(plv8_proc_cache *cache, HeapTuple proctuple, Oid *stal
 ```
 
 When a handler $H_i$ is modified (`CREATE OR REPLACE FUNCTION`), two invalidation paths work together:
-1. **Immediate Eviction at Validator Time (`plv8_call_validator`, [`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L1239))**: When `CREATE OR REPLACE FUNCTION my_handler()` runs, `plv8_call_validator` calls `plv8_cache_function_remove(fn_oid)`.
+1. **Immediate Eviction at Validator Time (`plv8_call_validator`, `plv8.cc`)**: When `CREATE OR REPLACE FUNCTION my_handler()` runs, `plv8_call_validator` calls `plv8_cache_function_remove(fn_oid)`.
 2. **Lazy Detection at Call Time (`plv8_call_handler` / `plv8_get_proc`)**: If `check_function_bodies` was `off` during `CREATE OR REPLACE FUNCTION`, `plv8_cache_handlers_valid` returns `false` with `stale_handler_oid = H_i`, and `plv8_call_handler` / `plv8_get_proc` calls `plv8_cache_function_remove(stale_handler_oid)`.
 
-`plv8_cache_function_remove(Oid fn_oid)` ([`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L1840-L1869)) scans `plv8_proc_cache_hash` with `HASH_SEQ_STATUS` and resets every entry where `cache->fn_oid == fn_oid` OR where any `cache->handlers[i].fn_oid == fn_oid`:
+`plv8_cache_function_remove(Oid fn_oid)` (`plv8.cc`) scans `plv8_proc_cache_hash` with `HASH_SEQ_STATUS` and resets every entry where `cache->fn_oid == fn_oid` OR where any `cache->handlers[i].fn_oid == fn_oid`:
 ```cpp
 if (remove)
 {
@@ -456,12 +456,12 @@ Because reading and returning raw in-memory `varlena` bytes bypasses PostgreSQL'
 
 ### 6.4 Input Marshaling (`ToScalarValue` in `plv8_type.cc`)
 
-In [`ToScalarValue`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8_type.cc):
+In `ToScalarValue`:
 - When `plv8_pass_user_types_as_bytes && plv8_allow_raw_user_types` is active and `type->len == -1` (varlena), the datum is detoasted via `PG_DETOAST_DATUM_COPY(datum)` and its payload (`VARDATA_ANY(p)`, length `VARSIZE_ANY_EXHDR(p)`) is exposed as a V8 `Uint8Array` via `CreateExternalArray`.
 
 ### 6.5 Output Marshaling & Fixed-Length Validation (`ToScalarDatum` in `plv8_type.cc`)
 
-In [`ToScalarDatum`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8_type.cc), when `type->category == TYPCATEGORY_USER` and `val->IsUint8Array() || val->IsInt8Array() || val->IsArrayBuffer()`:
+In `ToScalarDatum`, when `type->category == TYPCATEGORY_USER` and `val->IsUint8Array() || val->IsInt8Array() || val->IsArrayBuffer()`:
 1. **Privilege Check:** Verifies `plv8_pass_user_types_as_bytes && plv8_allow_raw_user_types`; otherwise raises `ERRCODE_INSUFFICIENT_PRIVILEGE`.
 2. **Overflow & Fixed-Size Validation:** Verifies `byte_len <= (size_t) MaxAllocSize - VARHDRSZ`, computes `size_t varlena_size = byte_len + VARHDRSZ;`, and if the PostgreSQL type has a fixed `typlen > 0` where `(size_t) type->len != varlena_size`, raises `ERRCODE_DATA_EXCEPTION` (`22000`).
 3. **Varlena Construction:** Allocates `(struct varlena *) palloc(varlena_size)`, sets `SET_VARSIZE(result, varlena_size)`, copies `byte_len` bytes into `VARDATA(result)` (when `byte_len > 0`), and returns `PointerGetDatum(result)`.
@@ -476,7 +476,7 @@ Procedural languages like PL/pgSQL (`RAISE ... USING ERRCODE = ..., DETAIL = ...
 
 When a C/SQL function called via `plv8.execute(...)`, `PreparedPlan.execute(...)`, `Cursor.fetch(...)`, `plv8.subtransaction(...)`, or `plv8_FunctionInvoker` throws a PostgreSQL `elog(ERROR)` / `ereport(ERROR)`:
 1. `PG_CATCH()` intercepts the error in `CopyErrorData()` (`ErrorData *edata`), flushes the error state (`FlushErrorState()`), and rolls back the internal subtransaction if applicable.
-2. Both `js_error::init(ErrorData *edata)` / `js_error::error_object()` ([`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L3312-L3530)) and `plv8_FunctionInvoker` ([`plv8_func.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8_func.cc#L531-L582)) construct a V8 `v8::Exception::Error(message)` and populate up to **13 diagnostic properties**:
+2. Both `js_error::init(ErrorData *edata)` / `js_error::error_object()` (`plv8.cc`) and `plv8_FunctionInvoker` (`plv8_func.cc`) construct a V8 `v8::Exception::Error(message)` and populate up to **13 diagnostic properties**:
 
 | V8 `Error` Property | Type | Source `ErrorData` Field | PostgreSQL Diagnostic Equivalent |
 |---|---|---|---|
@@ -496,7 +496,7 @@ When a C/SQL function called via `plv8.execute(...)`, `PreparedPlan.execute(...)
 
 ### 7.2 V8 `Error` Object $\rightarrow$ PostgreSQL `ereport(ERROR, ...)` (`js_error::init` & `js_error::rethrow`)
 
-When a V8 function or language handler throws an uncaught JS exception, [`js_error::init(v8::Isolate *isolate, v8::TryCatch &try_catch)`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L3331-L3476) inspects the thrown `v8::Value`:
+When a V8 function or language handler throws an uncaught JS exception, `js_error::init(v8::Isolate *isolate, v8::TryCatch &try_catch)` inspects the thrown `v8::Value`:
 
 1. **`sqlerrcode` / `code` Parsing:**
    - Reads `errObj.sqlerrcode` (falling back to `errObj.code`).
@@ -523,7 +523,7 @@ Language handlers and user functions often share runtime libraries, parsers, or 
 
 ### 8.1 Catalog Schema (`plv8.packages` & `plv8.modules`)
 
-Defined in [`plv8.sql.common`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.sql.common#L34-L93):
+Defined in `plv8.sql.common`:
 
 ```sql
 CREATE SCHEMA IF NOT EXISTS plv8;
@@ -564,10 +564,10 @@ Notice that `plv8.packages` uses a composite primary key `(name, version)` so mu
 
 ### 8.2 Cross-Backend Module Cache Invalidation (`plv8_modules_changed`)
 
-Statement-level `AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE` triggers (`ENABLE ALWAYS TRIGGER plv8_modules_changed`) on both `plv8.modules` and `plv8.packages` invoke the C trigger function [`plv8_modules_changed`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L3615-L3623):
+Statement-level `AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE` triggers (`ENABLE ALWAYS TRIGGER plv8_modules_changed`) on both `plv8.modules` and `plv8.packages` invoke the C trigger function `plv8_modules_changed`:
 
-1. `plv8_modules_changed` calls `plv8_bump_tle_modules_epoch()` ([`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L3582-L3612)), which increments both a local epoch counter and the atomic `pg_atomic_uint64 tle_modules_epoch` in PostgreSQL shared memory (`plv8_wasm_shared_state`).
-2. Before any function execution, inline block, or module lookup, `plv8_sync_tle_module_cache(plv8_context *ctx)` ([`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L3672-L3705)) reads the shared-memory epoch (`plv8_read_tle_modules_epoch()`).
+1. `plv8_modules_changed` calls `plv8_bump_tle_modules_epoch()` (`plv8.cc`), which increments both a local epoch counter and the atomic `pg_atomic_uint64 tle_modules_epoch` in PostgreSQL shared memory (`plv8_wasm_shared_state`).
+2. Before any function execution, inline block, or module lookup, `plv8_sync_tle_module_cache(plv8_context *ctx)` (`plv8.cc`) reads the shared-memory epoch (`plv8_read_tle_modules_epoch()`).
 3. If `ctx->tle_modules_epoch_seen != cur_epoch`, `plv8_sync_tle_module_cache` queries `plv8_compute_tle_modules_fingerprint()` (a 64-bit FNV-1a hash over `plv8.modules`, `plv8.packages`, and `pgtle.modules`). If the fingerprint changed:
    - Clears the per-context CommonJS cache (`__plv8_cjs_cache`) and ES module caches (`ctx->esm_modules`, `ctx->esm_meta`, `ctx->esm_ById`).
    - Updates `ctx->tle_modules_fp = fp`.
@@ -575,7 +575,7 @@ Statement-level `AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE` triggers (`ENABLE
 
 ### 8.3 Specifier Resolution Order (`plv8_fetch_tle_module`)
 
-When a module is imported via `import ... from '<specifier>'`, dynamic `import('<specifier>')`, or `require('<specifier>')`, [`plv8_fetch_tle_module`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L3900-L4336) resolves `<specifier>` as follows:
+When a module is imported via `import ... from '<specifier>'`, dynamic `import('<specifier>')`, or `require('<specifier>')`, `plv8_fetch_tle_module` resolves `<specifier>` as follows:
 
 1. **Prefix Normalization:** Strips optional prefixes `plv8:`, `pgtle:`, `tle://`, or `tle:`.
 2. **Relative Path Resolution (`./` or `../`):** Resolved relative to `referrer_dir` (and constrained to the referrer's `(package_name, package_version)` if the referrer belongs to a package).
@@ -588,7 +588,7 @@ When a module is imported via `import ... from '<specifier>'`, dynamic `import('
    - If `pgtle.modules` exists, calls `SELECT module_name, version, source_code, bytecode, dependencies, is_trusted FROM pgtle.get_module($1, $2)`.
 
 #### Enforced Security & Governance Checks During Module Load (`plv8_load_tle_module`)
-In [`plv8_load_tle_module`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L4669-L4730):
+In `plv8_load_tle_module`:
 - **Max Depth Guard (`plv8.max_module_depth`):** Default `16` (range `1..64`). Exceeding `plv8_max_module_depth` throws a V8 `Error("maximum module import depth (N) exceeded (circular dependency or deep chain)")`.
 - **Circular Dependency Detection:** If a module is currently in state `1` (evaluating) on the active load stack:
   - For CommonJS (`is_esm == false`), returns the partially populated `exports` object (standard Node.js CommonJS circular `require` semantics).
@@ -600,18 +600,18 @@ In [`plv8_load_tle_module`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/go
 
 Standard V8 `new Function(...)` (`CompileFunction`) parses code as a classic `Script`, which rejects `import` and `export` declarations with `SyntaxError: Cannot use import statement outside a module`.
 
-To support ES Module syntax inside `plv8` functions and language handler output, [`plv8_extract_hoisted_imports`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L3720-L3848) performs a lexical scan of the function body (skipping comments, single/double-quoted strings, and template literals):
+To support ES Module syntax inside `plv8` functions and language handler output, `plv8_extract_hoisted_imports` performs a lexical scan of the function body (skipping comments, single/double-quoted strings, and template literals):
 - Any top-level `import ...` statements are extracted into `hoisted_imports_out`.
 - If top-level `export default <expr>` is encountered at brace depth `0`, it is rewritten to `return <expr>` inside the generated inner function body (`body_without_imports_out`), while top-level `export function|const|let|var|class` strips the `export` keyword.
-- When `has_esm` is `true`, [`CompileFunction`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L2612-L2644) wraps the function in an anonymous ES module:
+- When `has_esm` is `true`, `CompileFunction` wraps the function in an anonymous ES module:
   ```javascript
   <hoisted_imports>
   export default (function(<arg0>, <arg1>, ...) {
     <body_without_imports>
   });
   ```
-  and compiles/instantiates/evaluates it via [`plv8_compile_and_eval_anon_module`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L4587-L4667) using V8's `ScriptCompiler::CompileModule`, `plv8_ResolveModuleCallback`, `plv8_HostImportModuleDynamicallyCallback` (for dynamic `await import(...)`), and `plv8_HostInitializeImportMetaObjectCallback`.
-- Inside any loaded ES module, `import.meta` is populated with ([`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L4164-L4169), [`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L4542-L4585)):
+  and compiles/instantiates/evaluates it via `plv8_compile_and_eval_anon_module` using V8's `ScriptCompiler::CompileModule`, `plv8_ResolveModuleCallback`, `plv8_HostImportModuleDynamicallyCallback` (for dynamic `await import(...)`), and `plv8_HostInitializeImportMetaObjectCallback`.
+- Inside any loaded ES module, `import.meta` is populated with (`plv8.cc`, `plv8.cc`):
   - `import.meta.url`: `"plv8:<package_name>@<package_version>/<path>"` (for package modules) or `"plv8:<path>"` (for standalone modules).
   - `import.meta.version`: `"<package_version>"` (or `"standalone"`).
 
@@ -624,7 +624,7 @@ To support ES Module syntax inside `plv8` functions and language handler output,
    - Controlled by the `PGC_POSTMASTER` GUC `plv8.wasm_cache_size` (default `64` MB, range `0..2048` MB, active when `plv8` is loaded via `shared_preload_libraries`).
    - On backend startup (`_PG_init`) or first use (`plv8_ensure_wasm_cache_attached`), `plv8` attaches to a PostgreSQL Dynamic Shared Area (`dsa_area`) and a shared concurrent hash table (`dshash_table`) named `"plv8_wasm_code_cache"` guarded by `LWLock`.
    - Each `Plv8WasmCacheEntry` is keyed by `Plv8WasmCacheKey { Oid db_oid; Oid role_oid; uint8 wire_sha256[32]; }` (computed directly from a local copy of `wire_bytes` via `pg_cryptohash_create(PG_SHA256)`) and stores `dsa_pointer code_ptr`, `uint32 code_size`, and `uint64 last_used_seq`.
-   - `plv8.compile_wasm_cached(wasm_bytes)` ([`plv8_func.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8_func.cc)):
+   - `plv8.compile_wasm_cached(wasm_bytes)` (`plv8_func.cc`):
      - **Cache Hit:** Calls `plv8_wasm_cache_lookup(wire_bytes, wire_len, ...)`. If found, bumps `last_used_seq` and calls `v8::WasmModuleObject::DeserializeOrCompile(isolate, wire_span, cached_code_span)` to deserialize the pre-compiled native machine code directly into a `v8::WasmModuleObject` without re-running Liftoff/TurboFan.
      - **Cache Miss:** Compiles the module, extracts the native code via `mod_obj->GetCompiledModule().Serialize()`, and stores it into the shared `DSA` + `dshash` table via `plv8_wasm_cache_store` (enforcing a 25% per-role byte quota for non-superusers and LRU eviction by `last_used_seq`).
    - Cache telemetry (`enabled`, `max_bytes`, `used_bytes`, `entries`, `hits`, `misses`, `stores`, `evictions`) is exposed via `SELECT plv8_info()->0->'wasm_cache'`.
@@ -633,7 +633,7 @@ To support ES Module syntax inside `plv8` functions and language handler output,
 
 ## 9. Security & Multi-Tenancy Model
 
-1. **Per-Role V8 Isolate/Context Separation (`GetPlv8Context`, [`plv8.cc`](file:///google/src/cloud/hannuk/port_plv8_to_pljs/google3/third_party/pgext/plv8/plv8.cc#L3125-L3225))**:
+1. **Per-Role V8 Isolate/Context Separation (`GetPlv8Context`, `plv8.cc`)**:
    - Every PostgreSQL role (`GetUserId()`) gets its own `plv8_context` (`v8::Persistent<v8::Context>`).
    - Global objects (`globalThis`) initialized by a language handler (such as `globalThis.__plpgsql_v8_compile` or `globalThis.__plpython_v8_runtime`) live strictly inside that role's V8 context.
    - `plv8_proc_cache` tracks `cache->user_id`; switching roles (`SET ROLE` or `SECURITY DEFINER`) forces recompilation in the active role's `plv8_context`.

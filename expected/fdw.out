@@ -1,0 +1,182 @@
+--
+-- plv8_fdw: PL/v8 Foreign Data Wrapper Regression Tests
+--
+-- 1. Verify FDW Handler and Validator
+SELECT proname FROM pg_proc WHERE proname IN ('plv8_fdw_handler', 'plv8_fdw_validator') ORDER BY 1;
+      proname       
+--------------------
+ plv8_fdw_handler
+ plv8_fdw_validator
+(2 rows)
+
+SELECT fdwname FROM pg_foreign_data_wrapper WHERE fdwname = 'plv8_fdw';
+ fdwname  
+----------
+ plv8_fdw
+(1 row)
+
+-- 2. Create ArrayTableFdw Server and Foreign Table
+CREATE SERVER test_array_srv FOREIGN DATA WRAPPER plv8_fdw OPTIONS (wrapper 'ArrayTableFdw');
+CREATE FOREIGN TABLE ft_users (
+    id int,
+    username text,
+    dept_id int,
+    role text,
+    salary numeric
+) SERVER test_array_srv;
+-- 3. Full sequential scan
+SELECT id, username, dept_id, role, salary FROM ft_users ORDER BY id;
+ id  | username | dept_id | role  | salary 
+-----+----------+---------+-------+--------
+ 101 | alice    |       1 | eng   | 140000
+ 102 | bob      |       1 | eng   | 130000
+ 103 | charlie  |       2 | sales | 110000
+ 104 | david    |       2 | sales | 115000
+ 105 | eva      |       3 | lead  | 160000
+ 106 | frank    |       1 | eng   | 125000
+(6 rows)
+
+-- 4. Column projection pruning
+SELECT username, salary FROM ft_users ORDER BY username;
+ username | salary 
+----------+--------
+ alice    | 140000
+ bob      | 130000
+ charlie  | 110000
+ david    | 115000
+ eva      | 160000
+ frank    | 125000
+(6 rows)
+
+-- 5. Filter pushdown: equality, comparison, IN, IS NOT NULL
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT username, salary FROM ft_users WHERE role = 'eng' AND salary > 125000;
+           QUERY PLAN            
+---------------------------------
+ Foreign Scan on public.ft_users
+   Output: username, salary
+(2 rows)
+
+SELECT username, salary FROM ft_users WHERE role = 'eng' AND salary > 125000 ORDER BY username;
+ username | salary 
+----------+--------
+ alice    | 140000
+ bob      | 130000
+(2 rows)
+
+SELECT username, role FROM ft_users WHERE role IN ('sales', 'lead') ORDER BY username;
+ username | role  
+----------+-------
+ charlie  | sales
+ david    | sales
+ eva      | lead
+(3 rows)
+
+-- 6. Pathkeys pre-sorted ordering
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT id, username FROM ft_users ORDER BY id ASC;
+           QUERY PLAN            
+---------------------------------
+ Foreign Scan on public.ft_users
+   Output: id, username
+(2 rows)
+
+-- 7. Create MapTableFdw Server and Foreign Table (Key-Indexed & DML)
+CREATE SERVER test_map_srv FOREIGN DATA WRAPPER plv8_fdw OPTIONS (wrapper 'MapTableFdw');
+CREATE FOREIGN TABLE ft_sessions (
+    key text,
+    user_id int,
+    status text,
+    data jsonb
+) SERVER test_map_srv OPTIONS (rowid_column 'key');
+-- Full scan
+SELECT key, user_id, status FROM ft_sessions ORDER BY key;
+  key   | user_id | status  
+--------+---------+---------
+ sess:1 |     101 | active
+ sess:2 |     102 | expired
+ sess:3 |     103 | active
+ sess:4 |     104 | active
+(4 rows)
+
+-- Point key lookup pushdown
+SELECT key, user_id, status FROM ft_sessions WHERE key = 'sess:1';
+  key   | user_id | status 
+--------+---------+--------
+ sess:1 |     101 | active
+(1 row)
+
+-- Batch IN key lookup pushdown
+SELECT key, user_id, status FROM ft_sessions WHERE key IN ('sess:1', 'sess:3') ORDER BY key;
+  key   | user_id | status 
+--------+---------+--------
+ sess:1 |     101 | active
+ sess:3 |     103 | active
+(2 rows)
+
+-- 8. DML Modifications
+-- INSERT
+INSERT INTO ft_sessions (key, user_id, status, data)
+VALUES ('sess:5', 105, 'active', '{"theme":"nord"}');
+SELECT key, user_id, status FROM ft_sessions WHERE key = 'sess:5';
+  key   | user_id | status 
+--------+---------+--------
+ sess:5 |     105 | active
+(1 row)
+
+-- UPDATE
+UPDATE ft_sessions SET status = 'revoked' WHERE key = 'sess:1';
+SELECT key, user_id, status FROM ft_sessions WHERE key = 'sess:1';
+  key   | user_id | status  
+--------+---------+---------
+ sess:1 |         | revoked
+(1 row)
+
+-- DELETE
+DELETE FROM ft_sessions WHERE key = 'sess:2';
+SELECT key, user_id, status FROM ft_sessions WHERE key = 'sess:2';
+ key | user_id | status 
+-----+---------+--------
+(0 rows)
+
+-- 9. Join Pushdown & Rescan Caching
+CREATE TEMP TABLE local_depts (
+    dept_id int PRIMARY KEY,
+    dept_name text
+);
+INSERT INTO local_depts VALUES (1, 'Engineering'), (2, 'Sales'), (3, 'Executive');
+SELECT d.dept_name, u.username, u.salary
+FROM local_depts d
+JOIN ft_users u ON u.dept_id = d.dept_id
+ORDER BY d.dept_id, u.id;
+  dept_name  | username | salary 
+-------------+----------+--------
+ Engineering | alice    | 140000
+ Engineering | bob      | 130000
+ Engineering | frank    | 125000
+ Sales       | charlie  | 110000
+ Sales       | david    | 115000
+ Executive   | eva      | 160000
+(6 rows)
+
+-- 10. Transaction Rollback Coordination
+BEGIN;
+INSERT INTO ft_sessions (key, user_id, status, data)
+VALUES ('sess:rollback_test', 999, 'transient', '{}');
+SELECT key FROM ft_sessions WHERE key = 'sess:rollback_test';
+        key         
+--------------------
+ sess:rollback_test
+(1 row)
+
+ROLLBACK;
+SELECT key FROM ft_sessions WHERE key = 'sess:rollback_test';
+ key 
+-----
+(0 rows)
+
+-- Clean up
+DROP FOREIGN TABLE ft_users;
+DROP FOREIGN TABLE ft_sessions;
+DROP SERVER test_array_srv;
+DROP SERVER test_map_srv;

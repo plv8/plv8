@@ -917,7 +917,7 @@ static Datum CallFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 static Datum CallSRFunction(PG_FUNCTION_ARGS, plv8_exec_env *xenv,
 		int nargs, plv8_type argtypes[], plv8_type *rettype);
 static Datum CallTrigger(PG_FUNCTION_ARGS, plv8_exec_env *xenv);
-static plv8_context *GetPlv8Context();
+plv8_context *GetPlv8Context();
 static Local<ObjectTemplate> GetGlobalObjectTemplate(Isolate *isolate);
 
 /* A GUC to specify a custom start up function to call */
@@ -2085,6 +2085,8 @@ plv8_xact_cb(XactEvent event, void *arg)
 	plv8_cached_tle_fp_valid = false;
 	if (event == XACT_EVENT_ABORT || event == XACT_EVENT_PARALLEL_ABORT)
 		plv8_catalog_gen++;
+
+	plv8_fdw_xact_cb(event);
 
 
 	while (env)
@@ -4834,7 +4836,7 @@ charToText(char *string)
 	return result;
 }
 
-static plv8_context*
+plv8_context*
 GetPlv8Context() {
 	Oid					user_id = GetUserId();
 	unsigned int		i;
@@ -5005,6 +5007,7 @@ GetPlv8Context() {
 		 * recursively may want to the global context.
 		 */
 		ContextVector.push_back(my_context);
+		plv8_fdw_init_context(my_context);
 
 		/*
 		 * Run the start up procedure if configured.

@@ -175,6 +175,7 @@ PGDLLEXPORT Datum plv8_fdw_validator(PG_FUNCTION_ARGS);
 
 void plv8_fdw_init_context(plv8_context *context);
 void plv8_fdw_xact_cb(XactEvent event);
+void plv8_fdw_subxact_cb(SubXactEvent event, SubTransactionId mySubid, SubTransactionId parentSubid);
 void plv8_fdw_reset(Oid user_id);
 void plv8_fdw_relcache_cb(Datum arg, Oid relid);
 

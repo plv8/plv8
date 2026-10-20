@@ -49,6 +49,9 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
     getEstimatedPages() { return 10; }
     commit() {}
     rollback() {}
+    subxactStart(mySubid, parentSubid) {}
+    subxactCommit(mySubid, parentSubid) {}
+    subxactAbort(mySubid, parentSubid) {}
     explain(quals, projectedColumns) { return []; }
   }
 
@@ -122,6 +125,7 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
         ['sess:4', { key: 'sess:4', user_id: 104, status: 'active',  data: JSON.stringify({theme: 'dark'}) }]
       ]);
       this._undoLog = [];
+      this._subxactStack = [];
     }
     get rowidColumn() { return 'key'; }
     get batchSize() { return 50; }
@@ -203,8 +207,44 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
       }
       return 0;
     }
+    subxactStart(mySubid, parentSubid) {
+      this._subxactStack.push({ subid: mySubid, undoCount: this._undoLog.length });
+    }
+    subxactCommit(mySubid, parentSubid) {
+      for (let i = this._subxactStack.length - 1; i >= 0; i--) {
+        if (this._subxactStack[i].subid === mySubid) {
+          this._subxactStack.splice(i, 1);
+          break;
+        }
+      }
+    }
+    subxactAbort(mySubid, parentSubid) {
+      let idx = -1;
+      for (let i = this._subxactStack.length - 1; i >= 0; i--) {
+        if (this._subxactStack[i].subid === mySubid) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx !== -1) {
+        const targetCount = this._subxactStack[idx].undoCount;
+        this._subxactStack.splice(idx);
+        while (this._undoLog.length > targetCount) {
+          const e = this._undoLog.pop();
+          if (e.op === 'insert') {
+            if (e.prev) this._map.set(e.key, e.prev);
+            else this._map.delete(e.key);
+          } else if (e.op === 'update' || e.op === 'delete') {
+            if (e.prev) this._map.set(e.key, e.prev);
+          }
+        }
+      } else {
+        this.rollback();
+      }
+    }
     commit() {
       this._undoLog = [];
+      this._subxactStack = [];
     }
     rollback() {
       while (this._undoLog.length > 0) {
@@ -216,6 +256,7 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
           if (e.prev) this._map.set(e.key, e.prev);
         }
       }
+      this._subxactStack = [];
     }
   }
 
@@ -227,6 +268,7 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
       super(options, columns);
       this._data = new Map();
       this._undoLog = [];
+      this._subxactStack = [];
     }
 
     get rowidColumn() {
@@ -408,8 +450,47 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
       return 0;
     }
 
+    subxactStart(mySubid, parentSubid) {
+      this._subxactStack.push({ subid: mySubid, undoCount: this._undoLog.length });
+    }
+
+    subxactCommit(mySubid, parentSubid) {
+      for (let i = this._subxactStack.length - 1; i >= 0; i--) {
+        if (this._subxactStack[i].subid === mySubid) {
+          this._subxactStack.splice(i, 1);
+          break;
+        }
+      }
+    }
+
+    subxactAbort(mySubid, parentSubid) {
+      let idx = -1;
+      for (let i = this._subxactStack.length - 1; i >= 0; i--) {
+        if (this._subxactStack[i].subid === mySubid) {
+          idx = i;
+          break;
+        }
+      }
+      if (idx !== -1) {
+        const targetCount = this._subxactStack[idx].undoCount;
+        this._subxactStack.splice(idx);
+        while (this._undoLog.length > targetCount) {
+          const e = this._undoLog.pop();
+          if (e.op === 'insert') {
+            if (e.prev) this._data.set(e.key, e.prev);
+            else this._data.delete(e.key);
+          } else if (e.op === 'update' || e.op === 'delete') {
+            if (e.prev) this._data.set(e.key, e.prev);
+          }
+        }
+      } else {
+        this.rollback();
+      }
+    }
+
     commit() {
       this._undoLog = [];
+      this._subxactStack = [];
     }
 
     rollback() {
@@ -422,6 +503,7 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
           if (e.prev) this._data.set(e.key, e.prev);
         }
       }
+      this._subxactStack = [];
     }
   }
 
@@ -451,14 +533,31 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
 
     getRelSize(quals, projectedColumns, limit) {
       let rows = 1000;
+      if (quals) {
+        for (const q of quals) {
+          if (q.field === 'id') {
+            if (q.operator === '=') {
+              rows = 1;
+              break;
+            } else if (q.operator === 'IN' && Array.isArray(q.value)) {
+              rows = Math.min(q.value.length, 1000);
+              break;
+            }
+          }
+        }
+      }
       if (limit != null && limit >= 0 && limit < rows) {
         rows = limit;
       }
       return [rows, 70];
     }
 
+    getPathKeys() {
+      return [{ column: 'id', ascending: true }];
+    }
+
     canPushdown(qual) {
-      return ['=', '<', '>', '<=', '>=', 'IN'].includes(qual.operator);
+      return ['=', '<>', '<', '>', '<=', '>=', 'IN', 'IS'].includes(qual.operator);
     }
 
     *execute(quals, projectedColumns, sortKeys, limit) {
@@ -469,18 +568,29 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
         effectiveLimit = Math.floor(this.limit);
       }
 
+      if (effectiveLimit !== null && effectiveLimit <= 0) return;
+
       let targetId = null;
+      let inIds = null;
       if (quals) {
         for (const q of quals) {
-          if (q.field === 'id' && q.operator === '=') {
-            targetId = Number(q.value);
-            break;
+          if (q.field === 'id') {
+            if (q.operator === '=') {
+              targetId = Number(q.value);
+            } else if (q.operator === 'IN' && Array.isArray(q.value)) {
+              inIds = q.value.map(v => Number(v));
+            }
           }
         }
       }
 
+      let baseSeed = 0;
+      if (this.options && this.options.seed != null) {
+        baseSeed = Number(this.options.seed) || 0;
+      }
+
       const generatePerson = (id) => {
-        let a = (id * 1664525 + 1013904223) >>> 0;
+        let a = ((id + baseSeed) * 1664525 + 1013904223) >>> 0;
         const nextRand = () => {
           a = (a + 0x6D2B79F5) >>> 0;
           let t = Math.imul(a ^ (a >>> 15), 1 | a);
@@ -507,6 +617,27 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
         };
       };
 
+      const matchesQuals = (person, qualsList) => {
+        if (!qualsList) return true;
+        for (const q of qualsList) {
+          const val = person[q.field];
+          if (q.operator === 'IS') {
+            if (q.value === null && val != null) return false;
+            if (q.value === 'NOT NULL' && val == null) return false;
+            continue;
+          }
+          if (val == null || q.value == null) return false;
+          if (q.operator === '=' && String(val) !== String(q.value)) return false;
+          if (q.operator === '<>' && String(val) === String(q.value)) return false;
+          if (q.operator === '<' && !(val < q.value)) return false;
+          if (q.operator === '>' && !(val > q.value)) return false;
+          if (q.operator === '<=' && !(val <= q.value)) return false;
+          if (q.operator === '>=' && !(val >= q.value)) return false;
+          if (q.operator === 'IN' && Array.isArray(q.value) && !q.value.some(v => String(v) === String(val))) return false;
+        }
+        return true;
+      };
+
       const project = (row) => {
         if (!projectedColumns || projectedColumns.length === 0) return row;
         const res = {};
@@ -516,30 +647,39 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
         return res;
       };
 
+      // 1. Direct O(1) point ID lookup pushdown
       if (targetId !== null) {
         if (targetId >= 1 && targetId <= 1000) {
-          yield project(generatePerson(targetId));
+          const person = generatePerson(targetId);
+          if (matchesQuals(person, quals)) {
+            yield project(person);
+          }
         }
         return;
       }
 
+      // 2. Batch IN ID lookup pushdown
+      if (inIds !== null) {
+        let yielded = 0;
+        const uniqueIds = Array.from(new Set(inIds)).sort((a, b) => a - b);
+        for (const id of uniqueIds) {
+          if (id >= 1 && id <= 1000) {
+            const person = generatePerson(id);
+            if (matchesQuals(person, quals)) {
+              yield project(person);
+              yielded++;
+              if (effectiveLimit !== null && yielded >= effectiveLimit) break;
+            }
+          }
+        }
+        return;
+      }
+
+      // 3. Sequential scan over 1..1000 records
       let yielded = 0;
       for (let i = 1; i <= 1000; i++) {
         const person = generatePerson(i);
-        let match = true;
-        if (quals) {
-          for (const q of quals) {
-            const val = person[q.field];
-            if (val == null || q.value == null) { match = false; break; }
-            if (q.operator === '=' && val != q.value) { match = false; break; }
-            if (q.operator === '<' && !(val < q.value)) { match = false; break; }
-            if (q.operator === '>' && !(val > q.value)) { match = false; break; }
-            if (q.operator === '<=' && !(val <= q.value)) { match = false; break; }
-            if (q.operator === '>=' && !(val >= q.value)) { match = false; break; }
-            if (q.operator === 'IN' && Array.isArray(q.value) && !q.value.some(v => v == val)) { match = false; break; }
-          }
-        }
-        if (!match) continue;
+        if (!matchesQuals(person, quals)) continue;
 
         yield project(person);
         yielded++;
@@ -670,6 +810,54 @@ plv8_fdw_xact_cb(XactEvent event)
         Local<Function> fn = Local<Function>::Cast(fn_val);
         TryCatch tc(isolate);
         (void) fn->Call(ctx, inst, 0, nullptr);
+      }
+    }
+  }
+  catch (...) {}
+}
+
+void
+plv8_fdw_subxact_cb(SubXactEvent event, SubTransactionId mySubid,
+                    SubTransactionId parentSubid)
+{
+  if (session_wrapper_instances.empty()) return;
+
+  const char *method_name = nullptr;
+  if (event == SUBXACT_EVENT_START_SUB) {
+    method_name = "subxactStart";
+  } else if (event == SUBXACT_EVENT_COMMIT_SUB) {
+    method_name = "subxactCommit";
+  } else if (event == SUBXACT_EVENT_ABORT_SUB) {
+    method_name = "subxactAbort";
+  }
+  if (!method_name) return;
+
+  try {
+    plv8_context *context = GetPlv8Context();
+    if (!context || !context->isolate) return;
+    CurrentContextScope ccs(context);
+    Isolate *isolate = context->isolate;
+    Isolate::Scope iso_scope(isolate);
+    HandleScope handle_scope(isolate);
+    Local<Context> ctx = context->localContext();
+    Context::Scope ctx_scope(ctx);
+
+    Local<String> m_str = String::NewFromUtf8(isolate, method_name, NewStringType::kInternalized).ToLocalChecked();
+    Local<Value> args[2] = {
+      v8::Number::New(isolate, (double) mySubid),
+      v8::Number::New(isolate, (double) parentSubid)
+    };
+
+    for (auto &pair : session_wrapper_instances) {
+      if (pair.first.user_id != context->user_id) continue;
+      if (pair.second.IsEmpty()) continue;
+
+      Local<Object> inst = pair.second.Get(isolate);
+      Local<Value> fn_val;
+      if (inst->Get(ctx, m_str).ToLocal(&fn_val) && fn_val->IsFunction()) {
+        Local<Function> fn = Local<Function>::Cast(fn_val);
+        TryCatch tc(isolate);
+        (void) fn->Call(ctx, inst, 2, args);
       }
     }
   }

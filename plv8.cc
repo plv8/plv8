@@ -2075,6 +2075,8 @@ plv8_subxact_cb(SubXactEvent event, SubTransactionId mySubid,
 {
 	if (event == SUBXACT_EVENT_ABORT_SUB)
 		plv8_catalog_gen++;
+
+	plv8_fdw_subxact_cb(event, mySubid, parentSubid);
 }
 
 static void

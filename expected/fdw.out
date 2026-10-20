@@ -318,6 +318,38 @@ SELECT id, name FROM ft_temp_products WHERE id = 99;
 ----+------
 (0 rows)
 
+-- Nested Savepoint and Subtransaction Rollback Coordination
+BEGIN;
+INSERT INTO ft_temp_products (id, name, category, price, in_stock)
+VALUES (100, 'Tablet', 'electronics', 499.00, true);
+SAVEPOINT sp1;
+INSERT INTO ft_temp_products (id, name, category, price, in_stock)
+VALUES (101, 'Smartwatch', 'electronics', 249.00, true);
+SAVEPOINT sp2;
+INSERT INTO ft_temp_products (id, name, category, price, in_stock)
+VALUES (102, 'Fitness Band', 'electronics', 79.00, true);
+ROLLBACK TO SAVEPOINT sp2;
+SELECT id, name FROM ft_temp_products WHERE id IN (100, 101, 102) ORDER BY id;
+ id  |    name    
+-----+------------
+ 100 | Tablet
+ 101 | Smartwatch
+(2 rows)
+
+ROLLBACK TO SAVEPOINT sp1;
+SELECT id, name FROM ft_temp_products WHERE id IN (100, 101, 102) ORDER BY id;
+ id  |  name  
+-----+--------
+ 100 | Tablet
+(1 row)
+
+COMMIT;
+SELECT id, name FROM ft_temp_products WHERE id IN (100, 101, 102) ORDER BY id;
+ id  |  name  
+-----+--------
+ 100 | Tablet
+(1 row)
+
 -- 14. RandomPeopleFdw: Synthetic Personal Info Table with Limit Pushdown
 CREATE SERVER test_rand_srv FOREIGN DATA WRAPPER plv8_fdw OPTIONS (wrapper 'RandomPeopleFdw');
 CREATE FOREIGN TABLE ft_random_people (
@@ -372,6 +404,55 @@ SELECT id, first_name, last_name, email, age, city FROM ft_random_people WHERE i
 ----+------------+-----------+---------------------------------+-----+--------------
  42 | Margaret   | Martinez  | margaret.martinez42@example.com |  24 | Indianapolis
 (1 row)
+
+-- Point ID lookup with additional non-matching predicate (must return 0 rows)
+SELECT id, first_name, city FROM ft_random_people WHERE id = 42 AND city = 'Atlantis';
+ id | first_name | city 
+----+------------+------
+(0 rows)
+
+-- Point ID lookup with matching predicate
+SELECT id, first_name, city FROM ft_random_people WHERE id = 42 AND city = 'Indianapolis';
+ id | first_name |     city     
+----+------------+--------------
+ 42 | Margaret   | Indianapolis
+(1 row)
+
+-- Batch IN list ID lookup with limit pushdown
+SELECT id, first_name FROM ft_random_people WHERE id IN (1, 5, 9999) LIMIT 2;
+ id | first_name 
+----+------------
+  1 | Margaret
+  5 | Anthony
+(2 rows)
+
+-- Order by ID with pushed limit (sort elimination via pathkeys)
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT id, first_name FROM ft_random_people ORDER BY id ASC LIMIT 5;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Limit
+   Output: id, first_name
+   ->  Foreign Scan on public.ft_random_people
+         Output: id, first_name
+         Pushed Limit: 5
+(5 rows)
+
+SELECT id, first_name FROM ft_random_people ORDER BY id ASC LIMIT 5;
+ id | first_name 
+----+------------
+  1 | Margaret
+  2 | Patricia
+  3 | Patricia
+  4 | James
+  5 | Anthony
+(5 rows)
+
+-- Zero limit test (must return 0 rows)
+SELECT id FROM ft_random_people LIMIT 0;
+ id 
+----
+(0 rows)
 
 -- Filter combined with limit pushdown
 SELECT id, first_name, age, city FROM ft_random_people WHERE age >= 50 LIMIT 3;

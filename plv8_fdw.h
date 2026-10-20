@@ -98,6 +98,7 @@ struct Plv8FdwScanState {
   MemoryContext scan_mcxt;
   MemoryContextCallback cleanup_cb;
   bool eof_reached;
+  int64 limit_tuples;
 
   // Caching subsystem
   bool cache_enabled;

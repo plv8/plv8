@@ -221,6 +221,337 @@ static const char *plv8_fdw_bootstrap_js = R"JS(
 
   plv8.MapTableFdw = MapTableFdw;
   globalThis.MapTableFdw = MapTableFdw;
+
+  class TempTableFdw extends ForeignDataWrapper {
+    constructor(options, columns) {
+      super(options, columns);
+      this._data = new Map();
+      this._undoLog = [];
+    }
+
+    get rowidColumn() {
+      if (this.options && (this.options.pk || this.options.rowid_column || this.options.key)) {
+        return this.options.pk || this.options.rowid_column || this.options.key;
+      }
+      if (this.columns && this.columns.id) return 'id';
+      if (this.columns && this.columns.key) return 'key';
+      const colNames = Object.keys(this.columns || {});
+      return colNames.length > 0 ? colNames[0] : 'id';
+    }
+
+    get batchSize() { return 50; }
+
+    getRelSize(quals, projectedColumns, limit) {
+      const pk = this.rowidColumn;
+      let estimatedRows = this._data.size > 0 ? this._data.size : 1000;
+      if (quals) {
+        for (const q of quals) {
+          if (q.field === pk) {
+            if (q.operator === '=') {
+              estimatedRows = 1;
+              break;
+            } else if (q.operator === 'IN' && Array.isArray(q.value)) {
+              estimatedRows = Math.min(q.value.length, this._data.size || q.value.length);
+              break;
+            }
+          }
+        }
+      }
+      if (limit != null && limit >= 0 && limit < estimatedRows) {
+        estimatedRows = limit;
+      }
+      return [estimatedRows, 64];
+    }
+
+    getPathKeys() {
+      const pk = this.rowidColumn;
+      return [{ column: pk, ascending: true }];
+    }
+
+    canPushdown(qual) {
+      return ['=', '<>', '<', '>', '<=', '>=', 'IN', 'IS'].includes(qual.operator);
+    }
+
+    *execute(quals, projectedColumns, sortKeys, limit) {
+      const pk = this.rowidColumn;
+      let targetPk = null;
+      let inPks = null;
+      const otherQuals = [];
+
+      if (quals) {
+        for (const q of quals) {
+          if (q.field === pk && q.operator === '=') {
+            targetPk = q.value;
+          } else if (q.field === pk && q.operator === 'IN' && Array.isArray(q.value)) {
+            inPks = new Set(q.value.map(v => String(v)));
+          } else {
+            otherQuals.push(q);
+          }
+        }
+      }
+
+      const matchesOtherQuals = (row) => {
+        for (const q of otherQuals) {
+          const val = row[q.field];
+          if (q.operator === 'IS') {
+            if (q.value === null && val != null) return false;
+            if (q.value === 'NOT NULL' && val == null) return false;
+            continue;
+          }
+          if (val == null || q.value == null) return false;
+          if (q.operator === '=' && String(val) !== String(q.value)) return false;
+          if (q.operator === '<>' && String(val) === String(q.value)) return false;
+          if (q.operator === '<' && !(val < q.value)) return false;
+          if (q.operator === '>' && !(val > q.value)) return false;
+          if (q.operator === '<=' && !(val <= q.value)) return false;
+          if (q.operator === '>=' && !(val >= q.value)) return false;
+          if (q.operator === 'IN' && Array.isArray(q.value) && !q.value.some(v => String(v) === String(val))) return false;
+        }
+        return true;
+      };
+
+      const project = (row) => {
+        if (!projectedColumns || projectedColumns.length === 0) return row;
+        const res = {};
+        for (const c of projectedColumns) {
+          if (Object.prototype.hasOwnProperty.call(row, c)) res[c] = row[c];
+        }
+        return res;
+      };
+
+      // 1. Direct O(1) indexed key lookup pushdown
+      if (targetPk !== null) {
+        const row = this._data.get(String(targetPk));
+        if (row && matchesOtherQuals(row)) {
+          yield project(row);
+        }
+        return;
+      }
+
+      // 2. Batch IN primary key lookup pushdown
+      if (inPks !== null) {
+        for (const k of inPks) {
+          const row = this._data.get(k);
+          if (row && matchesOtherQuals(row)) {
+            yield project(row);
+          }
+        }
+        return;
+      }
+
+      // 3. Sequential scan over in-memory table
+      for (const row of this._data.values()) {
+        if (matchesOtherQuals(row)) {
+          yield project(row);
+        }
+      }
+    }
+
+    insert(values) {
+      const pk = this.rowidColumn;
+      const keyVal = values[pk];
+      if (keyVal === undefined || keyVal === null) {
+        throw new Error("Missing required primary key '" + pk + "'");
+      }
+      const strKey = String(keyVal);
+      const prev = this._data.get(strKey);
+      this._undoLog.push({ op: 'insert', key: strKey, prev: prev });
+      const copy = Object.assign({}, values);
+      this._data.set(strKey, copy);
+      return copy;
+    }
+
+    update(rowid, newValues) {
+      const strKey = String(rowid);
+      const existing = this._data.get(strKey);
+      if (!existing) {
+        throw new Error("Row not found for key: " + rowid);
+      }
+      this._undoLog.push({ op: 'update', key: strKey, prev: Object.assign({}, existing) });
+      const pk = this.rowidColumn;
+      const updated = Object.assign({}, existing, newValues);
+      updated[pk] = rowid;
+      this._data.set(strKey, updated);
+      return updated;
+    }
+
+    delete(rowid) {
+      const strKey = String(rowid);
+      const existing = this._data.get(strKey);
+      if (existing) {
+        this._undoLog.push({ op: 'delete', key: strKey, prev: Object.assign({}, existing) });
+        this._data.delete(strKey);
+      }
+    }
+
+    batchInsert(rows) {
+      for (const r of rows) this.insert(r);
+    }
+
+    directModify(operation, quals, newValues) {
+      if (operation === 'DELETE') {
+        let count = 0;
+        for (const [k, v] of Array.from(this._data.entries())) {
+          let match = true;
+          if (quals) {
+            for (const q of quals) {
+              if (q.operator === '=' && String(v[q.field]) !== String(q.value)) { match = false; break; }
+            }
+          }
+          if (match) {
+            this.delete(k);
+            count++;
+          }
+        }
+        return count;
+      }
+      return 0;
+    }
+
+    commit() {
+      this._undoLog = [];
+    }
+
+    rollback() {
+      while (this._undoLog.length > 0) {
+        const e = this._undoLog.pop();
+        if (e.op === 'insert') {
+          if (e.prev) this._data.set(e.key, e.prev);
+          else this._data.delete(e.key);
+        } else if (e.op === 'update' || e.op === 'delete') {
+          if (e.prev) this._data.set(e.key, e.prev);
+        }
+      }
+    }
+  }
+
+  plv8.TempTableFdw = TempTableFdw;
+  globalThis.TempTableFdw = TempTableFdw;
+
+  class RandomPeopleFdw extends ForeignDataWrapper {
+    constructor(options, columns) {
+      super(options, columns);
+      this._firstNames = [
+        'James', 'Mary', 'John', 'Patricia', 'Robert', 'Jennifer', 'Michael', 'Linda',
+        'William', 'Elizabeth', 'David', 'Barbara', 'Richard', 'Susan', 'Joseph', 'Jessica',
+        'Thomas', 'Sarah', 'Charles', 'Karen', 'Christopher', 'Nancy', 'Daniel', 'Lisa',
+        'Matthew', 'Betty', 'Anthony', 'Margaret', 'Mark', 'Sandra'
+      ];
+      this._lastNames = [
+        'Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis',
+        'Rodriguez', 'Martinez', 'Hernandez', 'Lopez', 'Gonzalez', 'Wilson', 'Anderson',
+        'Thomas', 'Taylor', 'Moore', 'Jackson', 'Martin', 'Lee', 'Perez', 'Thompson', 'White'
+      ];
+      this._cities = [
+        'New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix', 'Philadelphia',
+        'San Antonio', 'San Diego', 'Dallas', 'San Jose', 'Austin', 'Jacksonville',
+        'Fort Worth', 'Columbus', 'Charlotte', 'San Francisco', 'Indianapolis', 'Seattle'
+      ];
+    }
+
+    getRelSize(quals, projectedColumns, limit) {
+      let rows = 1000;
+      if (limit != null && limit >= 0 && limit < rows) {
+        rows = limit;
+      }
+      return [rows, 70];
+    }
+
+    canPushdown(qual) {
+      return ['=', '<', '>', '<=', '>=', 'IN'].includes(qual.operator);
+    }
+
+    *execute(quals, projectedColumns, sortKeys, limit) {
+      let effectiveLimit = null;
+      if (limit != null && limit >= 0) {
+        effectiveLimit = Math.floor(limit);
+      } else if (this.limit != null && this.limit >= 0) {
+        effectiveLimit = Math.floor(this.limit);
+      }
+
+      let targetId = null;
+      if (quals) {
+        for (const q of quals) {
+          if (q.field === 'id' && q.operator === '=') {
+            targetId = Number(q.value);
+            break;
+          }
+        }
+      }
+
+      const generatePerson = (id) => {
+        let a = (id * 1664525 + 1013904223) >>> 0;
+        const nextRand = () => {
+          a = (a + 0x6D2B79F5) >>> 0;
+          let t = Math.imul(a ^ (a >>> 15), 1 | a);
+          t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+
+        const fnIdx = Math.floor(nextRand() * this._firstNames.length);
+        const lnIdx = Math.floor(nextRand() * this._lastNames.length);
+        const cityIdx = Math.floor(nextRand() * this._cities.length);
+        const firstName = this._firstNames[fnIdx];
+        const lastName = this._lastNames[lnIdx];
+        const age = 18 + Math.floor(nextRand() * 65);
+        const email = firstName.toLowerCase() + '.' + lastName.toLowerCase() + id + '@example.com';
+        const city = this._cities[cityIdx];
+
+        return {
+          id: id,
+          first_name: firstName,
+          last_name: lastName,
+          email: email,
+          age: age,
+          city: city
+        };
+      };
+
+      const project = (row) => {
+        if (!projectedColumns || projectedColumns.length === 0) return row;
+        const res = {};
+        for (const c of projectedColumns) {
+          if (Object.prototype.hasOwnProperty.call(row, c)) res[c] = row[c];
+        }
+        return res;
+      };
+
+      if (targetId !== null) {
+        if (targetId >= 1 && targetId <= 1000) {
+          yield project(generatePerson(targetId));
+        }
+        return;
+      }
+
+      let yielded = 0;
+      for (let i = 1; i <= 1000; i++) {
+        const person = generatePerson(i);
+        let match = true;
+        if (quals) {
+          for (const q of quals) {
+            const val = person[q.field];
+            if (val == null || q.value == null) { match = false; break; }
+            if (q.operator === '=' && val != q.value) { match = false; break; }
+            if (q.operator === '<' && !(val < q.value)) { match = false; break; }
+            if (q.operator === '>' && !(val > q.value)) { match = false; break; }
+            if (q.operator === '<=' && !(val <= q.value)) { match = false; break; }
+            if (q.operator === '>=' && !(val >= q.value)) { match = false; break; }
+            if (q.operator === 'IN' && Array.isArray(q.value) && !q.value.some(v => v == val)) { match = false; break; }
+          }
+        }
+        if (!match) continue;
+
+        yield project(person);
+        yielded++;
+        if (effectiveLimit !== null && yielded >= effectiveLimit) {
+          break;
+        }
+      }
+    }
+  }
+
+  plv8.RandomPeopleFdw = RandomPeopleFdw;
+  globalThis.RandomPeopleFdw = RandomPeopleFdw;
 })();
 )JS";
 
@@ -680,6 +1011,19 @@ plv8_fdw_get_foreign_rel_size(PlannerInfo *root, RelOptInfo *baserel, Oid foreig
       (void) quals_arr->Set(ctx, (uint32_t) i, plv8_fdw_qual_to_js(ctx, isolate, candidate_quals[i]));
     }
 
+    // Check if limit is present in planner root
+    int64 limit_tuples = -1;
+    if (root->limit_tuples > 0.0 && root->limit_tuples < 1e12) {
+      limit_tuples = (int64) std::ceil(root->limit_tuples);
+    } else if (root->parse && root->parse->limitCount && IsA(root->parse->limitCount, Const) &&
+               !((Const *) root->parse->limitCount)->constisnull) {
+      limit_tuples = DatumGetInt64(((Const *) root->parse->limitCount)->constvalue);
+      if (root->parse->limitOffset && IsA(root->parse->limitOffset, Const) &&
+          !((Const *) root->parse->limitOffset)->constisnull) {
+        limit_tuples += DatumGetInt64(((Const *) root->parse->limitOffset)->constvalue);
+      }
+    }
+
     Local<Array> proj_arr = Array::New(isolate);
     Local<Value> fn_val;
     double estimated_rows = 1000.0;
@@ -687,10 +1031,13 @@ plv8_fdw_get_foreign_rel_size(PlannerInfo *root, RelOptInfo *baserel, Oid foreig
 
     if (wrapper->Get(ctx, String::NewFromUtf8Literal(isolate, "getRelSize")).ToLocal(&fn_val) && fn_val->IsFunction()) {
       Local<Function> fn = fn_val.As<Function>();
-      Local<Value> args[2] = {quals_arr, proj_arr};
+      Local<Value> limit_arg = (limit_tuples >= 0) ?
+          Local<Value>(v8::Number::New(isolate, (double) limit_tuples)) :
+          Local<Value>(v8::Null(isolate));
+      Local<Value> args[3] = {quals_arr, proj_arr, limit_arg};
       TryCatch tc(isolate);
       Local<Value> res_val;
-      if (fn->Call(ctx, wrapper, 2, args).ToLocal(&res_val) && res_val->IsArray()) {
+      if (fn->Call(ctx, wrapper, 3, args).ToLocal(&res_val) && res_val->IsArray()) {
         Local<Array> res_arr = res_val.As<Array>();
         if (res_arr->Length() >= 1) {
           Local<Value> r0 = res_arr->Get(ctx, 0).ToLocalChecked();
@@ -701,6 +1048,10 @@ plv8_fdw_get_foreign_rel_size(PlannerInfo *root, RelOptInfo *baserel, Oid foreig
           if (r1->IsInt32()) estimated_width = r1->Int32Value(ctx).FromMaybe(50);
         }
       }
+    }
+
+    if (root->sort_pathkeys == NIL && candidate_quals.empty() && limit_tuples >= 0 && limit_tuples < estimated_rows) {
+      estimated_rows = (double) limit_tuples;
     }
 
     baserel->rows = clamp_row_est(estimated_rows);
@@ -926,12 +1277,37 @@ plv8_fdw_get_foreign_plan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntab
   scan_clauses = extract_actual_clauses(local_quals, false);
   fdw_clauses = extract_actual_clauses(fdw_clauses, false);
 
+  int64 limit_tuples = -1;
+  if (root->limit_tuples > 0.0 && root->limit_tuples < 1e12) {
+    limit_tuples = (int64) std::ceil(root->limit_tuples);
+  } else if (root->parse && root->parse->limitCount && IsA(root->parse->limitCount, Const) &&
+             !((Const *) root->parse->limitCount)->constisnull) {
+    limit_tuples = DatumGetInt64(((Const *) root->parse->limitCount)->constvalue);
+    if (root->parse->limitOffset && IsA(root->parse->limitOffset, Const) &&
+        !((Const *) root->parse->limitOffset)->constisnull) {
+      limit_tuples += DatumGetInt64(((Const *) root->parse->limitOffset)->constvalue);
+    }
+  }
+
+  bool has_sort_needed = false;
+  if (root->sort_pathkeys != NIL) {
+    if (!best_path->path.pathkeys || !pathkeys_contained_in(root->sort_pathkeys, best_path->path.pathkeys)) {
+      has_sort_needed = true;
+    }
+  }
+
+  if (has_sort_needed || local_quals != NIL) {
+    limit_tuples = -1;
+  }
+
+  List *fdw_private = list_make1(makeInteger((int) limit_tuples));
+
   return make_foreignscan(
       tlist,
       scan_clauses,
       baserel->relid,
       fdw_clauses,
-      NIL,
+      fdw_private,
       NIL,
       NIL,
       outer_plan);
@@ -1046,11 +1422,21 @@ plv8_fdw_invoke_execute(Plv8FdwScanState *festate, ForeignScanState *node)
     throw js_error("wrapper.execute is not a function");
   }
 
+  Local<Value> limit_val;
+  if (festate->limit_tuples >= 0) {
+    limit_val = v8::Number::New(isolate, (double) festate->limit_tuples);
+  } else {
+    limit_val = v8::Null(isolate);
+  }
+  (void) wrapper->Set(ctx, String::NewFromUtf8Literal(isolate, "limit"), limit_val);
+  (void) wrapper->Set(ctx, String::NewFromUtf8Literal(isolate, "currentLimit"), limit_val);
+
   Local<Function> exec_fn = exec_val.As<Function>();
-  Local<Value> args[2] = {quals_arr, proj_arr};
+  Local<Array> sort_keys_arr = Array::New(isolate);
+  Local<Value> args[4] = {quals_arr, proj_arr, sort_keys_arr, limit_val};
   TryCatch try_catch(isolate);
   Local<Value> iter_val;
-  if (!exec_fn->Call(ctx, wrapper, 2, args).ToLocal(&iter_val) || !iter_val->IsObject()) {
+  if (!exec_fn->Call(ctx, wrapper, 4, args).ToLocal(&iter_val) || !iter_val->IsObject()) {
     if (try_catch.HasCaught()) throw js_error(try_catch);
     throw js_error("wrapper.execute did not return an iterable or generator object");
   }
@@ -1132,6 +1518,13 @@ plv8_fdw_begin_foreign_scan(ForeignScanState *node, int eflags)
     festate->scan_mcxt = scan_mcxt;
     festate->eof_reached = false;
     festate->fdw_clauses = plan->fdw_exprs;
+    festate->limit_tuples = -1;
+    if (plan->fdw_private != NIL && list_length(plan->fdw_private) >= 1) {
+      Node *n = (Node *) linitial(plan->fdw_private);
+      if (n && IsA(n, Integer)) {
+        festate->limit_tuples = ((struct ::Integer *) n)->ival;
+      }
+    }
 
     // Register RAII cleanup callback to guarantee handle disposal on query abort or normal exit
     festate->cleanup_cb.func = plv8_fdw_scan_cleanup_callback;
@@ -1462,8 +1855,13 @@ plv8_fdw_add_foreign_update_targets(PlannerInfo *root, Index rtindex, RangeTblEn
   if (it != opts.end()) {
     rowid_col = it->second;
   } else {
-    auto it_key = opts.find("key");
-    if (it_key != opts.end()) rowid_col = it_key->second;
+    auto it_pk = opts.find("pk");
+    if (it_pk != opts.end()) {
+      rowid_col = it_pk->second;
+    } else {
+      auto it_key = opts.find("key");
+      if (it_key != opts.end()) rowid_col = it_key->second;
+    }
   }
 
   TupleDesc tupdesc = RelationGetDescr(target_relation);
@@ -1588,10 +1986,16 @@ plv8_fdw_begin_foreign_modify(ModifyTableState *mtstate, ResultRelInfo *rinfo, L
 
     std::string rowid_col = "id";
     auto it_r = opts.find("rowid_column");
-    if (it_r != opts.end()) rowid_col = it_r->second;
-    else {
-      auto it_k = opts.find("key");
-      if (it_k != opts.end()) rowid_col = it_k->second;
+    if (it_r != opts.end()) {
+      rowid_col = it_r->second;
+    } else {
+      auto it_pk = opts.find("pk");
+      if (it_pk != opts.end()) {
+        rowid_col = it_pk->second;
+      } else {
+        auto it_k = opts.find("key");
+        if (it_k != opts.end()) rowid_col = it_k->second;
+      }
     }
     fmstate->rowid_colname = rowid_col;
     fmstate->rowid_type = TEXTOID;
@@ -2045,6 +2449,17 @@ plv8_fdw_end_direct_modify(ForeignScanState *node)
 static void
 plv8_fdw_explain_foreign_scan(ForeignScanState *node, ExplainState *es)
 {
+  ForeignScan *plan = (ForeignScan *) node->ss.ps.plan;
+  if (plan && plan->fdw_private != NIL && list_length(plan->fdw_private) >= 1) {
+    Node *n = (Node *) linitial(plan->fdw_private);
+    if (n && IsA(n, Integer)) {
+      int64 lim = ((struct ::Integer *) n)->ival;
+      if (lim >= 0) {
+        ExplainPropertyInteger("Pushed Limit", NULL, lim, es);
+      }
+    }
+  }
+
   Plv8FdwScanState *festate = (Plv8FdwScanState *) node->fdw_state;
   if (!festate) return;
 
@@ -2108,6 +2523,9 @@ plv8_fdw_validator(PG_FUNCTION_ARGS)
       "rowid_column",
       "batch_size",
       "key",
+      "pk",
+      "seed",
+      "limit",
       "direct_modify",
       nullptr
   };

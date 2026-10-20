@@ -110,11 +110,101 @@ SELECT plv8_reset();
 SELECT id, username FROM ft_users WHERE id = 101;
 SELECT key, user_id, status FROM ft_dm_sessions WHERE key = 'sess:1';
 
+-- 13. TempTableFdw: In-Memory Temporary Table with Primary Key Pushdown
+CREATE SERVER test_temp_srv FOREIGN DATA WRAPPER plv8_fdw OPTIONS (wrapper 'TempTableFdw', pk 'id');
+
+CREATE FOREIGN TABLE ft_temp_products (
+    id int,
+    name text,
+    category text,
+    price numeric,
+    in_stock boolean
+) SERVER test_temp_srv OPTIONS (rowid_column 'id');
+
+-- Insert initial records (single and multi-row batch)
+INSERT INTO ft_temp_products (id, name, category, price, in_stock) VALUES
+    (1, 'Laptop', 'electronics', 1299.99, true),
+    (2, 'Headphones', 'electronics', 199.50, true),
+    (3, 'Desk Chair', 'furniture', 349.00, false),
+    (4, 'Coffee Mug', 'kitchen', 14.95, true),
+    (5, 'Monitor', 'electronics', 450.00, true);
+
+-- Full sequential scan
+SELECT id, name, category, price, in_stock FROM ft_temp_products ORDER BY id;
+
+-- Point key lookup pushdown (O(1) indexed key lookup)
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT id, name, price FROM ft_temp_products WHERE id = 2;
+
+SELECT id, name, price FROM ft_temp_products WHERE id = 2;
+
+-- Batch IN key lookup pushdown
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT id, name, price FROM ft_temp_products WHERE id IN (1, 3, 5) ORDER BY id;
+
+SELECT id, name, price FROM ft_temp_products WHERE id IN (1, 3, 5) ORDER BY id;
+
+-- Multi-predicate filtering (category & price)
+SELECT id, name, price FROM ft_temp_products WHERE category = 'electronics' AND price < 500.00 ORDER BY id;
+
+-- DML: Update
+UPDATE ft_temp_products SET name = 'Over-Ear Headphones', price = 179.99, in_stock = false WHERE id = 2;
+SELECT id, name, price, in_stock FROM ft_temp_products WHERE id = 2;
+
+-- DML: Delete
+DELETE FROM ft_temp_products WHERE id = 4;
+SELECT id, name FROM ft_temp_products ORDER BY id;
+
+-- Transaction Rollback Coordination on temp table
+BEGIN;
+INSERT INTO ft_temp_products (id, name, category, price, in_stock)
+VALUES (99, 'Mechanical Keyboard', 'electronics', 129.00, true);
+SELECT id, name FROM ft_temp_products WHERE id = 99;
+ROLLBACK;
+
+SELECT id, name FROM ft_temp_products WHERE id = 99;
+
+-- 14. RandomPeopleFdw: Synthetic Personal Info Table with Limit Pushdown
+CREATE SERVER test_rand_srv FOREIGN DATA WRAPPER plv8_fdw OPTIONS (wrapper 'RandomPeopleFdw');
+
+CREATE FOREIGN TABLE ft_random_people (
+    id int,
+    first_name text,
+    last_name text,
+    email text,
+    age int,
+    city text
+) SERVER test_rand_srv;
+
+-- Full scan count (yields 1000 generated personal info records)
+SELECT count(*) FROM ft_random_people;
+
+-- Limit pushdown verification via EXPLAIN (VERBOSE, COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT id, first_name, last_name, city FROM ft_random_people LIMIT 5;
+
+-- Execution with pushed-down limit (generates and returns only 5 records)
+SELECT id, first_name, last_name, email, age, city FROM ft_random_people LIMIT 5;
+
+-- Limit 2 records
+SELECT id, first_name, last_name, city FROM ft_random_people LIMIT 2;
+
+-- Point ID lookup pushdown
+SELECT id, first_name, last_name, email, age, city FROM ft_random_people WHERE id = 42;
+
+-- Filter combined with limit pushdown
+SELECT id, first_name, age, city FROM ft_random_people WHERE age >= 50 LIMIT 3;
+
 -- Clean up
 DROP FOREIGN TABLE ft_users;
 DROP FOREIGN TABLE ft_sessions;
 DROP FOREIGN TABLE ft_dm_sessions;
+DROP FOREIGN TABLE ft_temp_products;
+DROP FOREIGN TABLE ft_random_people;
 DROP SERVER test_array_srv;
 DROP SERVER test_map_srv;
 DROP SERVER test_dm_srv;
+DROP SERVER test_temp_srv;
+DROP SERVER test_rand_srv;
+
 

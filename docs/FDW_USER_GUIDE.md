@@ -307,6 +307,113 @@ class MapTableFdw extends plv8.ForeignDataWrapper {
 }
 ```
 
+### 4.3 In-Memory Temporary Table (`TempTableFdw`)
+*Features: Primary key pushdown, configurable rowid column (`pk`/`rowid_column`), batch `IN` pushdown, index cost estimation, full DML, and transactional undo logging.*
+
+```javascript
+class TempTableFdw extends plv8.ForeignDataWrapper {
+  constructor(options, columns) {
+    super(options, columns);
+    this._data = new Map();
+    this._undoLog = [];
+  }
+
+  get rowidColumn() {
+    return this.options.pk || this.options.rowid_column || (this.columns.id ? 'id' : 'key');
+  }
+
+  getRelSize(quals, projectedColumns, limit) {
+    const pk = this.rowidColumn;
+    let estimatedRows = this._data.size > 0 ? this._data.size : 1000;
+    if (quals) {
+      for (const q of quals) {
+        if (q.field === pk) {
+          if (q.operator === '=') {
+            estimatedRows = 1;
+            break;
+          } else if (q.operator === 'IN' && Array.isArray(q.value)) {
+            estimatedRows = Math.min(q.value.length, this._data.size || q.value.length);
+            break;
+          }
+        }
+      }
+    }
+    if (limit != null && limit >= 0 && limit < estimatedRows) {
+      estimatedRows = limit;
+    }
+    return [estimatedRows, 64];
+  }
+
+  *execute(quals, projectedColumns, sortKeys, limit) {
+    const pk = this.rowidColumn;
+    let targetPk = null;
+    let inPks = null;
+    const otherQuals = [];
+
+    if (quals) {
+      for (const q of quals) {
+        if (q.field === pk && q.operator === '=') {
+          targetPk = q.value;
+        } else if (q.field === pk && q.operator === 'IN' && Array.isArray(q.value)) {
+          inPks = new Set(q.value.map(v => String(v)));
+        } else {
+          otherQuals.push(q);
+        }
+      }
+    }
+
+    if (targetPk !== null) {
+      const row = this._data.get(String(targetPk));
+      if (row) yield row;
+      return;
+    }
+
+    if (inPks !== null) {
+      for (const k of inPks) {
+        const row = this._data.get(k);
+        if (row) yield row;
+      }
+      return;
+    }
+
+    for (const row of this._data.values()) {
+      yield row;
+    }
+  }
+}
+```
+
+### 4.4 Synthetic Random People Generator Table (`RandomPeopleFdw`)
+*Features: On-the-fly personal info record generation (up to 1000 records), LIMIT pushdown (`limit_tuples`), fast point ID lookups, and predicate filtering.*
+
+```javascript
+class RandomPeopleFdw extends plv8.ForeignDataWrapper {
+  constructor(options, columns) {
+    super(options, columns);
+    this._firstNames = ['James', 'Mary', 'John', 'Patricia', 'Robert', 'Jennifer', ...];
+    this._lastNames = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', ...];
+    this._cities = ['New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix', ...];
+  }
+
+  getRelSize(quals, projectedColumns, limit) {
+    return [limit != null && limit >= 0 ? Math.min(limit, 1000) : 1000, 70];
+  }
+
+  *execute(quals, projectedColumns, sortKeys, limit) {
+    const effectiveLimit = limit != null && limit >= 0 ? Math.floor(limit) : null;
+    let yielded = 0;
+    for (let i = 1; i <= 1000; i++) {
+      const person = this.generatePerson(i);
+      if (this.matches(person, quals)) {
+        yield person;
+        yielded++;
+        if (effectiveLimit !== null && yielded >= effectiveLimit) break;
+      }
+    }
+  }
+}
+```
+
 ---
 
 ## 5. DML Operations & Transaction Coordination
@@ -357,5 +464,7 @@ SELECT * FROM in_memory_sessions WHERE key = 'sess:5';
 | `cache_results` | `SERVER` / `TABLE` | `'true'` | When enabled, buffers tuples during rescans (Tier 1 Tuplestore for unparameterized scans, Tier 2 LRU memoizer for parameterized joins). |
 | `cache_size` | `SERVER` / `TABLE` | `1000` | Maximum number of parameter entries retained in the LRU memoizer. |
 | `cache_memory_limit` | `SERVER` / `TABLE` | `'16MB'` | Maximum memory allocated to cached tuples before caching gracefully disables. |
-| `rowid_column` | `TABLE` | None | Column name representing the primary key / row identifier for `UPDATE` and `DELETE`. |
+| `rowid_column` / `pk` | `TABLE` | None | Column name representing the primary key / row identifier for `UPDATE` and `DELETE`. |
 | `batch_size` | `SERVER` / `TABLE` | `1` | Multi-row batch size for bulk `INSERT`. |
+| `seed` | `SERVER` / `TABLE` | None | Optional random seed for deterministic synthetic generators. |
+| `direct_modify` | `SERVER` / `TABLE` | `'false'` | Enables direct modify pushdown for bulk DELETE and UPDATE. |

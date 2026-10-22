@@ -1,0 +1,476 @@
+--
+-- plv8_fdw: PL/v8 Foreign Data Wrapper Regression Tests
+--
+-- 1. Verify FDW Handler and Validator
+SELECT proname FROM pg_proc WHERE proname IN ('plv8_fdw_handler', 'plv8_fdw_validator') ORDER BY 1;
+      proname       
+--------------------
+ plv8_fdw_handler
+ plv8_fdw_validator
+(2 rows)
+
+SELECT fdwname FROM pg_foreign_data_wrapper WHERE fdwname = 'plv8_fdw';
+ fdwname  
+----------
+ plv8_fdw
+(1 row)
+
+-- 2. Create ArrayTableFdw Server and Foreign Table
+CREATE SERVER test_array_srv FOREIGN DATA WRAPPER plv8_fdw OPTIONS (wrapper 'ArrayTableFdw');
+CREATE FOREIGN TABLE ft_users (
+    id int,
+    username text,
+    dept_id int,
+    role text,
+    salary numeric
+) SERVER test_array_srv;
+-- 3. Full sequential scan
+SELECT id, username, dept_id, role, salary FROM ft_users ORDER BY id;
+ id  | username | dept_id | role  | salary 
+-----+----------+---------+-------+--------
+ 101 | alice    |       1 | eng   | 140000
+ 102 | bob      |       1 | eng   | 130000
+ 103 | charlie  |       2 | sales | 110000
+ 104 | david    |       2 | sales | 115000
+ 105 | eva      |       3 | lead  | 160000
+ 106 | frank    |       1 | eng   | 125000
+(6 rows)
+
+-- 4. Column projection pruning
+SELECT username, salary FROM ft_users ORDER BY username;
+ username | salary 
+----------+--------
+ alice    | 140000
+ bob      | 130000
+ charlie  | 110000
+ david    | 115000
+ eva      | 160000
+ frank    | 125000
+(6 rows)
+
+-- 5. Filter pushdown: equality, comparison, IN, IS NOT NULL
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT username, salary FROM ft_users WHERE role = 'eng' AND salary > 125000;
+           QUERY PLAN            
+---------------------------------
+ Foreign Scan on public.ft_users
+   Output: username, salary
+(2 rows)
+
+SELECT username, salary FROM ft_users WHERE role = 'eng' AND salary > 125000 ORDER BY username;
+ username | salary 
+----------+--------
+ alice    | 140000
+ bob      | 130000
+(2 rows)
+
+SELECT username, role FROM ft_users WHERE role IN ('sales', 'lead') ORDER BY username;
+ username | role  
+----------+-------
+ charlie  | sales
+ david    | sales
+ eva      | lead
+(3 rows)
+
+-- 6. Pathkeys pre-sorted ordering
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT id, username FROM ft_users ORDER BY id ASC;
+           QUERY PLAN            
+---------------------------------
+ Foreign Scan on public.ft_users
+   Output: id, username
+(2 rows)
+
+-- 7. Create MapTableFdw Server and Foreign Table (Key-Indexed & DML)
+CREATE SERVER test_map_srv FOREIGN DATA WRAPPER plv8_fdw OPTIONS (wrapper 'MapTableFdw');
+CREATE FOREIGN TABLE ft_sessions (
+    key text,
+    user_id int,
+    status text,
+    data jsonb
+) SERVER test_map_srv OPTIONS (rowid_column 'key');
+-- Full scan
+SELECT key, user_id, status FROM ft_sessions ORDER BY key;
+  key   | user_id | status  
+--------+---------+---------
+ sess:1 |     101 | active
+ sess:2 |     102 | expired
+ sess:3 |     103 | active
+ sess:4 |     104 | active
+(4 rows)
+
+-- Point key lookup pushdown
+SELECT key, user_id, status FROM ft_sessions WHERE key = 'sess:1';
+  key   | user_id | status 
+--------+---------+--------
+ sess:1 |     101 | active
+(1 row)
+
+-- Batch IN key lookup pushdown
+SELECT key, user_id, status FROM ft_sessions WHERE key IN ('sess:1', 'sess:3') ORDER BY key;
+  key   | user_id | status 
+--------+---------+--------
+ sess:1 |     101 | active
+ sess:3 |     103 | active
+(2 rows)
+
+-- 8. DML Modifications
+-- INSERT
+INSERT INTO ft_sessions (key, user_id, status, data)
+VALUES ('sess:5', 105, 'active', '{"theme":"nord"}');
+SELECT key, user_id, status FROM ft_sessions WHERE key = 'sess:5';
+  key   | user_id | status 
+--------+---------+--------
+ sess:5 |     105 | active
+(1 row)
+
+-- UPDATE
+UPDATE ft_sessions SET status = 'revoked' WHERE key = 'sess:1';
+SELECT key, user_id, status FROM ft_sessions WHERE key = 'sess:1';
+  key   | user_id | status  
+--------+---------+---------
+ sess:1 |         | revoked
+(1 row)
+
+-- DELETE
+DELETE FROM ft_sessions WHERE key = 'sess:2';
+SELECT key, user_id, status FROM ft_sessions WHERE key = 'sess:2';
+ key | user_id | status 
+-----+---------+--------
+(0 rows)
+
+-- 9. Join Pushdown & Rescan Caching
+CREATE TEMP TABLE local_depts (
+    dept_id int PRIMARY KEY,
+    dept_name text
+);
+INSERT INTO local_depts VALUES (1, 'Engineering'), (2, 'Sales'), (3, 'Executive');
+SELECT d.dept_name, u.username, u.salary
+FROM local_depts d
+JOIN ft_users u ON u.dept_id = d.dept_id
+ORDER BY d.dept_id, u.id;
+  dept_name  | username | salary 
+-------------+----------+--------
+ Engineering | alice    | 140000
+ Engineering | bob      | 130000
+ Engineering | frank    | 125000
+ Sales       | charlie  | 110000
+ Sales       | david    | 115000
+ Executive   | eva      | 160000
+(6 rows)
+
+-- 10. Transaction Rollback Coordination
+BEGIN;
+INSERT INTO ft_sessions (key, user_id, status, data)
+VALUES ('sess:rollback_test', 999, 'transient', '{}');
+SELECT key FROM ft_sessions WHERE key = 'sess:rollback_test';
+        key         
+--------------------
+ sess:rollback_test
+(1 row)
+
+ROLLBACK;
+SELECT key FROM ft_sessions WHERE key = 'sess:rollback_test';
+ key 
+-----
+(0 rows)
+
+-- 11. Direct Modify Pushdown
+CREATE SERVER test_dm_srv FOREIGN DATA WRAPPER plv8_fdw OPTIONS (wrapper 'MapTableFdw', direct_modify 'true');
+CREATE FOREIGN TABLE ft_dm_sessions (
+    key text,
+    user_id int,
+    status text,
+    data jsonb
+) SERVER test_dm_srv OPTIONS (rowid_column 'key');
+EXPLAIN (VERBOSE, COSTS OFF)
+DELETE FROM ft_dm_sessions WHERE key = 'sess:3';
+                  QUERY PLAN                   
+-----------------------------------------------
+ Delete on public.ft_dm_sessions
+   ->  Foreign Delete on public.ft_dm_sessions
+(2 rows)
+
+DELETE FROM ft_dm_sessions WHERE key = 'sess:3';
+SELECT key FROM ft_dm_sessions WHERE key = 'sess:3';
+ key 
+-----
+(0 rows)
+
+-- 12. Session Reset Coordination
+SELECT plv8_reset();
+ plv8_reset 
+------------
+ 
+(1 row)
+
+SELECT id, username FROM ft_users WHERE id = 101;
+ id  | username 
+-----+----------
+ 101 | alice
+(1 row)
+
+SELECT key, user_id, status FROM ft_dm_sessions WHERE key = 'sess:1';
+  key   | user_id | status 
+--------+---------+--------
+ sess:1 |     101 | active
+(1 row)
+
+-- 13. TempTableFdw: In-Memory Temporary Table with Primary Key Pushdown
+CREATE SERVER test_temp_srv FOREIGN DATA WRAPPER plv8_fdw OPTIONS (wrapper 'TempTableFdw', pk 'id');
+CREATE FOREIGN TABLE ft_temp_products (
+    id int,
+    name text,
+    category text,
+    price numeric,
+    in_stock boolean
+) SERVER test_temp_srv OPTIONS (rowid_column 'id');
+-- Insert initial records (single and multi-row batch)
+INSERT INTO ft_temp_products (id, name, category, price, in_stock) VALUES
+    (1, 'Laptop', 'electronics', 1299.99, true),
+    (2, 'Headphones', 'electronics', 199.50, true),
+    (3, 'Desk Chair', 'furniture', 349.00, false),
+    (4, 'Coffee Mug', 'kitchen', 14.95, true),
+    (5, 'Monitor', 'electronics', 450.00, true);
+-- Full sequential scan
+SELECT id, name, category, price, in_stock FROM ft_temp_products ORDER BY id;
+ id |    name    |  category   |  price  | in_stock 
+----+------------+-------------+---------+----------
+  1 | Laptop     | electronics | 1299.99 | t
+  2 | Headphones | electronics |   199.5 | t
+  3 | Desk Chair | furniture   |     349 | f
+  4 | Coffee Mug | kitchen     |   14.95 | t
+  5 | Monitor    | electronics |     450 | t
+(5 rows)
+
+-- Point key lookup pushdown (O(1) indexed key lookup)
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT id, name, price FROM ft_temp_products WHERE id = 2;
+               QUERY PLAN                
+-----------------------------------------
+ Foreign Scan on public.ft_temp_products
+   Output: id, name, price
+(2 rows)
+
+SELECT id, name, price FROM ft_temp_products WHERE id = 2;
+ id |    name    | price 
+----+------------+-------
+  2 | Headphones | 199.5
+(1 row)
+
+-- Batch IN key lookup pushdown
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT id, name, price FROM ft_temp_products WHERE id IN (1, 3, 5) ORDER BY id;
+               QUERY PLAN                
+-----------------------------------------
+ Foreign Scan on public.ft_temp_products
+   Output: id, name, price
+(2 rows)
+
+SELECT id, name, price FROM ft_temp_products WHERE id IN (1, 3, 5) ORDER BY id;
+ id |    name    |  price  
+----+------------+---------
+  1 | Laptop     | 1299.99
+  3 | Desk Chair |     349
+  5 | Monitor    |     450
+(3 rows)
+
+-- Multi-predicate filtering (category & price)
+SELECT id, name, price FROM ft_temp_products WHERE category = 'electronics' AND price < 500.00 ORDER BY id;
+ id |    name    | price 
+----+------------+-------
+  2 | Headphones | 199.5
+  5 | Monitor    |   450
+(2 rows)
+
+-- DML: Update
+UPDATE ft_temp_products SET name = 'Over-Ear Headphones', price = 179.99, in_stock = false WHERE id = 2;
+SELECT id, name, price, in_stock FROM ft_temp_products WHERE id = 2;
+ id |        name         | price  | in_stock 
+----+---------------------+--------+----------
+  2 | Over-Ear Headphones | 179.99 | f
+(1 row)
+
+-- DML: Delete
+DELETE FROM ft_temp_products WHERE id = 4;
+SELECT id, name FROM ft_temp_products ORDER BY id;
+ id |        name         
+----+---------------------
+  1 | Laptop
+  2 | Over-Ear Headphones
+  3 | Desk Chair
+  5 | Monitor
+(4 rows)
+
+-- Transaction Rollback Coordination on temp table
+BEGIN;
+INSERT INTO ft_temp_products (id, name, category, price, in_stock)
+VALUES (99, 'Mechanical Keyboard', 'electronics', 129.00, true);
+SELECT id, name FROM ft_temp_products WHERE id = 99;
+ id |        name         
+----+---------------------
+ 99 | Mechanical Keyboard
+(1 row)
+
+ROLLBACK;
+SELECT id, name FROM ft_temp_products WHERE id = 99;
+ id | name 
+----+------
+(0 rows)
+
+-- Nested Savepoint and Subtransaction Rollback Coordination
+BEGIN;
+INSERT INTO ft_temp_products (id, name, category, price, in_stock)
+VALUES (100, 'Tablet', 'electronics', 499.00, true);
+SAVEPOINT sp1;
+INSERT INTO ft_temp_products (id, name, category, price, in_stock)
+VALUES (101, 'Smartwatch', 'electronics', 249.00, true);
+SAVEPOINT sp2;
+INSERT INTO ft_temp_products (id, name, category, price, in_stock)
+VALUES (102, 'Fitness Band', 'electronics', 79.00, true);
+ROLLBACK TO SAVEPOINT sp2;
+SELECT id, name FROM ft_temp_products WHERE id IN (100, 101, 102) ORDER BY id;
+ id  |    name    
+-----+------------
+ 100 | Tablet
+ 101 | Smartwatch
+(2 rows)
+
+ROLLBACK TO SAVEPOINT sp1;
+SELECT id, name FROM ft_temp_products WHERE id IN (100, 101, 102) ORDER BY id;
+ id  |  name  
+-----+--------
+ 100 | Tablet
+(1 row)
+
+COMMIT;
+SELECT id, name FROM ft_temp_products WHERE id IN (100, 101, 102) ORDER BY id;
+ id  |  name  
+-----+--------
+ 100 | Tablet
+(1 row)
+
+-- 14. RandomPeopleFdw: Synthetic Personal Info Table with Limit Pushdown
+CREATE SERVER test_rand_srv FOREIGN DATA WRAPPER plv8_fdw OPTIONS (wrapper 'RandomPeopleFdw');
+CREATE FOREIGN TABLE ft_random_people (
+    id int,
+    first_name text,
+    last_name text,
+    email text,
+    age int,
+    city text
+) SERVER test_rand_srv;
+-- Full scan count (yields 1000 generated personal info records)
+SELECT count(*) FROM ft_random_people;
+ count 
+-------
+  1000
+(1 row)
+
+-- Limit pushdown verification via EXPLAIN (VERBOSE, COSTS OFF)
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT id, first_name, last_name, city FROM ft_random_people LIMIT 5;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Limit
+   Output: id, first_name, last_name, city
+   ->  Foreign Scan on public.ft_random_people
+         Output: id, first_name, last_name, city
+         Pushed Limit: 5
+(5 rows)
+
+-- Execution with pushed-down limit (generates and returns only 5 records)
+SELECT id, first_name, last_name, email, age, city FROM ft_random_people LIMIT 5;
+ id | first_name | last_name |            email             | age |     city     
+----+------------+-----------+------------------------------+-----+--------------
+  1 | Margaret   | Lopez     | margaret.lopez1@example.com  |  68 | Dallas
+  2 | Patricia   | Martin    | patricia.martin2@example.com |  27 | Seattle
+  3 | Patricia   | Davis     | patricia.davis3@example.com  |  50 | Jacksonville
+  4 | James      | White     | james.white4@example.com     |  49 | San Jose
+  5 | Anthony    | Moore     | anthony.moore5@example.com   |  53 | Phoenix
+(5 rows)
+
+-- Limit 2 records
+SELECT id, first_name, last_name, city FROM ft_random_people LIMIT 2;
+ id | first_name | last_name |  city   
+----+------------+-----------+---------
+  1 | Margaret   | Lopez     | Dallas
+  2 | Patricia   | Martin    | Seattle
+(2 rows)
+
+-- Point ID lookup pushdown
+SELECT id, first_name, last_name, email, age, city FROM ft_random_people WHERE id = 42;
+ id | first_name | last_name |              email              | age |     city     
+----+------------+-----------+---------------------------------+-----+--------------
+ 42 | Margaret   | Martinez  | margaret.martinez42@example.com |  24 | Indianapolis
+(1 row)
+
+-- Point ID lookup with additional non-matching predicate (must return 0 rows)
+SELECT id, first_name, city FROM ft_random_people WHERE id = 42 AND city = 'Atlantis';
+ id | first_name | city 
+----+------------+------
+(0 rows)
+
+-- Point ID lookup with matching predicate
+SELECT id, first_name, city FROM ft_random_people WHERE id = 42 AND city = 'Indianapolis';
+ id | first_name |     city     
+----+------------+--------------
+ 42 | Margaret   | Indianapolis
+(1 row)
+
+-- Batch IN list ID lookup with limit pushdown
+SELECT id, first_name FROM ft_random_people WHERE id IN (1, 5, 9999) LIMIT 2;
+ id | first_name 
+----+------------
+  1 | Margaret
+  5 | Anthony
+(2 rows)
+
+-- Order by ID with pushed limit (sort elimination via pathkeys)
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT id, first_name FROM ft_random_people ORDER BY id ASC LIMIT 5;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Limit
+   Output: id, first_name
+   ->  Foreign Scan on public.ft_random_people
+         Output: id, first_name
+         Pushed Limit: 5
+(5 rows)
+
+SELECT id, first_name FROM ft_random_people ORDER BY id ASC LIMIT 5;
+ id | first_name 
+----+------------
+  1 | Margaret
+  2 | Patricia
+  3 | Patricia
+  4 | James
+  5 | Anthony
+(5 rows)
+
+-- Zero limit test (must return 0 rows)
+SELECT id FROM ft_random_people LIMIT 0;
+ id 
+----
+(0 rows)
+
+-- Filter combined with limit pushdown
+SELECT id, first_name, age, city FROM ft_random_people WHERE age >= 50 LIMIT 3;
+ id | first_name | age |     city     
+----+------------+-----+--------------
+  1 | Margaret   |  68 | Dallas
+  3 | Patricia   |  50 | Jacksonville
+  5 | Anthony    |  53 | Phoenix
+(3 rows)
+
+-- Clean up
+DROP FOREIGN TABLE ft_users;
+DROP FOREIGN TABLE ft_sessions;
+DROP FOREIGN TABLE ft_dm_sessions;
+DROP FOREIGN TABLE ft_temp_products;
+DROP FOREIGN TABLE ft_random_people;
+DROP SERVER test_array_srv;
+DROP SERVER test_map_srv;
+DROP SERVER test_dm_srv;
+DROP SERVER test_temp_srv;
+DROP SERVER test_rand_srv;

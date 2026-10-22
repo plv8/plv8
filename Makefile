@@ -8,7 +8,7 @@ SHLIB_LINK += -std=c++20
 PG_CPPFLAGS := -fPIC -Wall -Wno-register -xc++
 PG_LDFLAGS := -std=c++20
 
-SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc plv8_guc.cc
+SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc plv8_guc.cc plv8_fdw.cc
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8-$(PLV8_VERSION)
 EXTENSION = plv8
@@ -79,7 +79,7 @@ DATA_built = plv8.sql
 REGRESS = init-extension plv8 plv8-errors scalar_args inline json startup_pre startup varparam json_conv \
 		  jsonb_conv window guc es6 arraybuffer composites currentresource startup_perms bytea find_function_perms \
 		  memory_limits reset show array_spread regression procedure security_definer language_handler tle_modules \
-		  table_macro_support wasm_engine single_isolate_wasm_snapshot
+		  table_macro_support wasm_engine single_isolate_wasm_snapshot fdw
 
 ifndef BIGINT_GRACEFUL
 	REGRESS += bigint

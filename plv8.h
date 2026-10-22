@@ -23,6 +23,7 @@ extern "C" {
 #include "postgres.h"
 
 #include "access/htup.h"
+#include "access/xact.h"
 #include "fmgr.h"
 #include "mb/pg_wchar.h"
 #include "utils/tuplestore.h"
@@ -557,7 +558,19 @@ extern void plv8_register_planner_support_hook(const char *func_name,
 extern void plv8_set_function_columns_js(const char *func_name,
 										 int ncols,
 										 const Plv8ColMeta *cols);
+extern void plv8_ensure_proc_support(Oid fn_oid);
 extern uint64 plv8_get_catalog_gen(void);
+
+extern plv8_context* GetPlv8Context(void);
+extern "C" {
+PGDLLEXPORT Datum plv8_fdw_handler(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum plv8_fdw_validator(PG_FUNCTION_ARGS);
+}
+extern void plv8_fdw_init_context(plv8_context *context);
+extern void plv8_fdw_xact_cb(XactEvent event);
+extern void plv8_fdw_subxact_cb(SubXactEvent event, SubTransactionId mySubid, SubTransactionId parentSubid);
+extern void plv8_fdw_reset(Oid user_id);
+extern void plv8_fdw_relcache_cb(Datum arg, Oid relid);
 
 #endif	// _PLV8_
 

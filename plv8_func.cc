@@ -19,12 +19,14 @@ extern "C" {
 #include "catalog/pg_type.h"
 #include "executor/spi.h"
 #include "miscadmin.h"
+#include "parser/parse_coerce.h"
 #include "parser/parse_type.h"
 #include "storage/itemptr.h"
 #include "utils/builtins.h"
 #include "utils/fmgrprotos.h"
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/syscache.h"
 #include "nodes/memnodes.h"
 #undef String
@@ -38,6 +40,7 @@ static void plv8_Execute(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_Prepare(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_PlanCursor(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_PlanExecute(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_PlanReturnQuery(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_PlanFree(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_CursorFetch(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_CursorMove(const FunctionCallbackInfo<v8::Value>& args);
@@ -67,6 +70,7 @@ static void plv8_ReturnQuery(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_RegisterColumnInference(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_RegisterSupport(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_SetFunctionColumns(const FunctionCallbackInfo<v8::Value>& args);
+static void plv8_SetFunctionSupport(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_CurrentSetting(const FunctionCallbackInfo<v8::Value>& args);
 static void plv8_ProcCacheKey(const FunctionCallbackInfo<v8::Value>& args);
 
@@ -77,6 +81,7 @@ const intptr_t plv8_external_references[] = {
 	reinterpret_cast<intptr_t>(plv8_Prepare),
 	reinterpret_cast<intptr_t>(plv8_PlanCursor),
 	reinterpret_cast<intptr_t>(plv8_PlanExecute),
+	reinterpret_cast<intptr_t>(plv8_PlanReturnQuery),
 	reinterpret_cast<intptr_t>(plv8_PlanFree),
 	reinterpret_cast<intptr_t>(plv8_CursorFetch),
 	reinterpret_cast<intptr_t>(plv8_CursorMove),
@@ -109,6 +114,7 @@ const intptr_t plv8_external_references[] = {
 	reinterpret_cast<intptr_t>(plv8_RegisterColumnInference),
 	reinterpret_cast<intptr_t>(plv8_RegisterSupport),
 	reinterpret_cast<intptr_t>(plv8_SetFunctionColumns),
+	reinterpret_cast<intptr_t>(plv8_SetFunctionSupport),
 	reinterpret_cast<intptr_t>(plv8_CurrentSetting),
 	reinterpret_cast<intptr_t>(plv8_ProcCacheKey),
 	0
@@ -449,6 +455,7 @@ SetupPlv8Functions(Handle<ObjectTemplate> plv8)
 	SetCallback(plv8, "register_column_inference", plv8_RegisterColumnInference, attrFull);
 	SetCallback(plv8, "register_support", plv8_RegisterSupport, attrFull);
 	SetCallback(plv8, "set_function_columns", plv8_SetFunctionColumns, attrFull);
+	SetCallback(plv8, "set_function_support", plv8_SetFunctionSupport, attrFull);
 	SetCallback(plv8, "current_setting", plv8_CurrentSetting, attrFull);
 	SetCallback(plv8, "proc_cache_key", plv8_ProcCacheKey, attrFull);
 
@@ -473,6 +480,7 @@ SetupPrepFunctions(Handle<ObjectTemplate> templ)
 	templ->SetInternalFieldCount(3);
 	SetCallback(templ, "cursor", plv8_PlanCursor, attrFull);
 	SetCallback(templ, "execute", plv8_PlanExecute, attrFull);
+	SetCallback(templ, "return_query", plv8_PlanReturnQuery, attrFull);
 	SetCallback(templ, "free", plv8_PlanFree, attrFull);
 }
 
@@ -886,8 +894,8 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 		if (args.Length() == 1)
 		{
 			parstate =
-				(plv8_param_state *) palloc0(sizeof(plv8_param_state));
-			parstate->memcontext = CurrentMemoryContext;
+				(plv8_param_state *) MemoryContextAllocZero(TopMemoryContext, sizeof(plv8_param_state));
+			parstate->memcontext = TopMemoryContext;
 			initial = SPI_prepare_params(sql, plv8_variable_param_setup,
 										 parstate, 0);
 		}
@@ -898,6 +906,13 @@ plv8_Prepare(const FunctionCallbackInfo<v8::Value> &args)
 	}
 	PG_CATCH();
 	{
+		if (parstate)
+		{
+			if (parstate->paramTypes)
+				pfree(parstate->paramTypes);
+			pfree(parstate);
+			parstate = NULL;
+		}
 		subtran.exit(false);
 		throw pg_error();
 	}
@@ -1195,9 +1210,13 @@ plv8_PlanFree(const FunctionCallbackInfo<v8::Value> &args)
 	parstate = static_cast<plv8_param_state *>(
 			self->GetInternalField(1).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
 
-	if (parstate)
-		pfree(parstate);
 	self->SetInternalField(1, External::New(isolate, 0, v8::kExternalPointerTypeTagDefault));
+	if (parstate)
+	{
+		if (parstate->paramTypes)
+			pfree(parstate->paramTypes);
+		pfree(parstate);
+	}
 
 	args.GetReturnValue().Set(Int32::New(isolate, status));
 }
@@ -2166,11 +2185,231 @@ plv8_ExpectedColumns(const FunctionCallbackInfo<v8::Value>& args)
 }
 
 /*
- * plv8.return_query(sql [, args])
+ * Stream the current SPI_tuptable rows directly into the active SRF tuplestore.
+ *
+ * When strict_types is true (used by PL/pgSQL RETURN QUERY), enforces that the
+ * SPI result column count and per-column types match the SRF's expected result
+ * TupleDesc (raising SQLSTATE 42804 ERRCODE_DATATYPE_MISMATCH on mismatch).
+ *
+ * When strict_types is false (default for plv8.return_query / plan.return_query),
+ * matches columns positionally and coerces differing column types via I/O.
+ *
+ * Fast path: when the SRF returns a composite/table row (!conv->IsScalar()) and
+ * spi_td has the exact same natts, no dropped columns, and identical (or binary-
+ * coercible with matching typmod) attribute types, streams each HeapTuple
+ * directly via tuplestore_puttuple() with zero heap_getattr / array allocation.
+ */
+static uint64
+plv8_stream_spi_to_tuplestore(Converter *conv, Tuplestorestate *tupstore, bool strict_types)
+{
+	if (SPI_tuptable == NULL)
+		return 0;
+
+	TupleDesc spi_td = SPI_tuptable->tupdesc;
+	TupleDesc exp_td = conv->GetTupleDesc();
+	uint64 nrows = SPI_processed;
+
+	int spi_cols[FUNC_MAX_ARGS];
+	int n_spi_cols = 0;
+	bool spi_has_dropped = false;
+	for (int a = 0; a < spi_td->natts && n_spi_cols < FUNC_MAX_ARGS; a++)
+	{
+		if (TupleDescAttr(spi_td, a)->attisdropped)
+			spi_has_dropped = true;
+		else
+			spi_cols[n_spi_cols++] = a;
+	}
+
+	int exp_cols[FUNC_MAX_ARGS];
+	int n_exp_cols = 0;
+	bool exp_has_dropped = false;
+	for (int a = 0; a < exp_td->natts && n_exp_cols < FUNC_MAX_ARGS; a++)
+	{
+		if (TupleDescAttr(exp_td, a)->attisdropped)
+			exp_has_dropped = true;
+		else
+			exp_cols[n_exp_cols++] = a;
+	}
+
+	if (strict_types)
+	{
+		if (n_spi_cols != n_exp_cols)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("structure of query does not match function result type"),
+					 errdetail("Number of returned columns (%d) does not match expected column count (%d).",
+							   n_spi_cols, n_exp_cols)));
+
+		for (int i = 0; i < n_exp_cols; i++)
+		{
+			Form_pg_attribute s_attr = TupleDescAttr(spi_td, spi_cols[i]);
+			Form_pg_attribute e_attr = TupleDescAttr(exp_td, exp_cols[i]);
+			Oid s_type = s_attr->atttypid;
+			Oid e_type = e_attr->atttypid;
+
+			if (s_type == e_type ||
+				IsBinaryCoercible(s_type, e_type) ||
+				getBaseType(s_type) == getBaseType(e_type))
+				continue;
+
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					 errmsg("structure of query does not match function result type"),
+					 errdetail("Returned type %s does not match expected type %s in column %d.",
+							   format_type_with_typemod(s_type, s_attr->atttypmod),
+							   format_type_with_typemod(e_type, e_attr->atttypmod),
+							   i + 1)));
+		}
+	}
+
+	if (nrows == 0)
+	{
+		SPI_freetuptable(SPI_tuptable);
+		return 0;
+	}
+
+	/*
+	 * Check if we can use the zero-deconstruct whole-tuple fast path:
+	 * composite return (!conv->IsScalar()), no dropped columns on either side,
+	 * identical attribute counts, and every column has identical type (or
+	 * binary-coercible with matching typmod, and not a domain with constraints).
+	 */
+	bool can_puttuple_direct = (!conv->IsScalar() &&
+								!spi_has_dropped &&
+								!exp_has_dropped &&
+								spi_td->natts == exp_td->natts);
+	if (can_puttuple_direct)
+	{
+		for (int a = 0; a < exp_td->natts; a++)
+		{
+			Form_pg_attribute s_attr = TupleDescAttr(spi_td, a);
+			Form_pg_attribute e_attr = TupleDescAttr(exp_td, a);
+			if (s_attr->atttypid != e_attr->atttypid)
+			{
+				if (!IsBinaryCoercible(s_attr->atttypid, e_attr->atttypid) ||
+					get_typtype(e_attr->atttypid) == TYPTYPE_DOMAIN ||
+					(e_attr->atttypmod != -1 && s_attr->atttypmod != e_attr->atttypmod))
+				{
+					can_puttuple_direct = false;
+					break;
+				}
+			}
+		}
+	}
+
+	if (can_puttuple_direct)
+	{
+		for (uint64 r = 0; r < nrows; r++)
+		{
+			CHECK_FOR_INTERRUPTS();
+			tuplestore_puttuple(tupstore, SPI_tuptable->vals[r]);
+		}
+		SPI_freetuptable(SPI_tuptable);
+		return nrows;
+	}
+
+	/*
+	 * Pre-compute per-column I/O conversion metadata outside the row loop.
+	 */
+	Oid *col_typoutput = (Oid *) palloc0(sizeof(Oid) * exp_td->natts);
+	Oid *col_typinput = (Oid *) palloc0(sizeof(Oid) * exp_td->natts);
+	Oid *col_typioparam = (Oid *) palloc0(sizeof(Oid) * exp_td->natts);
+	bool *col_needs_io = (bool *) palloc0(sizeof(bool) * exp_td->natts);
+
+	int logical_col = 0;
+	for (int exp_att = 0; exp_att < exp_td->natts; exp_att++)
+	{
+		Form_pg_attribute exp_attr = TupleDescAttr(exp_td, exp_att);
+		if (exp_attr->attisdropped)
+			continue;
+		if (logical_col < n_spi_cols)
+		{
+			int spi_att = spi_cols[logical_col];
+			Form_pg_attribute spi_attr = TupleDescAttr(spi_td, spi_att);
+			if (spi_attr->atttypid != exp_attr->atttypid &&
+				!(IsBinaryCoercible(spi_attr->atttypid, exp_attr->atttypid) &&
+				  get_typtype(exp_attr->atttypid) != TYPTYPE_DOMAIN &&
+				  (exp_attr->atttypmod == -1 || spi_attr->atttypmod == exp_attr->atttypmod)))
+			{
+				bool typIsVarlena = false;
+				col_needs_io[exp_att] = true;
+				getTypeOutputInfo(spi_attr->atttypid, &col_typoutput[exp_att], &typIsVarlena);
+				getTypeInputInfo(exp_attr->atttypid, &col_typinput[exp_att], &col_typioparam[exp_att]);
+			}
+		}
+		logical_col++;
+	}
+
+	Datum *values = (Datum *) palloc0(sizeof(Datum) * exp_td->natts);
+	bool *nulls = (bool *) palloc0(sizeof(bool) * exp_td->natts);
+
+	for (uint64 r = 0; r < nrows; r++)
+	{
+		HeapTuple spi_tup = SPI_tuptable->vals[r];
+		int logical_idx = 0;
+
+		CHECK_FOR_INTERRUPTS();
+
+		for (int exp_att = 0; exp_att < exp_td->natts; exp_att++)
+		{
+			Form_pg_attribute exp_attr = TupleDescAttr(exp_td, exp_att);
+			if (exp_attr->attisdropped)
+			{
+				nulls[exp_att] = true;
+				values[exp_att] = (Datum) 0;
+				continue;
+			}
+
+			if (logical_idx >= n_spi_cols)
+			{
+				nulls[exp_att] = true;
+				values[exp_att] = (Datum) 0;
+				logical_idx++;
+				continue;
+			}
+
+			int spi_att = spi_cols[logical_idx++];
+			bool isnull = false;
+			Datum d = heap_getattr(spi_tup, spi_att + 1, spi_td, &isnull);
+
+			if (isnull)
+			{
+				nulls[exp_att] = true;
+				values[exp_att] = (Datum) 0;
+			}
+			else if (!col_needs_io[exp_att])
+			{
+				nulls[exp_att] = false;
+				values[exp_att] = d;
+			}
+			else
+			{
+				char *str_val = OidOutputFunctionCall(col_typoutput[exp_att], d);
+				values[exp_att] = OidInputFunctionCall(col_typinput[exp_att], str_val,
+													   col_typioparam[exp_att], exp_attr->atttypmod);
+				nulls[exp_att] = false;
+				pfree(str_val);
+			}
+		}
+
+		tuplestore_putvalues(tupstore, exp_td, values, nulls);
+	}
+
+	pfree(values);
+	pfree(nulls);
+	pfree(col_typoutput);
+	pfree(col_typinput);
+	pfree(col_typioparam);
+	pfree(col_needs_io);
+	SPI_freetuptable(SPI_tuptable);
+	return nrows;
+}
+
+/*
+ * plv8.return_query(sql [, args [, strict]])
  *
  * Executes a SQL query via SPI and streams all result rows directly into the
- * active SRF tuplestore (matching columns positionally, coercing via I/O only
- * when column type OIDs differ). Returns the number of rows appended.
+ * active SRF tuplestore. Returns the number of rows appended.
  */
 static void
 plv8_ReturnQuery(const FunctionCallbackInfo<v8::Value>& args)
@@ -2197,13 +2436,28 @@ plv8_ReturnQuery(const FunctionCallbackInfo<v8::Value>& args)
 
 	CString sql(args[0]);
 	Handle<Array> params;
+	bool strict_types = false;
 
 	if (args.Length() >= 2 && !args[1]->IsUndefined() && !args[1]->IsNull())
 	{
 		if (args[1]->IsArray())
+		{
 			params = Handle<Array>::Cast(args[1]);
+			if (args.Length() >= 3 && args[2]->IsBoolean())
+				strict_types = args[2]->BooleanValue(isolate);
+		}
+		else if (args.Length() == 2 && args[1]->IsBoolean())
+		{
+			strict_types = args[1]->BooleanValue(isolate);
+		}
 		else
+		{
 			params = convertArgsToArray(args, 1, 1);
+		}
+	}
+	else if (args.Length() >= 3 && args[2]->IsBoolean())
+	{
+		strict_types = args[2]->BooleanValue(isolate);
 	}
 
 	int nparam = params.IsEmpty() ? 0 : params->Length();
@@ -2222,88 +2476,7 @@ plv8_ReturnQuery(const FunctionCallbackInfo<v8::Value>& args)
 		if (status < 0)
 			elog(ERROR, "SPI_execute failed in return_query: %s", FormatSPIStatus(status));
 
-		if (SPI_tuptable != NULL && SPI_processed > 0)
-		{
-			TupleDesc spi_td = SPI_tuptable->tupdesc;
-			TupleDesc exp_td = conv->GetTupleDesc();
-			nrows = SPI_processed;
-
-			/* Build positional map of non-dropped columns in spi_td and exp_td */
-			int spi_cols[FUNC_MAX_ARGS];
-			int n_spi_cols = 0;
-			for (int a = 0; a < spi_td->natts && n_spi_cols < FUNC_MAX_ARGS; a++)
-			{
-				if (!TupleDescAttr(spi_td, a)->attisdropped)
-					spi_cols[n_spi_cols++] = a;
-			}
-
-			Datum *values = (Datum *) palloc0(sizeof(Datum) * exp_td->natts);
-			bool *nulls = (bool *) palloc0(sizeof(bool) * exp_td->natts);
-
-			for (uint64 r = 0; r < nrows; r++)
-			{
-				HeapTuple spi_tup = SPI_tuptable->vals[r];
-				int logical_idx = 0;
-
-				CHECK_FOR_INTERRUPTS();
-
-				for (int exp_att = 0; exp_att < exp_td->natts; exp_att++)
-				{
-					Form_pg_attribute exp_attr = TupleDescAttr(exp_td, exp_att);
-					if (exp_attr->attisdropped)
-					{
-						nulls[exp_att] = true;
-						values[exp_att] = (Datum) 0;
-						continue;
-					}
-
-					if (logical_idx >= n_spi_cols)
-					{
-						nulls[exp_att] = true;
-						values[exp_att] = (Datum) 0;
-						logical_idx++;
-						continue;
-					}
-
-					int spi_att = spi_cols[logical_idx++];
-					Form_pg_attribute spi_attr = TupleDescAttr(spi_td, spi_att);
-					bool isnull = false;
-					Datum d = heap_getattr(spi_tup, spi_att + 1, spi_td, &isnull);
-
-					if (isnull)
-					{
-						nulls[exp_att] = true;
-						values[exp_att] = (Datum) 0;
-					}
-					else if (spi_attr->atttypid == exp_attr->atttypid)
-					{
-						nulls[exp_att] = false;
-						values[exp_att] = d;
-					}
-					else
-					{
-						Oid typoutput;
-						bool typIsVarlena;
-						Oid typinput;
-						Oid typioparam;
-						char *str_val;
-
-						getTypeOutputInfo(spi_attr->atttypid, &typoutput, &typIsVarlena);
-						str_val = OidOutputFunctionCall(typoutput, d);
-						getTypeInputInfo(exp_attr->atttypid, &typinput, &typioparam);
-						values[exp_att] = OidInputFunctionCall(typinput, str_val, typioparam, exp_attr->atttypmod);
-						nulls[exp_att] = false;
-						pfree(str_val);
-					}
-				}
-
-				tuplestore_putvalues(tupstore, exp_td, values, nulls);
-			}
-
-			pfree(values);
-			pfree(nulls);
-			SPI_freetuptable(SPI_tuptable);
-		}
+		nrows = plv8_stream_spi_to_tuplestore(conv, tupstore, strict_types);
 	}
 	PG_CATCH();
 	{
@@ -2314,6 +2487,171 @@ plv8_ReturnQuery(const FunctionCallbackInfo<v8::Value>& args)
 
 	subtran.exit(true);
 	args.GetReturnValue().Set(Int32::New(isolate, (int32_t) nrows));
+}
+
+/*
+ * plan.return_query([args [, strict]])
+ *
+ * Executes a prepared SPI plan and streams all result rows directly into the
+ * active SRF tuplestore without constructing intermediate JS row objects.
+ */
+static void
+plv8_PlanReturnQuery(const FunctionCallbackInfo<v8::Value>& args)
+{
+	Isolate *isolate = args.GetIsolate();
+	Local<Context> context = isolate->GetCurrentContext();
+	Handle<v8::Object> self = args.This();
+
+	check_plan_this(args);
+	PlanInUseGuard in_use_guard(isolate, self);
+
+	if (current_context == nullptr || current_context->plv8_obj.IsEmpty())
+		throw js_error("return_query called in context that cannot accept a set");
+
+	Local<v8::Object> plv8_obj = current_context->plv8_obj.Get(isolate);
+	if (plv8_obj.IsEmpty() || plv8_obj->InternalFieldCount() < PLV8_INTNL_MAX)
+		throw js_error("return_query called in context that cannot accept a set");
+
+	Handle<v8::Value> conv_value = plv8_obj->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
+	Handle<v8::Value> tupstore_value = plv8_obj->GetInternalField(PLV8_INTNL_TUPSTORE).As<v8::Value>();
+
+	if (!conv_value->IsExternal() || !tupstore_value->IsExternal())
+		throw js_error("return_query called in context that cannot accept a set");
+
+	Converter *conv = static_cast<Converter *>(
+		Handle<External>::Cast(conv_value)->Value(v8::kExternalPointerTypeTagDefault));
+	Tuplestorestate *tupstore = static_cast<Tuplestorestate *>(
+		Handle<External>::Cast(tupstore_value)->Value(v8::kExternalPointerTypeTagDefault));
+
+	SPIPlanPtr plan = static_cast<SPIPlanPtr>(
+		self->GetInternalField(0).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
+	if (plan == NULL)
+		throw js_error("plan unexpectedly null");
+
+	plv8_param_state *parstate = static_cast<plv8_param_state *>(
+		self->GetInternalField(1).As<External>()->Value(v8::kExternalPointerTypeTagDefault));
+	int argcount = parstate ? parstate->numParams : SPI_getargcount(plan);
+
+	Handle<Array> params;
+	int nparam = 0;
+	bool strict_types = false;
+
+	if (args.Length() > 0)
+	{
+		if (args[0]->IsArray())
+		{
+			params = Handle<Array>::Cast(args[0]);
+			nparam = params->Length();
+			if (args.Length() >= 2 && args[1]->IsBoolean())
+				strict_types = args[1]->BooleanValue(isolate);
+		}
+		else if (args[0]->IsNull() || args[0]->IsUndefined())
+		{
+			nparam = 0;
+			if (args.Length() >= 2 && args[1]->IsBoolean())
+				strict_types = args[1]->BooleanValue(isolate);
+		}
+		else if (argcount == 0 && args.Length() == 1 && args[0]->IsBoolean())
+		{
+			strict_types = args[0]->BooleanValue(isolate);
+		}
+		else
+		{
+			params = convertArgsToArray(args, 0, 0);
+			nparam = params->Length();
+		}
+	}
+
+	if (argcount != nparam)
+	{
+		StringInfoData buf;
+		initStringInfo(&buf);
+		appendStringInfo(&buf, "plan expected %d argument(s), given is %d", argcount, nparam);
+		throw js_error(pstrdup(buf.data));
+	}
+
+	Datum *values = NULL;
+	char *nulls = NULL;
+	if (nparam > 0)
+	{
+		values = (Datum *) palloc(sizeof(Datum) * nparam);
+		nulls = (char *) palloc(sizeof(char) * nparam);
+	}
+
+	int status = 0;
+	uint64 nrows = 0;
+	SubTranBlock subtran;
+	PG_TRY();
+	{
+		subtran.enter();
+		for (int i = 0; i < nparam; i++)
+		{
+			Handle<v8::Value> param = param_get_element(isolate, context, params, i);
+			Oid typid = parstate ? parstate->paramTypes[i] : SPI_getargtypeid(plan, i);
+			values[i] = value_get_datum(param, typid, &nulls[i]);
+		}
+		if (parstate)
+		{
+			ParamListInfo paramLI = plv8_setup_variable_paramlist(parstate, values, nulls);
+			status = SPI_execute_plan_with_paramlist(plan, paramLI, false, 0);
+		}
+		else
+		{
+			status = SPI_execute_plan(plan, values, nulls, false, 0);
+		}
+
+		if (status < 0)
+			elog(ERROR, "SPI_execute_plan failed in return_query: %s", FormatSPIStatus(status));
+
+		nrows = plv8_stream_spi_to_tuplestore(conv, tupstore, strict_types);
+	}
+	PG_CATCH();
+	{
+		subtran.exit(false);
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	subtran.exit(true);
+	args.GetReturnValue().Set(Int32::New(isolate, (int32_t) nrows));
+}
+
+/*
+ * plv8.set_function_support(fn_oid)
+ *
+ * Ensures that pg_proc.prosupport is set to plv8_call_support for a
+ * set-returning function (if prosupport is not already set).
+ */
+static void
+plv8_SetFunctionSupport(const FunctionCallbackInfo<v8::Value>& args)
+{
+	Isolate *isolate = args.GetIsolate();
+	Local<Context> context = isolate->GetCurrentContext();
+
+	if (args.Length() < 1 || !args[0]->IsNumber())
+	{
+		args.GetReturnValue().Set(v8::Boolean::New(isolate, false));
+		return;
+	}
+
+	Oid fn_oid = (Oid) args[0]->Uint32Value(context).FromMaybe(InvalidOid);
+	if (!OidIsValid(fn_oid))
+	{
+		args.GetReturnValue().Set(v8::Boolean::New(isolate, false));
+		return;
+	}
+
+	PG_TRY();
+	{
+		plv8_ensure_proc_support(fn_oid);
+	}
+	PG_CATCH();
+	{
+		throw pg_error();
+	}
+	PG_END_TRY();
+
+	args.GetReturnValue().Set(v8::Boolean::New(isolate, true));
 }
 
 /*

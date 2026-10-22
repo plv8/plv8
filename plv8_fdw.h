@@ -18,6 +18,7 @@
 
 extern "C" {
 #define String PG_Node_String
+#define Value PG_Node_Value
 #include "postgres.h"
 
 #include "access/htup_details.h"
@@ -26,7 +27,9 @@ extern "C" {
 #include "access/xact.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
+#if PG_VERSION_NUM >= 180000
 #include "commands/explain_format.h"
+#endif
 #include "executor/executor.h"
 #include "executor/tuptable.h"
 #include "foreign/fdwapi.h"
@@ -49,6 +52,14 @@ extern "C" {
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/tuplestore.h"
+
+static inline int
+plv8_pg_intval(void *v)
+{
+  return intVal(v);
+}
+
+#undef Value
 #undef String
 }
 

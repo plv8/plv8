@@ -1299,7 +1299,11 @@ plv8_fdw_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreignta
                   Oid ltOpr = InvalidOid;
                   get_sort_group_operators(attr->atttypid, true, false, false, &ltOpr, NULL, NULL, NULL);
                   if (OidIsValid(ltOpr)) {
+#if PG_VERSION_NUM >= 160000
                     pathkeys = build_expression_pathkey(root, (Expr *) var, ltOpr, NULL, true);
+#else
+                    pathkeys = build_expression_pathkey(root, (Expr *) var, NULL, ltOpr, NULL, true);
+#endif
                   }
                   break;
                 }
@@ -1322,7 +1326,7 @@ plv8_fdw_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreignta
         NULL,
         NIL,
         NIL);
-#else
+#elif PG_VERSION_NUM >= 170000
     ForeignPath *path = create_foreignscan_path(
         root, baserel,
         NULL,
@@ -1332,6 +1336,16 @@ plv8_fdw_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreignta
         NULL,
         NULL,
         NIL,
+        NIL);
+#else
+    ForeignPath *path = create_foreignscan_path(
+        root, baserel,
+        NULL,
+        baserel->rows,
+        startup_cost, total_cost,
+        pathkeys,
+        NULL,
+        NULL,
         NIL);
 #endif
     add_path(baserel, (Path *) path);
@@ -1376,7 +1390,7 @@ plv8_fdw_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreignta
             NULL,
             NIL,
             NIL);
-#else
+#elif PG_VERSION_NUM >= 170000
         ForeignPath *ppath = create_foreignscan_path(
             root, baserel,
             NULL,
@@ -1386,6 +1400,16 @@ plv8_fdw_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreignta
             param_info->ppi_req_outer,
             NULL,
             NIL,
+            NIL);
+#else
+        ForeignPath *ppath = create_foreignscan_path(
+            root, baserel,
+            NULL,
+            param_info->ppi_rows,
+            param_startup_cost, param_total_cost,
+            NIL,
+            param_info->ppi_req_outer,
+            NULL,
             NIL);
 #endif
         add_path(baserel, (Path *) ppath);
@@ -1710,7 +1734,7 @@ plv8_fdw_begin_foreign_scan(ForeignScanState *node, int eflags)
     if (plan->fdw_private != NIL && list_length(plan->fdw_private) >= 1) {
       Node *n = (Node *) linitial(plan->fdw_private);
       if (n && IsA(n, Integer)) {
-        festate->limit_tuples = ((struct ::Integer *) n)->ival;
+        festate->limit_tuples = plv8_pg_intval(n);
       }
     }
 
@@ -1798,6 +1822,26 @@ plv8_fdw_begin_foreign_scan(ForeignScanState *node, int eflags)
   }
 }
 
+static inline bool
+plv8_fdw_tuplestore_gettupleslot_force(Tuplestorestate *tstore, bool forward,
+                                       bool copy, TupleTableSlot *slot)
+{
+#if PG_VERSION_NUM >= 190000
+  return tuplestore_gettupleslot_force(tstore, forward, copy, slot);
+#else
+  TupleTableSlot *mslot = MakeSingleTupleTableSlot(slot->tts_tupleDescriptor,
+                                                   &TTSOpsMinimalTuple);
+  bool found = tuplestore_gettupleslot(tstore, forward, copy, mslot);
+  if (found) {
+    ExecCopySlot(slot, mslot);
+  } else {
+    ExecClearTuple(slot);
+  }
+  ExecDropSingleTupleTableSlot(mslot);
+  return found;
+#endif
+}
+
 /*
  * FDW Scan Callback: IterateForeignScan
  */
@@ -1812,7 +1856,7 @@ plv8_fdw_iterate_foreign_scan(ForeignScanState *node)
 
   // Tier 1 Replay: Serving unparameterized scan from Tuplestore (safe on any slot type)
   if (!festate->is_parameterized && festate->unparam_cache_complete && festate->unparam_tuplestore) {
-    if (tuplestore_gettupleslot_force(festate->unparam_tuplestore, true, false, slot)) {
+    if (plv8_fdw_tuplestore_gettupleslot_force(festate->unparam_tuplestore, true, false, slot)) {
       festate->stats_rows_fetched++;
       return slot;
     }
@@ -1974,11 +2018,23 @@ plv8_fdw_rescan_foreign_scan(ForeignScanState *node)
   festate->replaying_from_cache = false;
   festate->cached_tuple_cursor = 0;
 
-  if (!festate->iterator.IsEmpty()) {
-    festate->iterator.Reset();
+  if (!festate->is_parameterized && festate->unparam_tuplestore && !festate->unparam_cache_complete) {
+    tuplestore_clear(festate->unparam_tuplestore);
   }
 
   try {
+    plv8_context *plv8_ctx = GetPlv8Context();
+    CurrentContextScope ccs(plv8_ctx);
+    Isolate *isolate = festate->isolate;
+    Isolate::Scope iso_scope(isolate);
+    HandleScope hs(isolate);
+    Local<Context> ctx = festate->context.Get(isolate);
+    Context::Scope ctx_scope(ctx);
+
+    if (!festate->iterator.IsEmpty()) {
+      festate->iterator.Reset();
+    }
+
     plv8_fdw_invoke_execute(festate, node);
   }
   catch (js_error &e) { e.rethrow(); }
@@ -2497,7 +2553,7 @@ plv8_fdw_begin_direct_modify(ForeignScanState *node, int eflags)
   Oid foreigntableid = RelationGetRelid(node->ss.ss_currentRelation);
   CmdType operation = CMD_UNKNOWN;
   if (plan->fdw_private != NIL) {
-    operation = (CmdType) ((::Integer *) linitial(plan->fdw_private))->ival;
+    operation = (CmdType) plv8_pg_intval(linitial(plan->fdw_private));
   }
 
   try {
@@ -2641,7 +2697,7 @@ plv8_fdw_explain_foreign_scan(ForeignScanState *node, ExplainState *es)
   if (plan && plan->fdw_private != NIL && list_length(plan->fdw_private) >= 1) {
     Node *n = (Node *) linitial(plan->fdw_private);
     if (n && IsA(n, Integer)) {
-      int64 lim = ((struct ::Integer *) n)->ival;
+      int64 lim = plv8_pg_intval(n);
       if (lim >= 0) {
         ExplainPropertyInteger("Pushed Limit", NULL, lim, es);
       }

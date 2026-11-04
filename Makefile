@@ -15,10 +15,10 @@ EXTENSION = plv8
 PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql
 
 # Patches applied to the v8-cmake submodule when it is first checked out.
-# arm64-gcc-neon.patch: V8 15.4 Uint8ArrayFromHexWithNeon in simd.cc passes
-# uint8x16_t to vmovn_u16/vmovn_high_u16 and assigns vshlq_n_u64's uint64x2_t
-# result to uint8x16_t without vreinterpretq_* casts, which GCC on aarch64
-# rejects without -flax-vector-conversions.
+# arm64-gcc-neon.patch: V8 15.7 Uint8ArrayFromHexWithNeon in simd.cc passes
+# uint8x16_t to vqmovn_u16/vqmovn_high_u16 and vmovn_u16/vmovn_high_u16 and
+# assigns vshlq_n_u64's uint64x2_t result to uint8x16_t without vreinterpretq_*
+# casts, which GCC on aarch64 rejects without -flax-vector-conversions.
 PATCH_V8 := patches/v8-cmake/arm64-gcc-neon.patch
 
 ifeq ($(OS),Windows_NT)
@@ -28,7 +28,7 @@ else
 	UNAME_S := $(shell uname -s)
 	ifeq ($(UNAME_S),Darwin)
 		CCFLAGS += -stdlib=libc++
-		SHLIB_LINK += -stdlib=libc++ -std=c++20 -lc++
+		SHLIB_LINK += -stdlib=libc++ -std=c++20 -lc++ -framework CoreFoundation
 		NUMPROC := $(shell sysctl hw.ncpu | awk '{print $$2}')
 	endif
 	ifeq ($(UNAME_S),Linux)

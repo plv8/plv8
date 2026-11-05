@@ -25,6 +25,7 @@ public:
 	void* Allocate(size_t length) final;
 	void* AllocateUninitialized(size_t length) final;
 	void Free(void* data, size_t length) final;
+	v8::PageAllocator* GetPageAllocator() override { return this->allocator->GetPageAllocator(); }
 	size_t getAllocated() const { return allocated.load(std::memory_order_relaxed); }
 	bool hasOOM() const { return oom_exceeded.load(std::memory_order_relaxed); }
 	void resetOOM() { oom_exceeded.store(false, std::memory_order_relaxed); }

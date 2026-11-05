@@ -149,6 +149,26 @@ CREATE OR REPLACE FUNCTION plv8_inline_helper_4() RETURNS SETOF record LANGUAGE 
 CREATE OR REPLACE FUNCTION plv8_inline_helper_5() RETURNS SETOF record LANGUAGE sql STABLE AS $$ SELECT 1 WHERE false $$;
 CREATE OR REPLACE FUNCTION plv8_inline_helper_6() RETURNS SETOF record LANGUAGE sql STABLE AS $$ SELECT 1 WHERE false $$;
 CREATE OR REPLACE FUNCTION plv8_inline_helper_7() RETURNS SETOF record LANGUAGE sql STABLE AS $$ SELECT 1 WHERE false $$;
+
+CREATE OR REPLACE FUNCTION plv8_fdw_handler()
+RETURNS fdw_handler
+AS 'MODULE_PATHNAME', 'plv8_fdw_handler'
+LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION plv8_fdw_validator(text[], oid)
+RETURNS void
+AS 'MODULE_PATHNAME', 'plv8_fdw_validator'
+LANGUAGE C STRICT;
+
+DO $$
+BEGIN
+	IF NOT EXISTS (SELECT 1 FROM pg_foreign_data_wrapper WHERE fdwname = 'plv8_fdw') THEN
+		CREATE FOREIGN DATA WRAPPER plv8_fdw
+			HANDLER plv8_fdw_handler
+			VALIDATOR plv8_fdw_validator;
+	END IF;
+END;
+$$;
 #endif
 
 #if PG_VERSION_NUM < 90100

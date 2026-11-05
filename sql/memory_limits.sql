@@ -21,3 +21,13 @@ do $$
     s.push(new ArrayBuffer(63)) // small non-aligned allocations
   }
 $$ language plv8;
+
+do $$
+  const limit = plv8.execute("select setting from pg_settings where name = $1", ['plv8.memory_limit'])[0].setting;
+  const a = new ArrayBuffer(limit*1024*1024 - 256*1024);
+  try {
+    plv8.execute("select repeat('a', 512*1024)::bytea as b");
+  } catch (e) {
+    plv8.elog(NOTICE, e.message);
+  }
+$$ language plv8;

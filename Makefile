@@ -8,17 +8,17 @@ SHLIB_LINK += -std=c++20
 PG_CPPFLAGS := -fPIC -Wall -Wno-register -xc++
 PG_LDFLAGS := -std=c++20
 
-SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc plv8_guc.cc
+SRCS = plv8.cc plv8_type.cc plv8_func.cc plv8_param.cc plv8_allocator.cc plv8_guc.cc plv8_fdw.cc
 OBJS = $(SRCS:.cc=.o)
 MODULE_big = plv8-$(PLV8_VERSION)
 EXTENSION = plv8
 PLV8_DATA = plv8.control plv8--$(PLV8_VERSION).sql
 
 # Patches applied to the v8-cmake submodule when it is first checked out.
-# arm64-gcc-neon.patch: V8 15.4 Uint8ArrayFromHexWithNeon in simd.cc passes
-# uint8x16_t to vmovn_u16/vmovn_high_u16 and assigns vshlq_n_u64's uint64x2_t
-# result to uint8x16_t without vreinterpretq_* casts, which GCC on aarch64
-# rejects without -flax-vector-conversions.
+# arm64-gcc-neon.patch: V8 15.7 Uint8ArrayFromHexWithNeon in simd.cc passes
+# uint8x16_t to vqmovn_u16/vqmovn_high_u16 and vmovn_u16/vmovn_high_u16 and
+# assigns vshlq_n_u64's uint64x2_t result to uint8x16_t without vreinterpretq_*
+# casts, which GCC on aarch64 rejects without -flax-vector-conversions.
 PATCH_V8 := patches/v8-cmake/arm64-gcc-neon.patch
 
 ifeq ($(OS),Windows_NT)
@@ -28,7 +28,7 @@ else
 	UNAME_S := $(shell uname -s)
 	ifeq ($(UNAME_S),Darwin)
 		CCFLAGS += -stdlib=libc++
-		SHLIB_LINK += -stdlib=libc++ -std=c++20 -lc++
+		SHLIB_LINK += -stdlib=libc++ -std=c++20 -lc++ -framework CoreFoundation
 		NUMPROC := $(shell sysctl hw.ncpu | awk '{print $$2}')
 	endif
 	ifeq ($(UNAME_S),Linux)
@@ -62,7 +62,16 @@ v8: deps/v8-cmake/build/libv8_libbase.a
 V8_CMAKE_ARGS ?=
 
 # enable direct jsonb conversion by default
-CCFLAGS += -DJSONB_DIRECT_CONVERSION -DV8_CPPGC_MICROTASK_QUEUE
+CCFLAGS += -DJSONB_DIRECT_CONVERSION
+UNAME_M := $(shell uname -m)
+ifneq ($(filter x86_64 amd64 aarch64 arm64,$(UNAME_M)),)
+CCFLAGS += -DV8_COMPRESS_POINTERS -DV8_COMPRESS_POINTERS_IN_SHARED_CAGE \
+           -DV8_31BIT_SMIS_ON_64BIT_ARCH -DV8_CONTIGUOUS_COMPRESSED_RO_SPACE \
+           -DV8_CONTIGUOUS_COMPRESSED_RO_SPACE_SIZE_MB=8 -DV8_ENABLE_SANDBOX \
+           -DV8_EXTERNAL_CODE_SPACE -DCPPGC_CAGED_HEAP \
+           -DCPPGC_YOUNG_GENERATION -DCPPGC_POINTER_COMPRESSION \
+           -DCPPGC_SLIM_WRITE_BARRIER
+endif
 
 CCFLAGS += -Ideps/v8-cmake/v8/include -std=c++20
 
@@ -79,7 +88,7 @@ DATA_built = plv8.sql
 REGRESS = init-extension plv8 plv8-errors scalar_args inline json startup_pre startup varparam json_conv \
 		  jsonb_conv window guc es6 arraybuffer composites currentresource startup_perms bytea find_function_perms \
 		  memory_limits reset show array_spread regression procedure security_definer language_handler tle_modules \
-		  table_macro_support wasm_engine single_isolate_wasm_snapshot
+		  table_macro_support wasm_engine single_isolate_wasm_snapshot fdw
 
 ifndef BIGINT_GRACEFUL
 	REGRESS += bigint

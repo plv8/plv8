@@ -23,6 +23,7 @@ extern "C" {
 #include "postgres.h"
 
 #include "access/htup.h"
+#include "access/xact.h"
 #include "fmgr.h"
 #include "mb/pg_wchar.h"
 #include "utils/tuplestore.h"
@@ -306,6 +307,14 @@ public:
  * and probably adds overhead.  We need a class because the destructor
  * makes sure the restore happens.
  */
+enum Plv8ExternalPointerTag : v8::ExternalPointerTypeTag
+{
+	kPlv8ExtTagSPIPlan    = 1, /* plv8_prepared_plan_handle* in PreparedPlan internal field 0 */
+	kPlv8ExtTagFcInfo     = 2, /* FunctionCallInfo in PLV8_INTNL_FCINFO & WindowObject[0] */
+	kPlv8ExtTagConverter  = 3, /* Converter* in PLV8_INTNL_CONV */
+	kPlv8ExtTagTupstore   = 4, /* Tuplestorestate* in PLV8_INTNL_TUPSTORE */
+};
+
 class WindowFunctionSupport
 {
 private:
@@ -334,7 +343,7 @@ public:
 			/* Stash the current item, just in case of nested call */
 			m_prev_fcinfo = m_plv8obj->GetInternalField(PLV8_INTNL_FCINFO).As<v8::Value>();
 			m_plv8obj->SetInternalField(PLV8_INTNL_FCINFO,
-					v8::External::New(isolate, fcinfo, v8::kExternalPointerTypeTagDefault));
+					v8::External::New(isolate, fcinfo, kPlv8ExtTagFcInfo));
 		}
 	}
 	bool IsWindowCall() { return WindowObjectIsValid(m_winobj); }
@@ -379,9 +388,9 @@ public:
 		m_prev_conv = m_plv8obj->GetInternalField(PLV8_INTNL_CONV).As<v8::Value>();
 		m_prev_tupstore = m_plv8obj->GetInternalField(PLV8_INTNL_TUPSTORE).As<v8::Value>();
 		m_plv8obj->SetInternalField(PLV8_INTNL_CONV,
-									v8::External::New(isolate, conv, v8::kExternalPointerTypeTagDefault));
+									v8::External::New(isolate, conv, kPlv8ExtTagConverter));
 		m_plv8obj->SetInternalField(PLV8_INTNL_TUPSTORE,
-									v8::External::New(isolate, tupstore, v8::kExternalPointerTypeTagDefault));
+									v8::External::New(isolate, tupstore, kPlv8ExtTagTupstore));
 	}
 	~SRFSupport()
 	{
@@ -557,7 +566,19 @@ extern void plv8_register_planner_support_hook(const char *func_name,
 extern void plv8_set_function_columns_js(const char *func_name,
 										 int ncols,
 										 const Plv8ColMeta *cols);
+extern void plv8_ensure_proc_support(Oid fn_oid);
 extern uint64 plv8_get_catalog_gen(void);
+
+extern plv8_context* GetPlv8Context(void);
+extern "C" {
+PGDLLEXPORT Datum plv8_fdw_handler(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum plv8_fdw_validator(PG_FUNCTION_ARGS);
+}
+extern void plv8_fdw_init_context(plv8_context *context);
+extern void plv8_fdw_xact_cb(XactEvent event);
+extern void plv8_fdw_subxact_cb(SubXactEvent event, SubTransactionId mySubid, SubTransactionId parentSubid);
+extern void plv8_fdw_reset(Oid user_id);
+extern void plv8_fdw_relcache_cb(Datum arg, Oid relid);
 
 #endif	// _PLV8_
 

@@ -201,6 +201,90 @@ SELECT * FROM js_table_macro('item_id:int4=id, item_price:numeric=price | FROM m
        2 |      29.50
 (2 rows)
 
+-- 2g. Multi-call inlining in a single query mixing 1-column and 2-column outputs without `AS (...)` (both orders)
+SELECT a.item_id, b.item_price
+FROM js_table_macro('item_id:int4=id | FROM macro_items WHERE category = ''books''') a
+JOIN js_table_macro('item_id:int4=id, item_price:numeric=price | FROM macro_items WHERE category = ''books''') b
+  ON a.item_id = b.item_id
+ORDER BY a.item_id;
+ item_id | item_price 
+---------+------------
+       1 |      19.99
+       2 |      29.50
+(2 rows)
+
+SELECT a.item_id, a.item_price, b.only_id
+FROM js_table_macro('item_id:int4=id, item_price:numeric=price | FROM macro_items WHERE category = ''books''') a
+JOIN js_table_macro('only_id:int4=id | FROM macro_items WHERE category = ''books''') b
+  ON a.item_id = b.only_id
+ORDER BY a.item_id;
+ item_id | item_price | only_id 
+---------+------------+---------
+       1 |      19.99 |       1
+       2 |      29.50 |       2
+(2 rows)
+
+-- 2h. Multi-call runtime SRF fallback in a single query with distinct column types/arity without `AS (...)`
+SELECT a.item_id, b.cat_name
+FROM js_table_macro('item_id:int4=id | FROM macro_items WHERE category = ''books'' ORDER BY id', jsonb_build_object('k', 1)) a,
+     js_table_macro('cat_name:text=category | FROM macro_items WHERE id = 1', jsonb_build_object('k', 2)) b
+ORDER BY a.item_id;
+ item_id | cat_name 
+---------+----------
+       1 | books
+       2 | books
+(2 rows)
+
+SELECT a.cat_name, b.item_id
+FROM js_table_macro('cat_name:text=category | FROM macro_items WHERE id = 1', jsonb_build_object('k', 1)) a,
+     js_table_macro('item_id:int4=id | FROM macro_items WHERE category = ''books'' ORDER BY id', jsonb_build_object('k', 2)) b
+ORDER BY b.item_id;
+ cat_name | item_id 
+----------+---------
+ books    |       1
+ books    |       2
+(2 rows)
+
+SELECT a.item_id, a.cat_name, b.cat_label, b.game_id
+FROM js_table_macro('item_id:int4=id, cat_name:text=category | FROM macro_items WHERE id = 1', jsonb_build_object('k', 1)) a,
+     js_table_macro('cat_label:text=category, game_id:int4=id | FROM macro_items WHERE id = 3', jsonb_build_object('k', 2)) b;
+ item_id | cat_name | cat_label | game_id 
+---------+----------+-----------+---------
+       1 | books    | games     |       3
+(1 row)
+
+-- 2i. Single quotes in first 32 chars, dollar-quoted literals, and >32-char prefix multi-call mixing AS (...) and inferred columns
+SELECT * FROM js_table_macro('tag:text=''books'' | FROM macro_items WHERE id = 1');
+  tag  
+-------
+ books
+(1 row)
+
+SELECT * FROM js_table_macro($$tag:text='games' | FROM macro_items WHERE id = 3$$);
+  tag  
+-------
+ games
+(1 row)
+
+SELECT a.game_id, a.cost, b.item_id, b.item_price
+FROM js_table_macro('item_id:int4=id, item_price:numeric=price | FROM macro_items WHERE category = ''games''') AS a(game_id int, cost numeric(10, 2)),
+     js_table_macro('item_id:int4=id, item_price:numeric=price | FROM macro_items WHERE category = ''books'' ORDER BY id') b
+ORDER BY b.item_id;
+ game_id | cost  | item_id | item_price 
+---------+-------+---------+------------
+       3 | 49.00 |       1 |      19.99
+       3 | 49.00 |       2 |      29.50
+(2 rows)
+
+SELECT m.item_id, js_table_macro('cat_name:text=category | FROM macro_items WHERE id = 1', jsonb_build_object('k', 2)) AS target_srf
+FROM js_table_macro('item_id:int4=id | FROM macro_items WHERE category = ''books'' ORDER BY id', jsonb_build_object('k', 1)) m
+ORDER BY m.item_id;
+ item_id | target_srf 
+---------+------------
+       1 | (books)
+       2 | (books)
+(2 rows)
+
 -- =========================================================================
 -- 3. Custom compiled-to-JS language (`LANGUAGE pl_query_macro`) using
 --    `plv8.set_function_columns()` and `plv8.return_query()`

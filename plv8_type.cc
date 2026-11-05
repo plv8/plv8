@@ -697,10 +697,27 @@ CreateExternalArray(void *data, plv8_external_array_type array_type,
 	Local<v8::ArrayBuffer> buffer;
 	Local<v8::TypedArray> array;
 
-	buffer = v8::ArrayBuffer::New(isolate, byte_size);
-	if (buffer.IsEmpty())
+	if (byte_size < 0)
+		throw js_error("negative external array byte size");
+
+	if (byte_size > 0 && data != NULL)
 	{
-		return {};
+		std::unique_ptr<v8::BackingStore> store =
+			v8::ArrayBuffer::NewBackingStore(
+				isolate,
+				static_cast<size_t>(byte_size),
+				v8::BackingStoreInitializationMode::kUninitialized,
+				v8::BackingStoreOnFailureMode::kReturnNull);
+		if (!store)
+			throw js_error("Out of memory error");
+		// needs to be a copy, as the data could go away
+		memcpy(store->Data(), data, static_cast<size_t>(byte_size));
+		buffer = v8::ArrayBuffer::New(isolate, std::move(store));
+	}
+	else
+	{
+		if (!v8::ArrayBuffer::MaybeNew(isolate, static_cast<size_t>(byte_size)).ToLocal(&buffer))
+			throw js_error("Out of memory error");
 	}
 
 	switch (array_type)
@@ -735,10 +752,6 @@ CreateExternalArray(void *data, plv8_external_array_type array_type,
 	default:
 		throw js_error("unexpected array type");
 	}
-
-	// needs to be a copy, as the data could go away
-	if (byte_size > 0 && data != NULL)
-		memcpy(buffer->GetBackingStore()->Data(), data, byte_size);
 
 	return array;
 }
@@ -1355,9 +1368,19 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 	case BYTEAOID:
 	{
 		void	   *p = PG_DETOAST_DATUM_PACKED(datum);
-		Local<Object> result = CreateExternalArray(VARDATA_ANY(p),
-												   kExternalUnsignedByteArray,
-												   VARSIZE_ANY_EXHDR(p));
+		Local<Object> result;
+		try
+		{
+			result = CreateExternalArray(VARDATA_ANY(p),
+										 kExternalUnsignedByteArray,
+										 VARSIZE_ANY_EXHDR(p));
+		}
+		catch (...)
+		{
+			if (p != DatumGetPointer(datum))
+				pfree(p);
+			throw;
+		}
 		if (p != DatumGetPointer(datum))
 			pfree(p);
 		return result;
@@ -1410,9 +1433,19 @@ ToScalarValue(Datum datum, bool isnull, plv8_type *type)
 			if (type->len == -1)
 			{
 				void *p = PG_DETOAST_DATUM_PACKED(datum);
-				Local<Object> result = CreateExternalArray(VARDATA_ANY(p),
-														   kExternalUnsignedByteArray,
-														   VARSIZE_ANY_EXHDR(p));
+				Local<Object> result;
+				try
+				{
+					result = CreateExternalArray(VARDATA_ANY(p),
+												 kExternalUnsignedByteArray,
+												 VARSIZE_ANY_EXHDR(p));
+				}
+				catch (...)
+				{
+					if (p != DatumGetPointer(datum))
+						pfree(p);
+					throw;
+				}
 				if (p != DatumGetPointer(datum))
 					pfree(p);
 				return result;
@@ -1460,9 +1493,18 @@ ToArrayValue(Datum datum, bool isnull, plv8_type *type)
 			{
 				int			data_bytes = ARR_SIZE(array) -
 										ARR_OVERHEAD_NONULLS(1);
-				Local<Object> ext_arr = CreateExternalArray(ARR_DATA_PTR(array),
-															type->ext_array,
-															data_bytes);
+				Local<Object> ext_arr;
+				try
+				{
+					ext_arr = CreateExternalArray(ARR_DATA_PTR(array),
+												  type->ext_array,
+												  data_bytes);
+				}
+				catch (...)
+				{
+					pfree(array);
+					throw;
+				}
 				pfree(array);
 				return ext_arr;
 			}

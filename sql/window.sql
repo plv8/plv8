@@ -231,3 +231,28 @@ CREATE FUNCTION non_window() RETURNS void AS $$
 $$ LANGUAGE plv8;
 
 SELECT non_window();
+
+-- out-of-range argument numbers must raise an error, not crash the backend
+CREATE FUNCTION win_argno_current(n int) RETURNS int AS $$
+  return plv8.get_window_object().get_func_arg_current(100000);
+$$ LANGUAGE plv8 WINDOW;
+CREATE FUNCTION win_argno_neg(n int) RETURNS int AS $$
+  return plv8.get_window_object().get_func_arg_current(-1);
+$$ LANGUAGE plv8 WINDOW;
+CREATE FUNCTION win_argno_part(n int) RETURNS int AS $$
+  var w = plv8.get_window_object();
+  return w.get_func_arg_in_partition(100000, 0, w.SEEK_CURRENT, false);
+$$ LANGUAGE plv8 WINDOW;
+CREATE FUNCTION win_argno_frame(n int) RETURNS int AS $$
+  var w = plv8.get_window_object();
+  return w.get_func_arg_in_frame(-1, 0, w.SEEK_CURRENT, false);
+$$ LANGUAGE plv8 WINDOW;
+CREATE FUNCTION win_argno_ok(n int) RETURNS int AS $$
+  return plv8.get_window_object().get_func_arg_current(0);
+$$ LANGUAGE plv8 WINDOW;
+
+SELECT i, win_argno_ok(i) OVER () FROM generate_series(1,3) i;
+SELECT i, win_argno_current(i) OVER () FROM generate_series(1,3) i;
+SELECT i, win_argno_neg(i) OVER () FROM generate_series(1,3) i;
+SELECT i, win_argno_part(i) OVER () FROM generate_series(1,3) i;
+SELECT i, win_argno_frame(i) OVER () FROM generate_series(1,3) i;

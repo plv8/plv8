@@ -1616,6 +1616,21 @@ plv8_MyArgType(const FunctionCallbackInfo<v8::Value>& args, int argno)
 }
 
 /*
+ * Validate a script-supplied argument number before handing it to
+ * WinGetFuncArg*(), which only Assert()s on it.
+ */
+static inline void
+plv8_CheckArgno(const FunctionCallbackInfo<v8::Value>& args, int argno)
+{
+	FunctionCallInfo fcinfo = check_window_this(args);
+
+	if (argno < 0 || argno >= fcinfo->nargs)
+	{
+		throw js_error("argument number out of range");
+	}
+}
+
+/*
  * winobj.get_partition_local([size])
  * The default allocation size is 1K, but the caller can override this value
  * by the argument at the first call.
@@ -1839,6 +1854,8 @@ plv8_WinGetFuncArgInPartition(const FunctionCallbackInfo<v8::Value>& args)
 	bool		isnull, isout;
 	Datum		res;
 
+	plv8_CheckArgno(args, argno);
+
 	PG_TRY();
 	{
 		res = WinGetFuncArgInPartition(winobj,
@@ -1885,6 +1902,8 @@ plv8_WinGetFuncArgInFrame(const FunctionCallbackInfo<v8::Value>& args)
 	bool		isnull, isout;
 	Datum		res;
 
+	plv8_CheckArgno(args, argno);
+
 	PG_TRY();
 	{
 		res = WinGetFuncArgInFrame(winobj,
@@ -1928,6 +1947,8 @@ plv8_WinGetFuncArgCurrent(const FunctionCallbackInfo<v8::Value>& args)
 	int			argno = Plv8ToInt32(isolate, context, args[0]);
 	bool		isnull;
 	Datum		res;
+
+	plv8_CheckArgno(args, argno);
 
 	PG_TRY();
 	{

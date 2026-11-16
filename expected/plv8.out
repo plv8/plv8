@@ -113,7 +113,7 @@ SELECT text_to_int4('123');
 (1 row)
 
 SELECT text_to_int4('abc'); -- error
-ERROR:  invalid input syntax for type integer: "abc"
+ERROR:  invalid input syntax for integer: "abc"
 CREATE FUNCTION int4array_to_textarray(x int4[]) RETURNS text[] AS $$ return x; $$ LANGUAGE plv8;
 SELECT int4array_to_textarray(ARRAY[123, 456]::int4[]);
  int4array_to_textarray 
@@ -373,7 +373,7 @@ SELECT test_elog('ABC');
 NOTICE:  args = ABC
 WARNING:  warning
 INFO:  Error: ERROR
-ERROR:  FATAL is not allowed
+ERROR:  invalid error level
 CONTEXT:  test_elog() LINE 9: 	plv8.elog(21, 'FATAL is not allowed');
 -- execute()
 CREATE TABLE test_tbl (i integer, s text);

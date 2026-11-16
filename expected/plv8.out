@@ -784,3 +784,57 @@ NOTICE:  cursor.close on {}: cannot find cursor
 NOTICE:  cursor.close on plan: cannot find cursor
 NOTICE:  [{"x":1}]
 NOTICE:  {"x":1}
+-- all of the external array domains must work, including int8
+CREATE FUNCTION ext_len2(a plv8_int2array) RETURNS int AS $$ return a.length; $$ LANGUAGE plv8;
+CREATE FUNCTION ext_len4(a plv8_int4array) RETURNS int AS $$ return a.length; $$ LANGUAGE plv8;
+CREATE FUNCTION ext_len8(a plv8_int8array) RETURNS int AS $$ return a.length; $$ LANGUAGE plv8;
+CREATE FUNCTION ext_lenf4(a plv8_float4array) RETURNS int AS $$ return a.length; $$ LANGUAGE plv8;
+CREATE FUNCTION ext_lenf8(a plv8_float8array) RETURNS int AS $$ return a.length; $$ LANGUAGE plv8;
+SELECT ext_len2(ARRAY[1,2,3]::int2[]), ext_len4(ARRAY[1,2,3]::int4[]),
+       ext_len8(ARRAY[1,2,3]::int8[]), ext_lenf4(ARRAY[1,2,3]::float4[]),
+       ext_lenf8(ARRAY[1,2,3]::float8[]);
+ ext_len2 | ext_len4 | ext_len8 | ext_lenf4 | ext_lenf8 
+----------+----------+----------+-----------+-----------
+        3 |        3 |        3 |         3 |         3
+(1 row)
+
+CREATE FUNCTION ext_sum8(a plv8_int8array) RETURNS text AS $$
+  var s = 0n;
+  for (var i = 0; i < a.length; i++) s += a[i];
+  return s.toString();
+$$ LANGUAGE plv8;
+SELECT ext_sum8(ARRAY[1, 2, 9223372036854775800]::int8[]);
+      ext_sum8       
+---------------------
+ 9223372036854775803
+(1 row)
+
+-- an external array handed back for the type it came from still round-trips
+CREATE FUNCTION ext_roundtrip4(a plv8_int4array) RETURNS int[] AS $$ return a; $$ LANGUAGE plv8;
+SELECT ext_roundtrip4(ARRAY[1,2,3]::int4[]);
+ ext_roundtrip4 
+----------------
+ {1,2,3}
+(1 row)
+
+-- a typed array must never be reinterpreted as a datum of a different type
+CREATE FUNCTION confuse_bytea_as_int4(b bytea) RETURNS int[] AS $$ return b; $$ LANGUAGE plv8;
+SELECT confuse_bytea_as_int4('\x0102030405060708090a0b0c0d0e0f1011121314'::bytea);
+ERROR:  value is not an Array
+CREATE FUNCTION confuse_int4_as_float8(a plv8_int4array) RETURNS float8[] AS $$ return a; $$ LANGUAGE plv8;
+SELECT confuse_int4_as_float8(ARRAY[1,2,3]::int4[]);
+ERROR:  value is not an Array
+CREATE FUNCTION confuse_int4_as_bytea(a plv8_int4array) RETURNS bytea AS $$ return a; $$ LANGUAGE plv8;
+SELECT confuse_int4_as_bytea(ARRAY[1,2,3]::int4[]) IS NOT NULL;
+ ?column? 
+----------
+ t
+(1 row)
+
+CREATE FUNCTION bytea_roundtrip(b bytea) RETURNS bytea AS $$ return b; $$ LANGUAGE plv8;
+SELECT bytea_roundtrip('\x010203'::bytea);
+ bytea_roundtrip 
+-----------------
+ \x010203
+(1 row)
+

@@ -656,10 +656,17 @@ CreateExternalArray(void *data, plv8_external_array_type array_type,
 		break;
 	case kExternalInt64Array:
 		array = v8::BigInt64Array::New(buffer, 0, byte_size / sizeof(int64));
+		break;
 	default:
 		throw js_error("unexpected array type");
 	}
+	if (array->InternalFieldCount() < 2)
+	{
+		throw js_error("unexpected typed array layout");
+	}
 	array->SetInternalField(0, External::New(isolate, DatumGetPointer(datum)));
+	/* Remember what kind of datum field 0 points to; see ExtractExternalArrayDatum(). */
+	array->SetInternalField(1, Int32::New(isolate, array_type));
 
 	// needs to be a copy, as the data could go away
 	memcpy(buffer->GetBackingStore()->Data(), data, byte_size);
@@ -667,8 +674,14 @@ CreateExternalArray(void *data, plv8_external_array_type array_type,
 	return array;
 }
 
+/*
+ * Return the datum behind a typed array created by CreateExternalArray().
+ * That datum is a bytea for a Uint8Array made from a bytea and an array for
+ * every other kind, so the caller says which one it can accept
+ * (want_bytea); anything else would be misread as the wrong type.
+ */
 static void *
-ExtractExternalArrayDatum(Handle<v8::Value> value)
+ExtractExternalArrayDatum(Handle<v8::Value> value, bool want_bytea)
 {
 	if (value->IsUndefined() || value->IsNull()) {
 		return NULL;
@@ -682,8 +695,16 @@ ExtractExternalArrayDatum(Handle<v8::Value> value)
 		 * Only arrays created by CreateExternalArray() carry a datum pointer.
 		 * Typed arrays created in JavaScript do not, so don't trust field 0.
 		 */
-		if (object->InternalFieldCount() < 1 ||
-			!object->GetInternalField(0)->IsExternal())
+		if (object->InternalFieldCount() < 2 ||
+			!object->GetInternalField(0)->IsExternal() ||
+			!object->GetInternalField(1)->IsInt32())
+		{
+			return NULL;
+		}
+
+		bool is_bytea = object->GetInternalField(1).As<Int32>()->Value() ==
+							kExternalUnsignedByteArray;
+		if (is_bytea != want_bytea)
 		{
 			return NULL;
 		}
@@ -804,7 +825,7 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 				return PointerGetDatum(result);
 			}
 
-			void *datum_p = ExtractExternalArrayDatum(value);
+			void *datum_p = ExtractExternalArrayDatum(value, true);
 
 			if (datum_p)
 			{
@@ -887,7 +908,24 @@ ToArrayDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 		return (Datum) 0;
 	}
 
-	void *datum_p = ExtractExternalArrayDatum(value);
+	void *datum_p = ExtractExternalArrayDatum(value, false);
+
+	/*
+	 * The array must also have the element type being returned.  For an
+	 * ordinary array type typid is already the element type; the external
+	 * array domains keep the domain's own type.
+	 */
+	if (datum_p)
+	{
+		Oid			elemtype = type->ext_array ?
+							get_element_type(getBaseType(type->typid)) :
+							type->typid;
+
+		if (ARR_ELEMTYPE((ArrayType *) datum_p) != elemtype)
+		{
+			datum_p = NULL;
+		}
+	}
 	if (datum_p)
 	{
 		*isnull = false;

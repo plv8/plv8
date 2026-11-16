@@ -28,7 +28,7 @@ else
 	UNAME_S := $(shell uname -s)
 	ifeq ($(UNAME_S),Darwin)
 		CCFLAGS += -stdlib=libc++
-		SHLIB_LINK += -stdlib=libc++ -std=c++20 -lc++
+		SHLIB_LINK += -stdlib=libc++ -std=c++20 -lc++ -framework CoreFoundation
 		NUMPROC := $(shell sysctl hw.ncpu | awk '{print $$2}')
 	endif
 	ifeq ($(UNAME_S),Linux)

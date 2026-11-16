@@ -456,3 +456,33 @@ alter table plv8test drop column repro1;
 -- dropped columns should work with trigger
 update plv8test set repro2='test';
 
+
+-- plan and cursor methods must reject a foreign "this" instead of crashing
+DO $$
+  var p = plv8.prepare('select 1 as x');
+  var c = p.cursor();
+  var tests = {
+    'plan.execute on {}': function() { p.execute.call({}); },
+    'plan.execute on cursor': function() { p.execute.call(c); },
+    'plan.cursor on cursor': function() { p.cursor.call(c); },
+    'plan.free on cursor': function() { p.free.call(c); },
+    'cursor.fetch on {}': function() { c.fetch.call({}); },
+    'cursor.fetch on plan': function() { c.fetch.call(p); },
+    'cursor.move on plan': function() { c.move.call(p, 1); },
+    'cursor.close on {}': function() { c.close.call({}); },
+    'cursor.close on plan': function() { c.close.call(p); }
+  };
+  for (var name in tests) {
+    try {
+      tests[name]();
+      plv8.elog(NOTICE, name + ': no error');
+    } catch (e) {
+      plv8.elog(NOTICE, name + ': ' + e.message);
+    }
+  }
+  // the real objects are still usable
+  plv8.elog(NOTICE, JSON.stringify(p.execute()));
+  plv8.elog(NOTICE, JSON.stringify(c.fetch()));
+  c.close();
+  p.free();
+$$ LANGUAGE plv8;

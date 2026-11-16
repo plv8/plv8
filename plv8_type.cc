@@ -164,11 +164,8 @@ GetJsonbValue(JsonbValue *scalarVal) {
   if (scalarVal->type == jbvNull) {
 		return Local<v8::Value>::New(isolate, Null(isolate));
   } else if (scalarVal->type == jbvString) {
-    char t[ scalarVal->val.string.len + 1 ];
-    strncpy(t, scalarVal->val.string.val, scalarVal->val.string.len);
-    t[ scalarVal->val.string.len ] = '\0';
-
-		return Local<v8::Value>::New(isolate, v8::String::NewFromUtf8(isolate, t).ToLocalChecked());
+    /* The string is length-delimited; pass the length rather than copying it to the stack. */
+		return Local<v8::Value>::New(isolate, v8::String::NewFromUtf8(isolate, scalarVal->val.string.val, v8::NewStringType::kNormal, scalarVal->val.string.len).ToLocalChecked());
   } else if (scalarVal->type == jbvNumeric) {
 		return Local<v8::Value>::New(isolate, Number::New(isolate, DatumGetFloat8(DirectFunctionCall1(numeric_float8, PointerGetDatum(scalarVal->val.numeric)))));
   } else if (scalarVal->type == jbvBool) {
@@ -377,18 +374,52 @@ static void LogType(Local<v8::Value> val, bool asError = true) {
 	  elog((asError ? ERROR : NOTICE), "Unaccounted for type: Shared Buffer Array");
 }
 
+/*
+ * Format epoch milliseconds like JavaScript's Date.prototype.toISOString():
+ * YYYY-MM-DDTHH:MM:SS.sssZ, or +/-YYYYYY-... outside of years 0000-9999.
+ * Handles dates before 1970 and the full +/-8.64e15 ms range, which
+ * gmtime()/strftime() cannot do safely.  The result is NUL terminated and
+ * palloc'd; use strlen() for its length.
+ */
 static char *
 TimeAs8601 (double millis) {
-	char tmp[100];
-	char *buf = (char *)palloc(25);
+	char *buf = (char *)palloc(40);
 
-	time_t t = (time_t) (millis / 1000);
-	strftime (tmp, 25, "%Y-%m-%dT%H:%M:%S", gmtime(&t));
+	int64 total = (int64) floor(millis);
+	int64 days = total / 86400000;
+	int64 msofday = total % 86400000;
+	if (msofday < 0) {
+		msofday += 86400000;
+		days--;
+	}
 
-	double integral;
-	double fractional = modf(millis / 1000, &integral);
+	/* civil-from-days, proleptic Gregorian calendar */
+	int64 z = days + 719468;
+	int64 era = (z >= 0 ? z : z - 146096) / 146097;
+	int64 doe = z - era * 146097;
+	int64 yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	int64 year = yoe + era * 400;
+	int64 doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	int64 mp = (5 * doy + 2) / 153;
+	int day = (int) (doy - (153 * mp + 2) / 5 + 1);
+	int month = (int) (mp < 10 ? mp + 3 : mp - 9);
+	if (month <= 2) {
+		year++;
+	}
 
-	sprintf(buf, "%s.%03dZ", tmp, (int) (fractional * 1000));
+	int hour = (int) (msofday / 3600000);
+	int minute = (int) ((msofday / 60000) % 60);
+	int second = (int) ((msofday / 1000) % 60);
+	int ms = (int) (msofday % 1000);
+
+	if (year >= 0 && year <= 9999) {
+		snprintf(buf, 40, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+				 (int) year, month, day, hour, minute, second, ms);
+	} else {
+		snprintf(buf, 40, "%c%06d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+				 year < 0 ? '-' : '+', (int) (year < 0 ? -year : year),
+				 month, day, hour, minute, second, ms);
+	}
 
 	return buf;
 }
@@ -443,7 +474,7 @@ JsonbFromValue(JsonbParseState **pstate, Local<v8::Value> value, JsonbIteratorTo
 				val.type = jbvNull;
 			} else {
 				val.val.string.val = TimeAs8601(t);
-				val.val.string.len = 24;
+				val.val.string.len = strlen(val.val.string.val);
 				val.type = jbvString;
 			}
 		} else {
@@ -646,6 +677,16 @@ ExtractExternalArrayDatum(Handle<v8::Value> value)
 	if (value->IsTypedArray())
 	{
 		Handle<Object> object = Handle<Object>::Cast(value);
+
+		/*
+		 * Only arrays created by CreateExternalArray() carry a datum pointer.
+		 * Typed arrays created in JavaScript do not, so don't trust field 0.
+		 */
+		if (object->InternalFieldCount() < 1 ||
+			!object->GetInternalField(0)->IsExternal())
+		{
+			return NULL;
+		}
 		return Handle<External>::Cast(object->GetInternalField(0))->Value();
 	}
 
@@ -739,46 +780,15 @@ ToScalarDatum(Handle<v8::Value> value, bool *isnull, plv8_type *type)
 		break;
 	case BYTEAOID:
 		{
-			if (value->IsUint8Array() || value->IsInt8Array()) {
-				v8::Handle<v8::Uint8Array> array = v8::Handle<v8::Uint8Array>::Cast(value);
-				void *data = array->Buffer()->GetBackingStore()->Data();
-				size_t    offset = array->ByteOffset();
-				size_t		len = array->Length();
+			if (value->IsArrayBufferView()) {
+				/* any typed array or DataView: copy its bytes as they are */
+				v8::Handle<v8::ArrayBufferView> view = v8::Handle<v8::ArrayBufferView>::Cast(value);
+				size_t		len = view->ByteLength();
 				size_t		size = len + VARHDRSZ;
 				void	   *result = (void *) palloc(size);
 
 				SET_VARSIZE(result, size);
-				char *local = (char *) data;
-				memcpy(VARDATA(result), &local[offset], len);
-				return PointerGetDatum(result);
-			}
-
-			if (value->IsUint16Array() || value->IsInt16Array()) {
-				v8::Handle<v8::Uint16Array> array = v8::Handle<v8::Uint16Array>::Cast(value);
-				int *data = (int *) array->Buffer()->GetBackingStore()->Data();
-
-				size_t    offset = array->ByteOffset();
-				size_t    len = array->ByteLength();
-				size_t    size = len + VARHDRSZ;
-				void	   *result = (void *) palloc(size);
-
-				SET_VARSIZE(result, size);
-				char *local = (char *) data;
-				memcpy(VARDATA(result), &local[offset], len);
-				return PointerGetDatum(result);
-			}
-
-			if (value->IsUint32Array() || value->IsInt32Array()) {
-				v8::Handle<v8::Uint32Array> array = v8::Handle<v8::Uint32Array>::Cast(value);
-				void *data = array->Buffer()->GetBackingStore()->Data();
-				size_t    offset = array->ByteOffset();
-				size_t    len = array->ByteLength();
-				size_t    size = len + VARHDRSZ;
-				void	   *result = (void *) palloc(size);
-
-				SET_VARSIZE(result, size);
-				char *local = (char *) data;
-				memcpy(VARDATA(result), &local[offset], len);
+				view->CopyContents(VARDATA(result), len);
 				return PointerGetDatum(result);
 			}
 

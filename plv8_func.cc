@@ -1219,6 +1219,27 @@ plv8_MyArgType(const FunctionCallbackInfo<v8::Value>& args, int argno)
 }
 
 /*
+ * Validate a script-supplied argument number before handing it to
+ * WinGetFuncArg*(), which only Assert()s on it.
+ */
+static inline void
+plv8_CheckArgno(const FunctionCallbackInfo<v8::Value>& args, int argno)
+{
+	Handle<v8::Object>	self = args.This();
+	FunctionCallInfo fcinfo = static_cast<FunctionCallInfo>(
+			Handle<External>::Cast(self->GetInternalField(0))->Value());
+
+	if (fcinfo == NULL)
+	{
+		throw js_error("window function api called with wrong object");
+	}
+	if (argno < 0 || argno >= fcinfo->nargs)
+	{
+		throw js_error("argument number out of range");
+	}
+}
+
+/*
  * winobj.get_partition_local([size])
  * The default allocation size is 1K, but the caller can override this value
  * by the argument at the first call.
@@ -1438,6 +1459,8 @@ plv8_WinGetFuncArgInPartition(const FunctionCallbackInfo<v8::Value>& args)
 	bool		isnull, isout;
 	Datum		res;
 
+	plv8_CheckArgno(args, argno);
+
 	PG_TRY();
 	{
 		res = WinGetFuncArgInPartition(winobj,
@@ -1483,6 +1506,8 @@ plv8_WinGetFuncArgInFrame(const FunctionCallbackInfo<v8::Value>& args)
 	bool		isnull, isout;
 	Datum		res;
 
+	plv8_CheckArgno(args, argno);
+
 	PG_TRY();
 	{
 		res = WinGetFuncArgInFrame(winobj,
@@ -1525,6 +1550,8 @@ plv8_WinGetFuncArgCurrent(const FunctionCallbackInfo<v8::Value>& args)
 	int			argno = args[0]->Int32Value(isolate->GetCurrentContext()).ToChecked();
 	bool		isnull;
 	Datum		res;
+
+	plv8_CheckArgno(args, argno);
 
 	PG_TRY();
 	{
